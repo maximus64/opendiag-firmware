@@ -1,0 +1,16 @@
+# Configuration files
+sdkconfig
+sdkconfig.old
+
+# Production folder
+build/
+
+# Host test build trees
+build-cov/
+
+# HTML documentation
+html_doc/
+
+managed_components/
+
+.DS_Store
