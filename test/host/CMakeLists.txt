@@ -94,6 +94,7 @@ set(SUITES
     test_vif_link
     test_vif_ctrl
     test_slcan
+    test_j2534
     test_button
     test_can_driver
     test_kline_driver
@@ -148,6 +149,14 @@ set(test_slcan_FW
     ${FW_DIR}/utility.c
     ${FW_DIR}/vif.c
 )
+set(NANOPB_DIR ${FW_DIR}/../components/nanopb/upstream)
+if(NOT EXISTS "${NANOPB_DIR}/pb.h")
+    message(FATAL_ERROR "Nanopb submodule missing. Run: git submodule update --init --recursive")
+endif()
+include_directories(${NANOPB_DIR})
+set(test_j2534_FW ${test_slcan_FW} ${FW_DIR}/j2534.c
+    ${FW_DIR}/j2534_wire.c ${FW_DIR}/j2534.pb.c ${FW_DIR}/isotp.c
+    ${NANOPB_DIR}/pb_common.c ${NANOPB_DIR}/pb_encode.c ${NANOPB_DIR}/pb_decode.c)
 
 if(COVERAGE)
     if(CMAKE_C_COMPILER_ID MATCHES "Clang")

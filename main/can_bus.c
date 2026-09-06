@@ -9,6 +9,7 @@
 #include "freertos/task.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_twai.h"
 #include "esp_twai_onchip.h"
 #include "driver/gpio.h"
@@ -40,10 +41,18 @@
 #define CAN_TX_TIMEOUT_MS 1000
 
 static twai_node_handle_t can_node;
+typedef struct {
+    struct can_frame frame;
+    uint32_t timestamp_us;
+    uint16_t status;
+} can_rx_record_t;
 static QueueHandle_t rx_frame_queue;
+static bool rx_overflow_pending;
 static TaskHandle_t can_bus_task_handle;
 static bool task_should_exit;
 static bool can_started;
+static bool manual_recovery;
+static bool link_down_pending;
 static portMUX_TYPE task_notify_lock = portMUX_INITIALIZER_UNLOCKED;
 static SemaphoreHandle_t task_exit_semaphore = NULL;
 
@@ -110,15 +119,23 @@ static const char *can_get_state_str(twai_error_state_t state) {
     }
 }
 
+static int receive_record(can_rx_record_t *record, TickType_t ticks_to_wait) {
+    if (!can_started || record == NULL || rx_frame_queue == NULL) {
+        return -1;
+    }
+
+    if (xQueueReceive(rx_frame_queue, record, ticks_to_wait) != pdTRUE) {
+        return -1;
+    }
+
+    return 0;
+}
+
 int can_receive(struct can_frame *frame, TickType_t ticks_to_wait) {
-    if (!can_started || frame == NULL || rx_frame_queue == NULL) {
+    can_rx_record_t record;
+    if (!frame || receive_record(&record, ticks_to_wait))
         return -1;
-    }
-
-    if (xQueueReceive(rx_frame_queue, frame, ticks_to_wait) != pdTRUE) {
-        return -1;
-    }
-
+    *frame = record.frame;
     return 0;
 }
 
@@ -225,25 +242,29 @@ static bool can_rx_done(twai_node_handle_t node,
         .buffer = buffer,
         .buffer_len = sizeof(buffer),
     };
-    struct can_frame frame = {0};
+    can_rx_record_t record = {.timestamp_us = (uint32_t)esp_timer_get_time()};
 
     if (twai_node_receive_from_isr(node, &rx) != ESP_OK) {
         return false;
     }
 
-    frame.id = rx.header.id;
-    frame.id |= rx.header.ide ? CAN_EFF_FLAG : 0;
-    frame.id |= rx.header.rtr ? CAN_RTR_FLAG : 0;
-    frame.dlc = rx.header.dlc;
+    record.frame.id = rx.header.id;
+    record.frame.id |= rx.header.ide ? CAN_EFF_FLAG : 0;
+    record.frame.id |= rx.header.rtr ? CAN_RTR_FLAG : 0;
+    record.frame.dlc = rx.header.dlc;
 
     /* copy data with bounds checking */
     size_t copy_len = (rx.header.dlc > 8) ? 8 : rx.header.dlc;
-    memcpy(frame.data, buffer, copy_len);
+    memcpy(record.frame.data, buffer, copy_len);
+    record.status = rx_overflow_pending ? BUS_RX_BUFFER_OVERFLOW : 0;
 
     /* No waiting here, and nothing that could wait: a client that has stopped
      * draining the queue must cost frames, not the interrupt. */
-    if (xQueueSendFromISR(rx_frame_queue, &frame, &task_woken) != pdTRUE) {
+    if (xQueueSendFromISR(rx_frame_queue, &record, &task_woken) != pdTRUE) {
         rx_dropped++;
+        rx_overflow_pending = true;
+    } else {
+        rx_overflow_pending = false;
     }
 
     return task_woken == pdTRUE;
@@ -268,6 +289,8 @@ static bool can_state_change(twai_node_handle_t node,
     BaseType_t task_woken = pdFALSE;
     bool crossed = (edata->new_sta == TWAI_ERROR_BUS_OFF) ||
                    (edata->old_sta == TWAI_ERROR_BUS_OFF);
+    if (manual_recovery && edata->new_sta == TWAI_ERROR_BUS_OFF)
+        __atomic_store_n(&link_down_pending, true, __ATOMIC_RELEASE);
 
     portENTER_CRITICAL_ISR(&task_notify_lock);
     if (crossed && !__atomic_load_n(&task_should_exit, __ATOMIC_ACQUIRE) &&
@@ -309,6 +332,8 @@ static void can_bus_task(void *param) {
         }
 
         ESP_LOGE(TAG, "Bus Off state");
+        if (manual_recovery)
+            continue;
         ESP_LOGI(TAG, "Initiate bus recovery");
 
         err = twai_node_recover(can_node);
@@ -409,7 +434,7 @@ static uint16_t can_sample_point_permille(int baud_rate) {
     return (baud_rate == 50000) ? 800 : 750;
 }
 
-esp_err_t can_bus_setup(int baud_rate) {
+static esp_err_t can_setup(int baud_rate, bool manual) {
     esp_err_t err;
 
     if (can_bus_task_handle || can_node || rx_frame_queue ||
@@ -429,6 +454,8 @@ esp_err_t can_bus_setup(int baud_rate) {
         ESP_LOGE(TAG, "Unsupported CAN baud rate %d\n", baud_rate);
         return ESP_ERR_INVALID_ARG;
     }
+    manual_recovery = manual;
+    __atomic_store_n(&link_down_pending, false, __ATOMIC_RELAXED);
 
     twai_onchip_node_config_t node_config = {
         .io_cfg =
@@ -458,7 +485,8 @@ esp_err_t can_bus_setup(int baud_rate) {
      * drains by the client above: the SLCAN front-end empties this every 2 ms,
      * and a bus of back-to-back minimum length frames produces about 21 in
      * that time. */
-    rx_frame_queue = xQueueCreate(CAN_RX_QUEUE_LEN, sizeof(struct can_frame));
+    rx_overflow_pending = false;
+    rx_frame_queue = xQueueCreate(CAN_RX_QUEUE_LEN, sizeof(can_rx_record_t));
     task_exit_semaphore = xSemaphoreCreateBinary();
     if (rx_frame_queue == NULL || task_exit_semaphore == NULL) {
         ESP_LOGE(
@@ -564,6 +592,8 @@ esp_err_t can_bus_teardown(void) {
  * translate: the length code goes in len, the id and its flags in id.
  * ------------------------------------------------------------------ */
 
+esp_err_t can_bus_setup(int baud_rate) { return can_setup(baud_rate, false); }
+
 static esp_err_t can_ops_open(const bus_cfg_t *cfg) {
     /* The controller takes its rate at install time and cannot be retimed
      * while up, so a claim without one is refused here rather than later. */
@@ -572,7 +602,7 @@ static esp_err_t can_ops_open(const bus_cfg_t *cfg) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    return can_bus_setup((int)cfg->bitrate);
+    return can_setup((int)cfg->bitrate, cfg->manual_recovery);
 }
 
 static esp_err_t can_ops_close(void) { return can_bus_teardown(); }
@@ -615,12 +645,20 @@ static int can_ops_send(const bus_msg_t *msg, uint32_t flags) {
 }
 
 static int can_ops_recv(bus_msg_t *msg, TickType_t wait) {
-    struct can_frame f;
+    can_rx_record_t record;
     size_t len;
 
-    if (can_receive(&f, wait) != 0) {
+    if (__atomic_exchange_n(&link_down_pending, false, __ATOMIC_ACQUIRE)) {
+        msg->len = 0;
+        msg->status = BUS_RX_LINK_DOWN;
+        msg->timestamp_us = (uint32_t)esp_timer_get_time();
+        return 0;
+    }
+
+    if (receive_record(&record, wait) != 0) {
         return BUS_ERR_TIMEOUT;
     }
+    const struct can_frame f = record.frame;
 
     len = (f.dlc > 8) ? 8 : f.dlc;
     if (f.id & CAN_RTR_FLAG) {
@@ -633,11 +671,34 @@ static int can_ops_recv(bus_msg_t *msg, TickType_t wait) {
     memcpy(msg->data, f.data, len);
     msg->id = f.id;
     msg->len = f.dlc;
+    msg->timestamp_us = record.timestamp_us;
+    msg->status = record.status;
 
     return (int)len;
 }
 
-/* set_param, get_param and ioctl stay NULL: the rate is fixed at open and
+static int can_ops_ioctl(bus_ioctl_t id, const void *in, void *out) {
+    if (id != BUS_IOCTL_BUS_ON)
+        return BUS_ERR_UNSUPPORTED;
+    if (!can_started || !can_node)
+        return BUS_ERR_NOT_READY;
+    twai_node_status_t status;
+    if (twai_node_get_info(can_node, &status, NULL) != ESP_OK)
+        return BUS_ERR_INIT;
+    if (status.state != TWAI_ERROR_BUS_OFF)
+        return 0;
+    if (twai_node_recover(can_node) != ESP_OK)
+        return BUS_ERR_INIT;
+    for (unsigned i = 0; i < 100; i++) {
+        if (twai_node_get_info(can_node, &status, NULL) == ESP_OK &&
+            status.state != TWAI_ERROR_BUS_OFF)
+            return 0;
+        vTaskDelay(pdMS_TO_TICKS(1) ? pdMS_TO_TICKS(1) : 1);
+    }
+    return BUS_ERR_INIT;
+}
+
+/* set_param and get_param stay NULL: the rate is fixed at open and
  * the rest of bus_param_t is byte bus timing. The generic calls answer
  * BUS_ERR_UNSUPPORTED for them, which is the honest answer. Statistics come
  * from the controller instead, through can_print_stat(). */
@@ -647,4 +708,5 @@ const bus_ops_t can_bus_ops = {
     .close = can_ops_close,
     .send = can_ops_send,
     .recv = can_ops_recv,
+    .ioctl = can_ops_ioctl,
 };

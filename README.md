@@ -18,6 +18,12 @@ found on an OBD-II connector.
 
 ## Building
 
+Initialize the pinned upstream dependencies before firmware or host builds:
+
+```bash
+git submodule update --init --recursive
+```
+
 This is an [ESP-IDF](https://docs.espressif.com/projects/esp-idf/) project, developed against
 IDF v6.1. Install and activate the toolchain first:
 
@@ -72,11 +78,8 @@ Implemented and working:
 
 Not yet implemented:
 
-- Protocols 4 and 5 (ISO 14230-4 KWP, 5-baud and fast init)
 - Protocols 10–12 (SAE J1939, USER1, USER2)
-- Automatic protocol search
 - The second CAN transceiver
-- Sharing one bus between two links at once — the second client to ask for CAN is refused
 - A persistent per-link default, so a bench unit has to be told `mode usb slcan` after each
   power cycle
 

@@ -1,0 +1,14 @@
+opendiag.Message.data max_size:4128
+opendiag.Connect.pins max_count:2
+opendiag.LogicalConnect.local_address max_size:5
+opendiag.LogicalConnect.remote_address max_size:5
+opendiag.Filter.mask max_size:12
+opendiag.Filter.pattern max_size:12
+opendiag.Ioctl.config max_count:32
+opendiag.Ioctl.data max_size:255
+opendiag.Select.channels max_count:5
+opendiag.Capabilities.protocols max_count:6
+opendiag.Response.config max_count:32
+opendiag.Response.data max_size:255
+opendiag.Response.channels max_count:5
+opendiag.Response.text max_length:127

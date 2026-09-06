@@ -7,6 +7,9 @@ idf_component_register(SRCS main.c
                             board.c
                             button.c
                             slcan.c
+                            j2534.c
+                            j2534_wire.c
+                            j2534.pb.c
                             usb_cdc.c
                             ble_uart.c
                             can_bus.c
@@ -24,6 +27,7 @@ idf_component_register(SRCS main.c
                             vif.c
                             vif_ctrl.c
                        PRIV_REQUIRES
+                            nanopb
                             esp_hal_usb
                             spi_flash
                             bt

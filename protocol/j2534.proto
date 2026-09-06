@@ -1,0 +1,115 @@
+// SPDX-License-Identifier: GPL-3.0-only
+syntax = "proto3";
+package opendiag;
+
+message Empty {}
+message Target { uint32 id = 1; }
+message Object { uint32 channel = 1; uint32 id = 2; }
+message Config { uint32 parameter = 1; uint32 value = 2; }
+message Message {
+  uint32 protocol = 1;
+  uint32 handle = 2;
+  uint32 rx_status = 3;
+  uint32 tx_flags = 4;
+  uint32 timestamp_us = 5;
+  uint32 extra_data_index = 6;
+  bytes data = 7;
+}
+message Connect {
+  uint32 device = 1;
+  uint32 protocol = 2;
+  uint32 flags = 3;
+  uint32 baudrate = 4;
+  uint32 connector = 5;
+  repeated uint32 pins = 6;
+}
+message LogicalConnect {
+  uint32 physical = 1;
+  uint32 protocol = 2;
+  uint32 flags = 3;
+  uint32 local_flags = 4;
+  uint32 remote_flags = 5;
+  bytes local_address = 6;
+  bytes remote_address = 7;
+}
+message Queue { uint32 channel = 1; Message message = 2; }
+message Periodic {
+  uint32 channel = 1;
+  uint32 interval_ms = 2;
+  Message message = 3;
+}
+message Filter {
+  uint32 channel = 1;
+  uint32 type = 2;
+  uint32 flags = 3;
+  bytes mask = 4;
+  bytes pattern = 5;
+}
+message Voltage {
+  uint32 device = 1;
+  uint32 connector = 2;
+  uint32 pin = 3;
+  uint32 millivolts = 4;
+}
+message Ioctl {
+  uint32 target = 1;
+  uint32 id = 2;
+  repeated Config config = 3;
+  bytes data = 4;
+  uint32 connector = 5;
+  uint32 pin = 6;
+}
+message Select { uint32 type = 1; repeated uint32 channels = 2; }
+message Request {
+  oneof command {
+    Empty capabilities = 1;
+    Empty open = 2;
+    Target close = 3;
+    Connect connect = 4;
+    Target disconnect = 5;
+    Target read = 6;
+    Periodic start_periodic = 8;
+    Object stop_periodic = 9;
+    Filter start_filter = 10;
+    Object stop_filter = 11;
+    Voltage voltage = 12;
+    Target version = 13;
+    Empty last_error = 14;
+    Ioctl ioctl = 15;
+    Queue queue = 16;
+    LogicalConnect logical_connect = 19;
+    Target logical_disconnect = 20;
+    Select select = 21;
+  }
+}
+message ProtocolLimit {
+  uint32 protocol = 1;
+  uint32 max_tx_data = 2;
+  uint32 max_rx_data = 3;
+}
+message Capabilities {
+  uint32 wire_version = 1;
+  uint32 api_version = 2;
+  uint32 physical_channels = 3;
+  uint32 logical_channels = 4;
+  uint32 filters_per_channel = 5;
+  uint32 periodic_per_channel = 6;
+  uint32 fragment_bytes = 7;
+  uint32 rpc_bytes = 8;
+  uint32 rx_queue_bytes = 9;
+  uint32 tx_queue_messages = 10;
+  repeated ProtocolLimit protocols = 11;
+  bool full_j2534_compliance = 12;
+}
+message Response {
+  uint32 status = 1;
+  uint32 id = 2;
+  uint32 count = 3;
+  Message message = 4;
+  repeated Config config = 5;
+  bytes data = 6;
+  repeated uint32 channels = 7;
+  string text = 8;
+  Capabilities capabilities = 9;
+  uint32 millivolts = 10;
+}

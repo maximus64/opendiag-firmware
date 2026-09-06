@@ -15,7 +15,8 @@
  * are configured after open(), through set_param() and ioctl().
  */
 typedef struct {
-    uint32_t bitrate; /* Bits per second. */
+    uint32_t bitrate;     /* Bits per second. */
+    bool manual_recovery; /* CAN bus-off recovery requires BUS_ON (J2534). */
 } bus_cfg_t;
 
 typedef struct {
@@ -50,6 +51,7 @@ typedef struct {
 #define BUS_RX_PERIODIC_REPLY (1u << 5)
 /* A repeat of the message before it, inside the duplicate window. */
 #define BUS_RX_DUPLICATE (1u << 6)
+#define BUS_RX_LINK_DOWN (1u << 7)
 
 /* Transmit flags */
 /*
@@ -237,6 +239,9 @@ typedef enum {
     BUS_IOCTL_ADD_FUNCT_ADDR = 0x0C,
     /** Remove one. in: const uint8_t *. J1850. */
     BUS_IOCTL_DEL_FUNCT_ADDR = 0x0D,
+
+    /** CAN: explicitly recover from bus-off. No input or output. */
+    BUS_IOCTL_BUS_ON = 0x0F,
 
     /* --- Past J2534-1, in the vendor space --- */
 

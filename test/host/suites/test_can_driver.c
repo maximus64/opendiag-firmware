@@ -6,6 +6,7 @@
 #include "can_bus.h"
 #include "driver/gpio.h"
 #include "driver_rtos.h"
+#include "fake_clock.h"
 #include "pinout.h"
 #include "td_test.h"
 
@@ -29,6 +30,8 @@ static bool complete_on_poll;
 static int silent;
 static twai_event_callbacks_t callbacks;
 static int node_token;
+static bool forced_bus_off;
+static unsigned recover_calls;
 static const twai_frame_t *pending_tx[8];
 static unsigned pending_count, wire_count;
 static uint32_t last_wire_id;
@@ -84,7 +87,11 @@ esp_err_t twai_node_delete(twai_node_handle_t node) {
     pending_count = 0;
     return ESP_OK;
 }
-esp_err_t twai_node_recover(twai_node_handle_t node) { return ESP_OK; }
+esp_err_t twai_node_recover(twai_node_handle_t node) {
+    recover_calls++;
+    forced_bus_off = false;
+    return ESP_OK;
+}
 esp_err_t twai_node_transmit(twai_node_handle_t node, const twai_frame_t *frame,
                              int ms) {
     CALL(TRANSMIT);
@@ -127,7 +134,8 @@ esp_err_t twai_node_get_info(twai_node_handle_t node,
     CALL(GET_INFO);
     if (status) {
         memset(status, 0, sizeof(*status));
-        status->state = node_enabled ? TWAI_ERROR_ACTIVE : TWAI_ERROR_BUS_OFF;
+        status->state = node_enabled && !forced_bus_off ? TWAI_ERROR_ACTIVE
+                                                        : TWAI_ERROR_BUS_OFF;
     }
     if (record)
         memset(record, 0, sizeof(*record));
@@ -136,6 +144,8 @@ esp_err_t twai_node_get_info(twai_node_handle_t node,
 
 void td_setup(void) {
     driver_rtos_reset();
+    forced_bus_off = false;
+    recover_calls = 0;
     memset(result, 0, sizeof(result));
     memset(calls, 0, sizeof(calls));
     memset(&callbacks, 0, sizeof(callbacks));
@@ -468,4 +478,45 @@ TEST(diagnostic_counters_reset_when_a_new_can_session_opens) {
     TEST_ASSERT_NOT_NULL(strstr(stats, "arb_lost_count: 0\n"));
     TEST_ASSERT_NOT_NULL(strstr(stats, "ack_error_count: 0\n"));
     TEST_ASSERT_NOT_NULL(strstr(stats, "tx_failed_count: 0\n"));
+}
+
+TEST(bus_receive_preserves_interrupt_timestamp_and_overflow) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    fake_clock_reset();
+    fake_clock_advance_ms(123);
+    twai_rx_done_event_data_t event = {0};
+    for (unsigned i = 0; i < 33; i++)
+        callbacks.on_rx_done(NODE, &event, NULL);
+    uint8_t data[8];
+    bus_msg_t msg;
+    bus_msg_init(&msg, data, sizeof(data));
+    fake_clock_advance_ms(10);
+    TEST_ASSERT_EQUAL_INT(1, can_bus_ops.recv(&msg, 0));
+    TEST_ASSERT_EQUAL_INT(123001, msg.timestamp_us);
+    TEST_ASSERT_EQUAL_INT(0x123, msg.id);
+    TEST_ASSERT_EQUAL_INT(0x55, data[0]);
+    callbacks.on_rx_done(NODE, &event, NULL);
+    bool overflow = false;
+    while (can_bus_ops.recv(&msg, 0) >= 0)
+        overflow |= !!(msg.status & BUS_RX_BUFFER_OVERFLOW);
+    TEST_ASSERT_TRUE(overflow);
+}
+
+TEST(j2534_bus_off_is_reported_and_bus_on_recovers) {
+    bus_cfg_t cfg = {.bitrate = 500000, .manual_recovery = true};
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_ops.open(&cfg));
+    forced_bus_off = true;
+    twai_state_change_event_data_t event = {.old_sta = TWAI_ERROR_ACTIVE,
+                                            .new_sta = TWAI_ERROR_BUS_OFF};
+    callbacks.on_state_change(NODE, &event, NULL);
+    bus_msg_t msg;
+    uint8_t data[8];
+    bus_msg_init(&msg, data, sizeof(data));
+    TEST_ASSERT_EQUAL_INT(0, can_bus_ops.recv(&msg, 0));
+    TEST_ASSERT_EQUAL_INT(BUS_RX_LINK_DOWN, msg.status);
+    TEST_ASSERT_EQUAL_INT(0, recover_calls);
+    TEST_ASSERT_EQUAL_INT(0, can_bus_ops.ioctl(BUS_IOCTL_BUS_ON, NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(1, recover_calls);
+    TEST_ASSERT_EQUAL_INT(0, can_bus_ops.ioctl(BUS_IOCTL_BUS_ON, NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(1, recover_calls);
 }

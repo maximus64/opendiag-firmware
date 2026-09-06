@@ -13,6 +13,7 @@
 #include "comm_iface.h"
 #include "common.h"
 #include "elm327_at.h"
+#include "j2534.h"
 #include "link.h"
 #include "nvs_flash.h"
 #include "pinout.h"
@@ -295,6 +296,7 @@ static void ble_ctrl_command(const char *cmd, size_t len) {
 static void links_setup(void) {
     elm327_register();
     slcan_register();
+    j2534_register();
 
     if (vif_link_start(&elm327_frontend) != ESP_OK) {
         ESP_LOGE(TAG, "failed to start the data link");
