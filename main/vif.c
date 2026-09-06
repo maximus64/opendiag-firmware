@@ -400,6 +400,12 @@ bool vif_link_service(void) {
     return true;
 }
 
+/** @brief Is a link control request still outstanding? */
+static bool link_retry_pending(void) {
+    return g.link.fe_switch || g.release_req[VIF_OWNER_LINK] ||
+           g.recover_req[VIF_OWNER_LINK];
+}
+
 static void link_task(void *param) {
     uint8_t buf[64];
 
@@ -432,6 +438,10 @@ static void link_task(void *param) {
         n = comm_port_read(port, buf, sizeof(buf), wait);
         if (n && fe->feed) {
             fe->feed(buf, n);
+        }
+        /* feed() may have yielded while another task requested teardown. */
+        if (link_retry_pending()) {
+            continue;
         }
         if (fe->poll) {
             fe->poll();

@@ -91,6 +91,7 @@ set(SUITES
     test_elm327_search
     test_comm_iface
     test_vif
+    test_vif_link
     test_vif_ctrl
     test_slcan
     test_button
@@ -123,6 +124,11 @@ set(test_vif_ctrl_FW
     ${FW_DIR}/bus.c
     ${FW_DIR}/vif.c
     ${FW_DIR}/vif_ctrl.c
+)
+set(test_vif_link_FW
+    ${FW_DIR}/comm_iface.c
+    ${FW_DIR}/kline_codec.c
+    ${FW_DIR}/bus.c
 )
 set(test_can_driver_FW ${FW_DIR}/can_bus.c driver_stubs/driver_rtos.c)
 set(test_kline_driver_FW ${FW_DIR}/kline_codec.c ${FW_DIR}/bus.c
