@@ -815,20 +815,14 @@ TEST(ifr_is_wanted_for_a_module_reply_addressed_to_the_tester) {
     TEST_ASSERT_EQUAL_INT(0xF1, cfg.node_address);
 }
 
-/**
- * The default is silence, and it is deliberate: this hardware cannot get an
- * acknowledgement onto the wire inside the Tp4 window, and a late one
- * measurably provokes more retransmissions than none at all. The reasoning is
- * on j1850_pwm_ifr_cfg_t.
- */
-TEST(ifr_is_switched_off_by_default) {
+TEST(ifr_is_enabled_by_default) {
     j1850_pwm_ifr_cfg_t cfg;
     const uint8_t reply[] = {0x41, 0x6B, 0x10, 0x41, 0x00, 0x05};
 
     j1850_pwm_ifr_cfg_default(&cfg);
 
-    TEST_ASSERT_FALSE(cfg.enabled);
-    TEST_ASSERT_FALSE(j1850_pwm_ifr_wanted(reply, sizeof(reply), &cfg));
+    TEST_ASSERT_TRUE(cfg.enabled);
+    TEST_ASSERT_TRUE(j1850_pwm_ifr_wanted(reply, sizeof(reply), &cfg));
 }
 
 TEST(ifr_is_not_wanted_when_the_k_bit_says_none_is_expected) {
@@ -890,6 +884,17 @@ TEST(ifr_answers_only_the_configured_targets) {
 
     cfg.targets[cfg.target_count++] = 0x33;
     TEST_ASSERT_TRUE(j1850_pwm_ifr_wanted(reply, sizeof(reply), &cfg));
+}
+
+TEST(ifr_answers_the_current_physical_node_address) {
+    j1850_pwm_ifr_cfg_t cfg;
+    uint8_t frame[] = {0x45, 0xF2, 0x10, 0x41, 0};
+    j1850_pwm_ifr_cfg_default(&cfg);
+    cfg.node_address = 0xF2;
+    cfg.target_count = 0;
+    TEST_ASSERT_TRUE(j1850_pwm_ifr_wanted(frame, sizeof(frame), &cfg));
+    frame[1] = 0xF1;
+    TEST_ASSERT_FALSE(j1850_pwm_ifr_wanted(frame, sizeof(frame), &cfg));
 }
 
 /* ------------------------------------------------------------------ *
@@ -1414,4 +1419,66 @@ TEST(every_receive_status_has_a_distinct_name) {
 
     TEST_ASSERT_EQUAL_STRING(
         "?", j1850_pwm_rx_status_str((j1850_pwm_rx_status_t)99));
+}
+
+static bool stream_capture(const cap_t *c, j1850_pwm_stream_t *stream) {
+    uint32_t gap = 0;
+    bool ready = false;
+    for (size_t i = 0; i < c->n; i++) {
+        ready = j1850_pwm_stream_pulse(stream, c->sym[i].duration0, gap);
+        gap = c->sym[i].duration0 + c->sym[i].duration1;
+    }
+    return ready;
+}
+
+TEST(streaming_ifr_checks_crc_for_both_final_bit_values) {
+    bool final_one = false, final_zero = false;
+    for (unsigned value = 0; value < 256; value++) {
+        uint8_t data[] = {0x41, 0x6B, 0x10, 0x41, 0x00, (uint8_t)value};
+        cap_t c = {0};
+        j1850_pwm_stream_t stream = {0};
+        cap_frame(&c, data, sizeof(data));
+        TEST_ASSERT_TRUE(stream_capture(&c, &stream));
+        TEST_ASSERT_EQUAL_INT(sizeof(data) + 1, stream.len);
+        TEST_ASSERT_EQUAL_MEM(data, stream.data, sizeof(data));
+        if (stream.data[stream.len - 1] & 1)
+            final_one = true;
+        else
+            final_zero = true;
+        c.sym[c.n - 1].duration0 = c.sym[c.n - 1].duration0 == 7 ? 15 : 7;
+        stream = (j1850_pwm_stream_t){0};
+        TEST_ASSERT_FALSE(stream_capture(&c, &stream));
+    }
+    TEST_ASSERT_TRUE(final_one && final_zero);
+}
+
+TEST(streaming_ifr_rejects_bad_pulses_and_requires_sof) {
+    const uint8_t data[] = {0x41, 0x6B, 0x10, 0x41, 0};
+    cap_t good = {0};
+    cap_frame(&good, data, sizeof(data));
+    for (size_t i = 1; i < good.n; i++) {
+        cap_t bad = good;
+        j1850_pwm_stream_t stream = {0};
+        bad.sym[i].duration0 = 2;
+        TEST_ASSERT_FALSE(stream_capture(&bad, &stream));
+        bad = good;
+        bad.sym[i - 1].duration1 = 60;
+        stream = (j1850_pwm_stream_t){0};
+        TEST_ASSERT_FALSE(stream_capture(&bad, &stream));
+    }
+    j1850_pwm_stream_t stream = {0};
+    for (size_t i = 1; i < good.n; i++)
+        TEST_ASSERT_FALSE(
+            j1850_pwm_stream_pulse(&stream, good.sym[i].duration0, 24));
+}
+
+TEST(streaming_ifr_leaves_room_for_the_response_byte) {
+    uint8_t data[J1850_PWM_MAX_FRAME - 1] = {0x41, 0x6B, 0x10};
+    cap_t c = {0};
+    j1850_pwm_stream_t stream = {0};
+    cap_frame(&c, data, sizeof(data));
+    TEST_ASSERT_FALSE(stream_capture(&c, &stream));
+    TEST_ASSERT_EQUAL_INT(J1850_PWM_MAX_FRAME, stream.len);
+    TEST_ASSERT_FALSE(j1850_pwm_stream_pulse(&stream, 7, 24));
+    TEST_ASSERT_FALSE(stream.valid);
 }

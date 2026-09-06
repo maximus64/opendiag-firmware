@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #include "bus.h"
 #include <string.h>
+#include <strings.h>
 
 static const struct {
     bus_param_t p;
@@ -58,7 +59,7 @@ bool bus_param_from_name(const char *name, bus_param_t *out) {
     }
 
     for (size_t i = 0; i < PARAM_COUNT; i++) {
-        if (strcasecmp(name, g_params[i].name)) {
+        if (strcasecmp(name, g_params[i].name) == 0) {
             *out = g_params[i].p;
             return true;
         }

@@ -39,6 +39,35 @@ TEST(j1850_pwm_prepends_its_default_header) {
     assert_sent(FAKE_BUS_J1850_PWM, "\x61\x6A\xF1\x01\x00", 5);
 }
 
+static uint32_t pwm_param(bus_param_t param) {
+    uint32_t value = 0;
+    TEST_ASSERT_EQUAL_INT(
+        0, vif_bus_param_get(g_elm->session, VIF_BUS_J1850_PWM, param, &value));
+    return value;
+}
+
+TEST(pwm_ifr_commands_reach_the_driver) {
+    elm_echo_off();
+    elm_ok("ATSP1\r");
+    elm_ask("0100\r");
+    TEST_ASSERT_EQUAL_INT(1, pwm_param(BUS_P_IFR_ENABLED));
+    TEST_ASSERT_EQUAL_INT(0xF1, pwm_param(BUS_P_IFR_BYTE));
+    elm_ok("ATIFR0\r");
+    TEST_ASSERT_EQUAL_INT(0, pwm_param(BUS_P_IFR_ENABLED));
+    elm_ask("0100\r");
+    TEST_ASSERT_EQUAL_INT(0, pwm_param(BUS_P_IFR_ENABLED));
+    elm_ok("ATIFR1\r");
+    TEST_ASSERT_EQUAL_INT(1, pwm_param(BUS_P_IFR_ENABLED));
+    elm_ok("ATSH616AF2\r");
+    elm_ask("0100\r");
+    TEST_ASSERT_EQUAL_INT(0xF2, pwm_param(BUS_P_IFR_BYTE));
+    elm_ok("ATTAF3\r");
+    elm_ok("ATIFRS\r");
+    TEST_ASSERT_EQUAL_INT(0xF3, pwm_param(BUS_P_IFR_BYTE));
+    elm_ok("ATIFRH\r");
+    TEST_ASSERT_EQUAL_INT(0xF2, pwm_param(BUS_P_IFR_BYTE));
+}
+
 TEST(j1850_vpw_prepends_its_default_header) {
     elm_echo_off();
     elm_ok("ATSP2\r");

@@ -54,6 +54,8 @@ static bus_link_t g_link;
 static bus_stats_t g_stats[FAKE_BUS_COUNT];
 static uint32_t g_kline_baud;
 static uint32_t g_wakeup_ms;
+static uint32_t g_ifr_enabled;
+static uint32_t g_ifr_byte;
 static uint8_t g_wakeup[KLINE_WAKEUP_MAX];
 static uint8_t g_wakeup_len;
 
@@ -65,6 +67,8 @@ void fake_bus_reset_all(void) {
     g_connect_result = 0;
     g_kline_baud = KLINE_BAUD_DEFAULT;
     g_wakeup_ms = 0;
+    g_ifr_enabled = 0;
+    g_ifr_byte = 0xF1;
     g_wakeup_len = 0;
     memset(g_stats, 0, sizeof(g_stats));
 }
@@ -336,6 +340,12 @@ static int fake_recv(fake_bus_id_t id, bus_msg_t *msg, TickType_t wait) {
  */
 static int fake_set_param(bus_param_t p, uint32_t value) {
     switch (p) {
+    case BUS_P_IFR_ENABLED:
+        g_ifr_enabled = value;
+        return 0;
+    case BUS_P_IFR_BYTE:
+        g_ifr_byte = value;
+        return 0;
     case BUS_P_DATA_RATE:
         g_kline_baud = value;
         return 0;
@@ -353,6 +363,12 @@ static int fake_get_param(bus_param_t p, uint32_t *out) {
     }
 
     switch (p) {
+    case BUS_P_IFR_ENABLED:
+        *out = g_ifr_enabled;
+        return 0;
+    case BUS_P_IFR_BYTE:
+        *out = g_ifr_byte;
+        return 0;
     case BUS_P_DATA_RATE:
         *out = g_kline_baud;
         return 0;

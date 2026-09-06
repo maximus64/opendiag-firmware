@@ -244,7 +244,8 @@ typedef struct {
     uint8_t len;                       /**< Bytes in @p data. */
     uint8_t ifr[J1850_PWM_MAX_FRAME];  /**< Response bytes after EOD. */
     uint8_t ifr_len;
-    bool eod; /**< An EOD gap separated data from IFR. */
+    bool eod;            /**< An EOD gap separated data from IFR. */
+    uint16_t eod_gap_us; /**< Captured rising-edge gap before the IFR. */
     /**
      * Width of the last active pulse in the capture, microseconds.
      *
@@ -275,21 +276,9 @@ j1850_pwm_rx_status_t j1850_pwm_decode(const rmt_symbol_word_t *sym, size_t n,
 /**
  * @brief Read the bytes out of a capture and nothing else.
  *
- * The same bytes j1850_pwm_decode() would produce, arrived at without any of
- * the checking: pulse widths are split at the midpoint and never validated,
- * rising edge spacing is not measured, and an end of data is indistinguishable
- * from a bit cell.
- *
- * It exists for one caller. Acknowledging a frame means putting a byte on the
- * wire 48 us after that frame's last edge, and the full decoder cannot run
- * inside that budget for a frame of any length - it is roughly an order of
- * magnitude too slow. This can, because all it does is shift bits.
- *
- * What it does *not* skip is the CRC, which the caller is expected to apply
- * to the result: acknowledging a frame that arrived corrupt tells the sender
- * not to retransmit, which is the one outcome worse than not answering. A
- * frame with a bad width therefore still fails, just by CRC rather than by
- * a timing verdict.
+ * Used only to recognize our TX echo before rearming RMT. Pulse widths are
+ * split without timing validation, and decoding stops at EOD. Received
+ * messages use the full decoder; acknowledgment uses the streaming decoder.
  *
  * @param sym Captured symbols, in RMT order.
  * @param n   Symbols in @p sym.
@@ -300,6 +289,21 @@ j1850_pwm_rx_status_t j1850_pwm_decode(const rmt_symbol_word_t *sym, size_t n,
  */
 size_t j1850_pwm_quick_decode(const rmt_symbol_word_t *sym, size_t n,
                               uint8_t *out, size_t cap);
+
+typedef struct {
+    uint8_t data[J1850_PWM_MAX_FRAME];
+    uint8_t len;
+    uint8_t bits;
+    uint8_t byte;
+    uint8_t crc;
+    bool valid;
+    bool first;
+} j1850_pwm_stream_t;
+
+/* Feed a completed active pulse and its rising-edge spacing. True means a
+ * CRC-valid byte boundary; the caller must still verify EOD and addressing. */
+bool j1850_pwm_stream_pulse(j1850_pwm_stream_t *s, uint32_t active_us,
+                            uint32_t edge_us);
 
 /* ------------------------------------------------------------------ *
  * In-frame response
@@ -317,26 +321,9 @@ size_t j1850_pwm_quick_decode(const rmt_symbol_word_t *sym, size_t n,
  * the tester's own physical address, 0xF1 by convention: a type 1 IFR,
  * clause 5.3.7 b.
  *
- * It defaults to off, which needs justifying, because the standard does ask
- * for it. The response is due Tp4 - 48 us - after the frame's last rising
- * edge and is disregarded after Tp5, 63 us. On this hardware the frame does
- * not reach software until the RMT receiver has seen its arming threshold
- * expire, and that threshold cannot be set below the 34 us a start of frame
- * may occupy without the peripheral cutting captures in half. Adding the
- * interrupt's own latency and the fastest possible look at the bytes puts the
- * earliest achievable response at around 65 us, which is past the window.
- *
- * Measured against a Ford module on the bench, answering that late is worse
- * than not answering: unacknowledged it retransmits twice, and acknowledged
- * late it retransmits three times, the extra one being a reaction to a byte
- * arriving after the module had already closed the frame. Lowering the
- * threshold far enough to answer at 57 us did not change that.
- *
- * So the mechanism is here, it is correct, and j1850_pwm_stats_t reports
- * exactly where the last response landed - but a board or a module where the
- * window can actually be met has to be demonstrated before it is switched on
- * by default. Retransmissions are handled instead by the duplicate window in
- * j1850_pwm.c, which is what keeps the caller seeing one frame per reply.
+ * Enabled by default. GPIO edge decoding checks CRC and EOD before sending
+ * the tester address. Table 3 requires a 47..49 us transmitted gap and
+ * accepts 42..54 us at the receiver; 63 us is EOF, not the IFR deadline.
  */
 typedef struct {
     bool enabled;                               /**< Off answers nothing. */
@@ -345,7 +332,7 @@ typedef struct {
     uint8_t target_count;
 } j1850_pwm_ifr_cfg_t;
 
-/** @brief The tester defaults: 0xF1 answering 0x6B and 0xF1, switched off. */
+/** @brief The tester defaults: 0xF1 answering 0x6B and 0xF1, enabled. */
 void j1850_pwm_ifr_cfg_default(j1850_pwm_ifr_cfg_t *cfg);
 
 /**

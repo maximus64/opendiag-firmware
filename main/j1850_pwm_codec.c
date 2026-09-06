@@ -307,6 +307,7 @@ j1850_pwm_rx_status_t IRAM_ATTR j1850_pwm_decode(const rmt_symbol_word_t *sym,
             }
             in_ifr = true;
             out->eod = true;
+            out->eod_gap_us = (uint16_t)edge_gap;
         } else if (edge_gap < J1850_PWM_TP3_RX_MIN ||
                    edge_gap > J1850_PWM_TP3_RX_MAX) {
             out->status = J1850_PWM_RX_BAD_TIMING;
@@ -408,14 +409,46 @@ size_t IRAM_ATTR j1850_pwm_quick_decode(const rmt_symbol_word_t *sym, size_t n,
  * In-frame response
  * ------------------------------------------------------------------ */
 
+bool IRAM_ATTR j1850_pwm_stream_pulse(j1850_pwm_stream_t *s, uint32_t active_us,
+                                      uint32_t edge_us) {
+    if (active_us >= J1850_PWM_TP7_RX_MIN &&
+        active_us <= J1850_PWM_TP7_RX_MAX) {
+        s->len = s->bits = s->byte = 0;
+        s->crc = 0xFF;
+        s->valid = s->first = true;
+        return false;
+    }
+    if (!s->valid)
+        return false;
+    if (active_us < J1850_PWM_TP1_RX_MIN || active_us > J1850_PWM_TP2_RX_MAX ||
+        edge_us < (s->first ? J1850_PWM_TP4_RX_MIN : J1850_PWM_TP3_RX_MIN) ||
+        edge_us > (s->first ? J1850_PWM_TP4_RX_MAX : J1850_PWM_TP3_RX_MAX) ||
+        s->len >= J1850_PWM_MAX_FRAME) {
+        s->valid = false;
+        return false;
+    }
+    s->first = false;
+    s->byte = (uint8_t)((s->byte << 1) | (active_us < J1850_PWM_BIT_SPLIT));
+    if (++s->bits != 8)
+        return false;
+    s->data[s->len++] = s->byte;
+    s->crc ^= s->byte;
+    for (unsigned i = 0; i < 8; i++)
+        s->crc = (s->crc & 0x80) ? (uint8_t)((s->crc << 1) ^ 0x1D)
+                                 : (uint8_t)(s->crc << 1);
+    s->byte = s->bits = 0;
+    /* Leave room for our IFR in the twelve-byte message limit. */
+    return s->len >= 4 && s->len < J1850_PWM_MAX_FRAME &&
+           s->crc == J1850_CRC_RESIDUE;
+}
+
 void j1850_pwm_ifr_cfg_default(j1850_pwm_ifr_cfg_t *cfg) {
     if (!cfg) {
         return;
     }
 
     memset(cfg, 0, sizeof(*cfg));
-    /* Off. See j1850_pwm_ifr_cfg_t for the measurements behind that. */
-    cfg->enabled = false;
+    cfg->enabled = true;
     cfg->node_address = 0xF1; /* the tester's physical address */
     cfg->targets[0] = 0x6B;   /* modules answer a functional request here */
     cfg->targets[1] = 0xF1;   /* and a physically addressed reply, here */
@@ -442,6 +475,9 @@ bool IRAM_ATTR j1850_pwm_ifr_wanted(const uint8_t *frame, size_t len,
     if (!j1850_hdr_is_three_byte(frame[0])) {
         return false;
     }
+
+    if ((frame[0] & J1850_HDR_Y_BIT) && frame[1] == cfg->node_address)
+        return true;
 
     for (uint8_t i = 0; i < cfg->target_count && i < J1850_PWM_MAX_IFR_TARGETS;
          i++) {

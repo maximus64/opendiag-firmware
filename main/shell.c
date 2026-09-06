@@ -961,10 +961,17 @@ static void j1850_print_stats(void) {
     printf("  rx-empty         %" PRIu32 "\n", s.rx_empty);
     printf("  rx-isr-worst-us  %" PRIu32 "\n", s.rx_isr_us_max);
     printf("  ifr-sent         %" PRIu32 "\n", s.ifr_sent);
-    /* Where the last acknowledgement landed after the frame it answered.
-     * Tp4 is J1850_PWM_TP4_NOM us and the sender gives up at
-     * J1850_PWM_TP5_RX_MIN us, so this is the number that says whether
-     * answering is working at all on this board. */
+    printf("  ifr-sof          %" PRIu32 "\n", s.ifr_sof);
+    printf("  ifr-candidates   %" PRIu32 "\n", s.ifr_candidates);
+    printf("  ifr-bad-pulse    %" PRIu32 "\n", s.ifr_bad_pulse);
+    printf("  ifr-bad-gap      %" PRIu32 "\n", s.ifr_bad_gap);
+    printf("  ifr-late         %" PRIu32 "\n", s.ifr_late);
+    printf("  ifr-lost         %" PRIu32 "\n", s.ifr_lost);
+    printf("  ifr-observed     %" PRIu32 "\n", s.ifr_observed);
+    printf("  ifr-gap-min-us   %" PRIu32 "\n", s.ifr_gap_min_us);
+    printf("  ifr-gap-max-us   %" PRIu32 "\n", s.ifr_gap_max_us);
+    /* Excludes interrupt latency; a value inside Tp4 is not proof that
+     * the waveform meets its 42..54 us receive window. */
     printf("  ifr-start-us     %" PRIu32 "\n", s.ifr_start_us);
 }
 

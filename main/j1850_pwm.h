@@ -53,7 +53,7 @@ extern const bus_ops_t j1850_pwm_bus_ops;
  * @brief The duplicate window an ELM327 client wants, milliseconds.
  *
  * A module that asked for an in-frame response and did not get one sends its
- * frame again, twice over, a fraction of a millisecond apart - it has no way
+ * frame again, twice over, a few milliseconds apart - it has no way
  * of knowing the frame arrived. Those repeats are one reply as far as an
  * OBD-II client is concerned, and delivering three copies of a mode 01
  * response is not what any of them expect.
@@ -61,7 +61,7 @@ extern const bus_ops_t j1850_pwm_bus_ops;
  * So an identical frame arriving inside this window of the last one is
  * counted and dropped. The window is short by diagnostic standards and long
  * by retransmission standards: a genuinely repeated broadcast is tens of
- * milliseconds apart, a retransmission is under one.
+ * milliseconds apart; this bench's ten-byte retransmissions are 2.04 ms apart.
  *
  * It is not the driver's default. BUS_P_DUPLICATE_MS starts at zero,
  * because "deliver everything" is what a bus trace wants and what J2534
@@ -82,7 +82,7 @@ extern const bus_ops_t j1850_pwm_bus_ops;
  * completely different here, and identical in a single "errors" number.
  */
 typedef struct {
-    uint32_t rx_frames; /**< Good frames handed to the caller. */
+    uint32_t rx_frames; /**< Valid captures, including TX echoes. */
     uint32_t rx_ifr;    /**< In-frame responses seen from other nodes. */
     uint32_t rx_break;  /**< BRK symbols, clause 6.6.1.6. */
     uint32_t rx_bad_crc;
@@ -101,13 +101,18 @@ typedef struct {
     uint32_t tx_echo_ok;    /**< Own frames read back off the wire intact. */
     uint32_t tx_echo_missing; /**< Transmits the receiver never saw. */
     uint32_t ifr_sent;        /**< In-frame responses this node drove. */
+    uint32_t ifr_sof;
+    uint32_t ifr_candidates;
+    uint32_t ifr_bad_pulse;
+    uint32_t ifr_bad_gap;
+    uint32_t ifr_late;
+    uint32_t ifr_lost;
+    uint32_t ifr_observed;
+    uint32_t ifr_gap_min_us;
+    uint32_t ifr_gap_max_us;
 
-    /**
-     * Where the last in-frame response actually started, microseconds after
-     * the frame's last rising edge. Clause 6.6.1.3 puts it at Tp4, 48 us, and
-     * gives up on it at Tp5, 63 us, so this one number says whether the
-     * acknowledgement is landing in its window or not.
-     */
+    /** Estimated IFR start after the GPIO rising-edge timestamp, excluding ISR
+     * latency. Table 3: TX 47..49 us, RX 42..54 us. Verify on the wire. */
     uint32_t ifr_start_us;
     uint32_t rx_isr_us_max; /**< Longest receive interrupt, microseconds. */
 } j1850_pwm_stats_t;

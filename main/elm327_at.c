@@ -591,6 +591,9 @@ static void elm327_apply_bus_policy(elm327_ctx_t *e, vif_bus_t bus,
     /* A client that did not ask to see its own requests should not have to
      * filter them out of the replies. */
     vif_bus_param_set(e->session, bus, BUS_P_LOOPBACK, 0);
+    if (proto == ELM327_PROTO_J1850_PWM)
+        vif_bus_param_set(e->session, bus, BUS_P_IFR_ENABLED,
+                          e->settings.ifr_mode != ELM327_IFR_OFF);
 }
 
 /**
@@ -812,31 +815,28 @@ static const char *elm327_protocol_name(uint8_t proto) {
     }
 }
 
-/**
- * @brief AT IFR0 to IFR6 and AT IFR H / S, protocols 1 and 2.
- *
- * Recorded, and deliberately not pushed down to the bus driver. The driver
- * keeps its in-frame response switched off on this hardware because it cannot
- * put the byte on the wire inside the window the standard gives it - Tp4 to
- * Tp5, 48 to 63 us after the frame's last rising edge - and answering late
- * measured worse than not answering at all. j1850_pwm_codec.h has the
- * arithmetic and the bench results.
- *
- * So the setting is accepted rather than rejected, because a client that sets
- * it should not have to treat a documented command as unrecognised, and the
- * behaviour it asks for is the behaviour a real ELM327 would also fail to
- * deliver on a link that could not carry the response in time. What the
- * adapter does about the retransmissions this costs is J1850_SETTLE_MS.
- *
- * @return 0 when @p arg named a mode, -1 otherwise.
- */
+/* Apply PWM enable/address settings. Every enabled mode retains the driver's
+ * CRC, addressing and K-bit checks; forced acknowledgment of errors is not
+ * implemented. VPW keeps its existing independent policy. */
+static void elm327_apply_pwm_ifr(elm327_ctx_t *e, uint8_t header_source) {
+    if (elm327_bus(e) != VIF_BUS_J1850_PWM)
+        return;
+    uint8_t source = e->settings.ifr_from_source ? e->settings.tester_address
+                                                 : header_source;
+    vif_bus_param_set(e->session, VIF_BUS_J1850_PWM, BUS_P_IFR_BYTE, source);
+    vif_bus_param_set(e->session, VIF_BUS_J1850_PWM, BUS_P_IFR_ENABLED,
+                      e->settings.ifr_mode != ELM327_IFR_OFF);
+}
+
 static int at_set_ifr(elm327_ctx_t *e, const char *arg) {
     if (strcmp(arg, "H") == 0) {
         e->settings.ifr_from_source = false;
+        elm327_apply_pwm_ifr(e, (uint8_t)e->settings.header_id);
         return 0;
     }
     if (strcmp(arg, "S") == 0) {
         e->settings.ifr_from_source = true;
+        elm327_apply_pwm_ifr(e, (uint8_t)e->settings.header_id);
         return 0;
     }
 
@@ -850,18 +850,20 @@ static int at_set_ifr(elm327_ctx_t *e, const char *arg) {
     case '0':
     case '4':
         e->settings.ifr_mode = ELM327_IFR_OFF;
-        return 0;
+        break;
     case '1':
     case '5':
         e->settings.ifr_mode = ELM327_IFR_AUTO;
-        return 0;
+        break;
     case '2':
     case '6':
         e->settings.ifr_mode = ELM327_IFR_ON;
-        return 0;
+        break;
     default:
         return -1;
     }
+    elm327_apply_pwm_ifr(e, (uint8_t)e->settings.header_id);
+    return 0;
 }
 
 /**
@@ -2118,12 +2120,8 @@ static void elm327_print_j1850_kline_frame(elm327_ctx_t *e, const uint8_t *data,
 /**
  * @brief How long the bus must be quiet before the prompt goes back, J1850.
  *
- * A J1850 module asks to be acknowledged - the K bit in its header - and
- * retransmits its reply when nobody does. This adapter cannot answer inside
- * the window the standard gives an in-frame response (Tp4 to Tp5, 48 to 63 us
- * after the last rising edge); j1850_pwm_codec.h has the arithmetic and the
- * bench measurements behind that. So every reply arrives two or three times
- * over, a few milliseconds apart.
+ * A J1850 module can retransmit when IFR is disabled or an acknowledgment
+ * is lost. Leave time for that burst before accepting the next request.
  *
  * The bus driver collapses those repeats, so a caller sees one reply. What it
  * cannot do is stop the *next* request from being transmitted into the middle
@@ -2492,6 +2490,7 @@ static int elm327_bus_xfer(elm327_ctx_t *e, const uint8_t *frame, size_t len,
         return -2;
     }
 
+    elm327_apply_pwm_ifr(e, tx_frame[2]);
     bus_msg_tx(&tx_msg, tx_frame, tx_len, 0);
     ret = vif_bus_send(e->session, elm327_bus(e), &tx_msg, 0);
     if (ret != 0) {

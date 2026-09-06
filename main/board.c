@@ -8,6 +8,7 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_oneshot.h"
+#include "esp_ipc.h"
 #include "esp_log.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
@@ -37,6 +38,11 @@ static struct {
 } pc_calibration;
 
 static int board_adc_read_boardid(void);
+
+static void board_gpio_isr_install(void *arg) {
+    *(esp_err_t *)arg =
+        gpio_install_isr_service(ESP_INTR_FLAG_IRAM | ESP_INTR_FLAG_LEVEL3);
+}
 
 void board_setup(void) {
     /* J1850 driver */
@@ -135,8 +141,11 @@ void board_setup(void) {
     gpio_set_level(PIN_LS_OBD_15, 0);
     gpio_set_direction(PIN_LS_OBD_15, GPIO_MODE_OUTPUT);
 
-    /* Shared by button and K-Line; IRAM preserves K-Line edge timing. */
-    ESP_ERROR_CHECK(gpio_install_isr_service(ESP_INTR_FLAG_IRAM));
+    esp_err_t gpio_isr_err = ESP_OK;
+    /* Keep PWM edge timing away from the Bluetooth controller on core 0. */
+    ESP_ERROR_CHECK(
+        esp_ipc_call_blocking(1, board_gpio_isr_install, &gpio_isr_err));
+    ESP_ERROR_CHECK(gpio_isr_err);
 
     /* ADC inputs signals */
     adc_oneshot_unit_init_cfg_t init_config1 = {

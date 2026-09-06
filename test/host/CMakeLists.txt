@@ -82,6 +82,7 @@ set(ELM327_FW
 )
 
 set(SUITES
+    test_bus_params
     test_elm327_at
     test_elm327_can
     test_elm327_bytebus
@@ -100,6 +101,7 @@ set(SUITES
 )
 
 set(test_elm327_at_FW      ${ELM327_FW})
+set(test_bus_params_FW    ${FW_DIR}/bus.c)
 set(test_elm327_can_FW     ${ELM327_FW})
 set(test_elm327_bytebus_FW ${ELM327_FW})
 set(test_elm327_search_FW  ${ELM327_FW})

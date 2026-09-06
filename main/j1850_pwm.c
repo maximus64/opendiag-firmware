@@ -19,25 +19,14 @@
  *
  * Answering
  * ---------
- * A Ford module addresses its reply to the tester with the K bit clear,
- * meaning "acknowledge this", and retransmits when nobody does. That
- * acknowledgement is due Tp4 - 48 us - after the frame's last rising edge and
- * is disregarded after Tp5, 63 us.
+ * A reply with K clear requires an IFR starting Tp4 after the last data
+ * rising edge: 47..49 us to transmit, 42..54 us to receive (Table 3).
+ * Tp5 is EOF detection, not an extension of that response window.
  *
- * It cannot be met here, and the arithmetic says why: the capture does not
- * reach software until the arming threshold above has expired, which is 43 us
- * after that edge at best, and reading the bytes and taking the pins over
- * costs another twenty. Measured on the bench the earliest achievable
- * response was 65 us, and answering that late made things worse rather than
- * better - the module retransmitted three times instead of two, reacting to a
- * byte that arrived after it had closed the frame. Lowering the threshold far
- * enough to answer at 57 us did not change that either.
- *
- * So the machinery is here and correct - a cycle counter clocked bit banger
- * that reports where its last response landed - but it is switched off by
- * default, and retransmissions are dealt with instead by collapsing repeats
- * of a frame that arrive inside J1850_PWM_DUPLICATE_MS. That is what keeps
- * one request looking like one reply. j1850_pwm_ifr_cfg_t has the details.
+ * An IRAM GPIO handler on core 1 validates pulses and CRC as they arrive.
+ * At a valid byte boundary it checks for EOD and sends the IFR against the
+ * last rising-edge timestamp. RMT independently captures the frame and IFR
+ * for delivery and diagnostics; its completion interrupt does not drive ACK.
  *
  * Transmitting
  * ------------
@@ -61,6 +50,7 @@
 #include "esp_cpu.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_private/esp_clk.h"
 #include "esp_rom_gpio.h"
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
@@ -97,31 +87,9 @@
  */
 #define RMT_CLK_SRC RMT_CLK_SRC_APB
 
-/**
- * @brief How long one level may persist before the capture is closed.
- *
- * The name the peripheral uses for this is "idle threshold", which is
- * misleading in a way that matters here: it counts *any* steady level, active
- * or passive, not just an idle bus. So it cannot simply be set above the
- * longest passive gap inside a frame (23 us) - a 31 us SOF and a 39 us BRK
- * are single steady levels too, and a threshold under those chops the capture
- * in the middle of the symbol that identifies it.
- *
- * The floor is Tp7(max), 34 us: below that a start of frame ends its own
- * capture and the frame arrives one bit into its first byte, with no SOF.
- * That is not hypothetical - it is what 30 us did on the bench.
- *
- * Above the floor, lower is better, because this threshold is dead time
- * before the receive interrupt can react to anything. 36 us keeps a few
- * microseconds of margin over the floor and puts the interrupt roughly 43 to
- * 51 us after the frame's last rising edge.
- *
- * What is given up is in-frame response bytes from *other* nodes arriving in
- * the same capture as the frame they answer: their Tp4 gap exceeds this, so
- * they come as a capture of their own. The decoder recognises those, and they
- * are not what the caller asked for anyway.
- */
-#define J1850_PWM_RX_IDLE_US 36
+/* Capture the entire IFR: its longest legal passive gap is Tp4(max) minus
+ * Tp1(min), 50 us. GPIO edge timing handles acknowledgment independently. */
+#define J1850_PWM_RX_IDLE_US 55
 
 /**
  * @brief Glitch filter. Clause 6.6 expects a receiver to have one.
@@ -130,6 +98,10 @@
  * enough to swallow the ringing a 40 metre network produces on an edge.
  */
 #define J1850_PWM_RX_FILTER_NS 1500
+
+/* Compensate core-1 level-3 dispatch and output delay; center captured EOD
+ * at 48 us on this 240 MHz board, including the observed 1 us jitter. */
+#define J1850_PWM_GPIO_LATENCY_US 3
 
 /** Symbols the receive buffer holds. The staging copy has to match it. */
 #define RX_BUFFER_SYMBOLS J1850_PWM_CAPTURE_MAX
@@ -208,6 +180,15 @@ static struct {
     bool tx_enabled;
     bool rx_enabled;
     j1850_callback_guard_t rx_guard;
+    j1850_callback_guard_t edge_guard;
+    bool edge_installed;
+    j1850_pwm_stream_t stream;
+    uint32_t edge_cycle;
+    uint32_t edge_gap_cycles;
+    bool edge_active;
+    /* Policy changes invalidate a frame already being decoded. */
+    uint32_t ifr_generation;
+    uint32_t stream_generation;
     rmt_symbol_word_t tx_symbols[J1850_PWM_MAX_SYMBOLS];
     rmt_channel_handle_t tx_chan;
     rmt_channel_handle_t rx_chan;
@@ -294,39 +275,12 @@ static const rmt_receive_config_t g_rx_config = {
     .signal_range_max_ns = J1850_PWM_RX_IDLE_US * 1000,
 };
 
-/**
- * @brief Cycles per microsecond, measured rather than asked for.
- *
- * The in-frame response is clocked entirely from the CPU cycle counter, so
- * this number is the scale factor on every pulse width it drives - get it
- * wrong and the response goes out at the wrong bit rate, which looks like
- * noise to the module waiting for it. The ROM keeps a copy of it, but that
- * copy tracks whatever the ROM was told and not necessarily the frequency
- * the application ended up running at, so it is calibrated here against the
- * system timer, which is derived from a different clock entirely.
- */
-static uint32_t measure_cpu_ticks_per_us(void) {
-    int64_t t0 = esp_timer_get_time();
-    uint32_t c0 = esp_cpu_get_cycle_count();
-    int64_t t1;
-    uint32_t c1;
-
-    /* Long enough that the timer's own microsecond granularity is noise. */
-    do {
-        t1 = esp_timer_get_time();
-    } while (t1 - t0 < 2000);
-
-    c1 = esp_cpu_get_cycle_count();
-
-    return (uint32_t)((c1 - c0) / (uint32_t)(t1 - t0));
-}
-
 /* ------------------------------------------------------------------ *
  * In-frame response
  *
- * Bit banged, from the receive ISR, against the CPU cycle counter. Everything
- * it touches is in IRAM and nothing it calls can take a lock: this runs with
- * interrupts off, on a deadline measured in microseconds.
+ * Bit banged, from the GPIO edge ISR, against the CPU cycle counter. Everything
+ * it touches is in IRAM. No allocation or blocking calls; the waveform runs
+ * inside an ISR critical section on a microsecond deadline.
  * ------------------------------------------------------------------ */
 
 static portMUX_TYPE g_ifr_spinlock = portMUX_INITIALIZER_UNLOCKED;
@@ -366,11 +320,16 @@ static inline void IRAM_ATTR wait_until(uint32_t deadline) {
  * edge is placed against an absolute deadline rather than by accumulating
  * delays, so a cell that starts late does not push the ones after it.
  */
-static void IRAM_ATTR ifr_transmit(uint8_t byte, uint32_t start_cycle,
+static bool IRAM_ATTR ifr_transmit(uint8_t byte, uint32_t start_cycle,
                                    uint32_t reference_cycle) {
     const uint32_t per_us = g.cpu_ticks_per_us;
     const uint32_t cell = J1850_PWM_TP3_NOM * per_us;
     uint32_t rise = start_cycle;
+
+    if ((int32_t)(esp_cpu_get_cycle_count() - start_cycle) > 0) {
+        g.stats.ifr_late++;
+        return false;
+    }
 
     /* Park the output latch passive *before* taking the pins off the RMT
      * matrix, or whatever the latch happened to hold becomes a pulse on the
@@ -379,8 +338,19 @@ static void IRAM_ATTR ifr_transmit(uint8_t byte, uint32_t start_cycle,
     REG_WRITE(GPIO_FUNC_OUT_SEL(PIN_J1850_TX_P), SIG_GPIO_OUT_IDX);
     REG_WRITE(GPIO_FUNC_OUT_SEL(PIN_J1850_TX_N), SIG_GPIO_OUT_IDX);
 
-    portENTER_CRITICAL_ISR(&g_ifr_spinlock);
-
+    bool sent = true;
+    if ((int32_t)(esp_cpu_get_cycle_count() - start_cycle) > 0) {
+        g.stats.ifr_late++;
+        sent = false;
+        goto restore;
+    }
+    while ((int32_t)(start_cycle - esp_cpu_get_cycle_count()) > 0) {
+        if (REG_READ(GPIO_IN_REG) & BIT(PIN_J1850_PWM_RX)) {
+            g.stats.ifr_lost++;
+            sent = false;
+            goto restore;
+        }
+    }
     for (int bit = 7; bit >= 0; bit--) {
         uint32_t active =
             ((byte >> bit) & 1u) ? J1850_PWM_TP1_NOM : J1850_PWM_TP2_NOM;
@@ -388,15 +358,24 @@ static void IRAM_ATTR ifr_transmit(uint8_t byte, uint32_t start_cycle,
         wait_until(rise);
         bus_drive(1);
         if (bit == 7) {
-            /* Where the response actually landed relative to the frame it
-             * answers. The only measurement that says whether the deadline
-             * was met, so it is taken from the edge itself. */
+            /* Relative to the GPIO edge ISR timestamp, not RMT completion.
+             * A captured EOD gap also includes GPIO interrupt latency. */
             g.stats.ifr_start_us =
                 (esp_cpu_get_cycle_count() - reference_cycle) /
                 g.cpu_ticks_per_us;
         }
         wait_until(rise + active * per_us);
         bus_drive(0);
+
+        /* A dominant zero beats our recessive one. Relinquish the bus. */
+        if ((byte >> bit) & 1u) {
+            wait_until(rise + J1850_PWM_BIT_SPLIT * per_us);
+            if (REG_READ(GPIO_IN_REG) & BIT(PIN_J1850_PWM_RX)) {
+                sent = false;
+                g.stats.ifr_lost++;
+                break;
+            }
+        }
 
         rise += cell;
     }
@@ -405,10 +384,10 @@ static void IRAM_ATTR ifr_transmit(uint8_t byte, uint32_t start_cycle,
      * so the trailing bit gets its full width. */
     wait_until(rise);
 
-    portEXIT_CRITICAL_ISR(&g_ifr_spinlock);
-
+restore:
     REG_WRITE(GPIO_FUNC_OUT_SEL(PIN_J1850_TX_P), g.tx_func_sel[0]);
     REG_WRITE(GPIO_FUNC_OUT_SEL(PIN_J1850_TX_N), g.tx_func_sel[1]);
+    return sent;
 }
 
 /* ------------------------------------------------------------------ *
@@ -467,40 +446,78 @@ static bool IRAM_ATTR is_own_echo(const uint8_t *data, size_t len) {
     return memcmp(data, g.echo, len) == 0;
 }
 
-/**
- * @brief Width of the last active pulse in a capture, microseconds.
- *
- * Read straight off the symbols rather than out of a decode, because the
- * acknowledgement decision has to be made before the decode has run. The
- * peripheral closes a capture on the pulse that exceeded the arming
- * threshold, so the final symbol holds that last active phase and a zero
- * where its passive phase would be.
- */
-static inline uint16_t IRAM_ATTR
-last_active_of(const rmt_rx_done_event_data_t *e) {
-    const rmt_symbol_word_t *last;
-
-    if (e->num_symbols == 0) {
-        return 0;
+static void IRAM_ATTR pwm_edge_isr(void *arg) {
+    uint32_t now = esp_cpu_get_cycle_count();
+    bool active = (REG_READ(GPIO_IN_REG) & BIT(PIN_J1850_PWM_RX)) != 0;
+    (void)arg;
+    if (!j1850_callback_enter(&g.edge_guard))
+        return;
+    uint32_t generation = __atomic_load_n(&g.ifr_generation, __ATOMIC_ACQUIRE);
+    if (generation != g.stream_generation) {
+        g.stream.valid = false;
+        g.edge_active = false;
+        g.stream_generation = generation;
     }
+    if (!__atomic_load_n(&g.ifr.enabled, __ATOMIC_ACQUIRE))
+        goto out;
+    if (active) {
+        g.edge_gap_cycles = now - g.edge_cycle;
+        g.edge_cycle = now;
+        g.edge_active = true;
+        goto out;
+    }
+    if (!g.edge_active)
+        goto out;
+    g.edge_active = false;
+    uint32_t per_us = g.cpu_ticks_per_us;
+    uint32_t active_us = (now - g.edge_cycle + per_us / 2) / per_us;
+    uint32_t gap_us = (g.edge_gap_cycles + per_us / 2) / per_us;
+    if (active_us >= J1850_PWM_TP7_RX_MIN && active_us <= J1850_PWM_TP7_RX_MAX)
+        g.stats.ifr_sof++;
+    else if (g.stream.valid) {
+        if (active_us < J1850_PWM_TP1_RX_MIN ||
+            active_us > J1850_PWM_TP2_RX_MAX)
+            g.stats.ifr_bad_pulse++;
+        bool eod = !g.stream.first && !g.stream.bits && g.stream.len >= 4 &&
+                   gap_us >= J1850_PWM_TP4_RX_MIN &&
+                   gap_us <= J1850_PWM_TP4_RX_MAX;
+        if (!eod && (gap_us < (g.stream.first ? J1850_PWM_TP4_RX_MIN
+                                              : J1850_PWM_TP3_RX_MIN) ||
+                     gap_us > (g.stream.first ? J1850_PWM_TP4_RX_MAX
+                                              : J1850_PWM_TP3_RX_MAX)))
+            g.stats.ifr_bad_gap++;
+    }
+    if (!j1850_pwm_stream_pulse(&g.stream, active_us, gap_us))
+        goto out;
 
-    last = &e->received_symbols[e->num_symbols - 1];
-
-    return (last->level0 == J1850_PWM_ACTIVE) ? last->duration0 : 0;
+    /* A CRC-valid prefix is not necessarily the end of a message. Watch
+     * for the next data edge before committing to the EOD response. */
+    portENTER_CRITICAL_ISR(&g_ifr_spinlock);
+    if (generation != __atomic_load_n(&g.ifr_generation, __ATOMIC_RELAXED) ||
+        !j1850_pwm_ifr_wanted(g.stream.data, g.stream.len, &g.ifr) ||
+        g.stream.data[2] == g.ifr.node_address ||
+        is_own_echo(g.stream.data, g.stream.len)) {
+        portEXIT_CRITICAL_ISR(&g_ifr_spinlock);
+        goto out;
+    }
+    g.stats.ifr_candidates++;
+    uint32_t edge = g.edge_cycle - J1850_PWM_GPIO_LATENCY_US * per_us;
+    uint32_t eod = edge + J1850_PWM_TP4_RX_MIN * per_us;
+    uint32_t start = edge + J1850_PWM_TP4_NOM * per_us;
+    while ((int32_t)(eod - esp_cpu_get_cycle_count()) > 0) {
+        if (REG_READ(GPIO_IN_REG) & BIT(PIN_J1850_PWM_RX)) {
+            portEXIT_CRITICAL_ISR(&g_ifr_spinlock);
+            goto out;
+        }
+    }
+    g.stream.valid = false;
+    if (!(REG_READ(GPIO_IN_REG) & BIT(PIN_J1850_PWM_RX)) &&
+        ifr_transmit(g.ifr.node_address, start, edge))
+        g.stats.ifr_sent++;
+    portEXIT_CRITICAL_ISR(&g_ifr_spinlock);
+out:
+    j1850_callback_exit(&g.edge_guard);
 }
-
-/*
- * Where the frame's last rising edge was, in CPU cycles, and so where Tp4
- * falls: there is no timestamp on the wire, so it is reconstructed. The
- * peripheral raises this interrupt once one level has held for the arming
- * threshold, and the active pulse before that is last_active_of(). The
- * reference the response is due Tp4 after is this interrupt's arrival less
- * the two of them.
- *
- * Interrupt entry latency is not in that sum, so the estimate runs a little
- * late. That is the safe direction: Tp4 has receive tolerance above nominal,
- * whereas an early response would land inside the frame it is answering.
- */
 
 /**
  * @brief True when this frame is the previous one sent again.
@@ -547,32 +564,12 @@ static bool IRAM_ATTR receive_done(rmt_channel_handle_t channel,
 
     (void)user_ctx;
 
-    /*
-     * Acknowledge first, and with the fast path, because this is the only
-     * part of the interrupt that has a deadline. The response is due Tp4
-     * after the frame's last rising edge and is ignored past Tp5; the
-     * capture only got here one active pulse plus the arming threshold after
-     * that edge, so what is left is a few microseconds. The full decoder
-     * needs an order of magnitude more than that, which is what
-     * j1850_pwm_quick_decode() exists to avoid.
-     *
-     * Never answer our own echo: that byte would land in the window the
-     * module we are talking to is entitled to.
-     */
-    quick_len = j1850_pwm_quick_decode(
-        edata->received_symbols, edata->num_symbols, quick, sizeof(quick));
+    quick_len =
+        __atomic_load_n(&g.echo_armed, __ATOMIC_ACQUIRE)
+            ? j1850_pwm_quick_decode(edata->received_symbols,
+                                     edata->num_symbols, quick, sizeof(quick))
+            : 0;
     echo = quick_len && is_own_echo(quick, quick_len);
-
-    if (quick_len && !echo && j1850_crc_check(quick, quick_len) &&
-        j1850_pwm_ifr_wanted(quick, quick_len, &g.ifr)) {
-        uint32_t edge = isr_cycle - ((uint32_t)last_active_of(edata) +
-                                     J1850_PWM_RX_IDLE_US) *
-                                        g.cpu_ticks_per_us;
-
-        ifr_transmit(g.ifr.node_address,
-                     edge + J1850_PWM_TP4_NOM * g.cpu_ticks_per_us, edge);
-        g.stats.ifr_sent++;
-    }
 
     /* Take a copy and put the receiver straight back on the air. Everything
      * below works from the copy, so the bus is unwatched for the length of a
@@ -600,6 +597,15 @@ static bool IRAM_ATTR receive_done(rmt_channel_handle_t channel,
 
     g.rx_events++;
     count_status(rx.status);
+
+    if (!echo && rx.status == J1850_PWM_RX_OK && rx.eod && rx.ifr_len == 1 &&
+        rx.ifr[0] == g.ifr.node_address) {
+        g.stats.ifr_observed++;
+        if (!g.stats.ifr_gap_min_us || rx.eod_gap_us < g.stats.ifr_gap_min_us)
+            g.stats.ifr_gap_min_us = rx.eod_gap_us;
+        if (rx.eod_gap_us > g.stats.ifr_gap_max_us)
+            g.stats.ifr_gap_max_us = rx.eod_gap_us;
+    }
 
     if (echo) {
         __atomic_store_n(&g.echo_armed, false, __ATOMIC_RELAXED);
@@ -810,10 +816,6 @@ static int j1850_pwm_tx(const bus_msg_t *msg, uint32_t flags) {
             break;
         }
 
-        if (attempt >= g.retries) {
-            break;
-        }
-
         /* Retry only into total silence. Anything at all on the bus - a
          * module's in-frame response, its answering frame, even a capture
          * that failed to decode - means the frame was heard, and asking a
@@ -834,7 +836,9 @@ static int j1850_pwm_tx(const bus_msg_t *msg, uint32_t flags) {
             }
         }
 
-        if (g.rx_events != events_before) {
+        /* RX closes after TX finishes its final bit cell. Keep echo
+         * suppression armed for that capture even when retries are off. */
+        if (g.rx_events != events_before || attempt >= g.retries) {
             break;
         }
 
@@ -942,7 +946,7 @@ static esp_err_t j1850_pwm_open(const bus_cfg_t *cfg) {
     g.crc_tx = true;
     g.crc_rx = true;
     g.loopback = false;
-    g.cpu_ticks_per_us = measure_cpu_ticks_per_us();
+    g.cpu_ticks_per_us = (uint32_t)esp_clk_cpu_freq() / 1000000u;
     /* Zero: deliver every frame. Collapsing retransmissions is a client's
      * choice, made through BUS_P_DUPLICATE_MS - see j1850_pwm.h. */
     g.dup_window_cycles = 0;
@@ -1006,6 +1010,13 @@ static esp_err_t j1850_pwm_open(const bus_cfg_t *cfg) {
         goto fail;
     }
 
+    if (gpio_set_intr_type(PIN_J1850_PWM_RX, GPIO_INTR_ANYEDGE) != ESP_OK ||
+        gpio_isr_handler_add(PIN_J1850_PWM_RX, pwm_edge_isr, NULL) != ESP_OK)
+        goto fail;
+    g.edge_installed = true;
+    if (gpio_intr_enable(PIN_J1850_PWM_RX) != ESP_OK)
+        goto fail;
+
     g.started = true;
     ESP_LOGI(TAG,
              "up: 41.6 kbps, %u us arming threshold, %" PRIu32
@@ -1028,6 +1039,15 @@ static esp_err_t j1850_pwm_close(void) {
         xSemaphoreTake(g.tx_lock, portMAX_DELAY);
     g.started = false;
 
+    if (g.edge_installed) {
+        gpio_intr_disable(PIN_J1850_PWM_RX);
+        err = j1850_callbacks_stop(&g.edge_guard);
+        if (err != ESP_OK)
+            goto out;
+        gpio_isr_handler_remove(PIN_J1850_PWM_RX);
+        gpio_set_intr_type(PIN_J1850_PWM_RX, GPIO_INTR_DISABLE);
+        g.edge_installed = false;
+    }
     err = j1850_callbacks_stop(&g.rx_guard);
     if (err != ESP_OK)
         goto out;
@@ -1082,7 +1102,7 @@ out:
  * left is the node's own identity, the acknowledgement policy, and the two
  * pieces of front-end policy every byte bus carries.
  */
-static int j1850_pwm_set_param(bus_param_t p, uint32_t value) {
+static int j1850_pwm_set_param_locked(bus_param_t p, uint32_t value) {
     if (!g.started) {
         return BUS_ERR_NOT_READY;
     }
@@ -1107,7 +1127,7 @@ static int j1850_pwm_set_param(bus_param_t p, uint32_t value) {
         return value == BUS_NORMAL ? 0 : BUS_ERR_UNSUPPORTED;
 
     case BUS_P_IFR_ENABLED:
-        g.ifr.enabled = value != 0;
+        __atomic_store_n(&g.ifr.enabled, value != 0, __ATOMIC_RELEASE);
         return 0;
 
     case BUS_P_IFR_BYTE:
@@ -1143,6 +1163,16 @@ static int j1850_pwm_set_param(bus_param_t p, uint32_t value) {
     default:
         return BUS_ERR_UNSUPPORTED;
     }
+}
+
+static int j1850_pwm_set_param(bus_param_t p, uint32_t value) {
+    portENTER_CRITICAL(&g_ifr_spinlock);
+    int rc = j1850_pwm_set_param_locked(p, value);
+    if (rc == 0 && (p == BUS_P_IFR_ENABLED || p == BUS_P_IFR_BYTE ||
+                    p == BUS_P_NODE_ADDRESS))
+        __atomic_add_fetch(&g.ifr_generation, 1, __ATOMIC_RELEASE);
+    portEXIT_CRITICAL(&g_ifr_spinlock);
+    return rc;
 }
 
 static int j1850_pwm_get_param(bus_param_t p, uint32_t *out) {
@@ -1197,7 +1227,7 @@ static int j1850_pwm_get_param(bus_param_t p, uint32_t *out) {
  * which is exactly what the table is for: a frame addressed to a functional
  * group this tester belongs to is one this tester must acknowledge.
  */
-static int j1850_pwm_ioctl(bus_ioctl_t id, const void *in, void *out) {
+static int j1850_pwm_ioctl_impl(bus_ioctl_t id, const void *in, void *out) {
     (void)out;
 
     if (!g.started) {
@@ -1266,6 +1296,20 @@ static int j1850_pwm_ioctl(bus_ioctl_t id, const void *in, void *out) {
 /* ------------------------------------------------------------------ *
  * Diagnostics
  * ------------------------------------------------------------------ */
+
+static int j1850_pwm_ioctl(bus_ioctl_t id, const void *in, void *out) {
+    bool table = id == BUS_IOCTL_CLEAR_FUNCT_TABLE ||
+                 id == BUS_IOCTL_ADD_FUNCT_ADDR ||
+                 id == BUS_IOCTL_DEL_FUNCT_ADDR;
+    if (!table)
+        return j1850_pwm_ioctl_impl(id, in, out);
+    portENTER_CRITICAL(&g_ifr_spinlock);
+    int rc = j1850_pwm_ioctl_impl(id, in, out);
+    if (rc == 0)
+        __atomic_add_fetch(&g.ifr_generation, 1, __ATOMIC_RELEASE);
+    portEXIT_CRITICAL(&g_ifr_spinlock);
+    return rc;
+}
 
 /**
  * @brief The shared counters, filled from this driver's own.
