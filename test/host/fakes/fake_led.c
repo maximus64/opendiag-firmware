@@ -9,33 +9,22 @@
 static led_state_t g_state = LED_STATE_IDLE;
 static int g_changes;
 
-void fake_led_reset(void)
-{
+void fake_led_reset(void) {
     g_state = LED_STATE_IDLE;
     g_changes = 0;
 }
 
-led_state_t fake_led_state(void)
-{
-    return g_state;
-}
+led_state_t fake_led_state(void) { return g_state; }
 
-int fake_led_change_count(void)
-{
-    return g_changes;
-}
+int fake_led_change_count(void) { return g_changes; }
 
 /* ------------------------------------------------------------------ *
  * ws2812_led.h implementation
  * ------------------------------------------------------------------ */
 
-void ws2812_led_init(void)
-{
-    fake_led_reset();
-}
+void ws2812_led_init(void) { fake_led_reset(); }
 
-void ws2812_led_set_state(led_state_t new_state)
-{
+void ws2812_led_set_state(led_state_t new_state) {
     if (new_state != g_state) {
         g_changes++;
     }

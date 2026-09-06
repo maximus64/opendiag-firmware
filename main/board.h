@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #pragma once
 
+#include "esp_err.h"
+
 enum hs_pin {
     HS_OBD_PIN_6 = 6,
     HS_OBD_PIN_9 = 9,
@@ -14,16 +16,14 @@ enum ls_pin {
     LS_OBD_PIN_15 = 15,
 };
 
+/* Call once before drivers; installs the shared GPIO ISR service. */
 void board_setup(void);
-
 
 void board_hs_ls_reset_state(void);
 void board_set_hs_boost_en(int state);
 void board_set_hs_voltage(uint32_t mvolt);
 void board_set_hs_state(enum hs_pin pin, int state);
 void board_set_ls_state(enum ls_pin pin, int state);
-
-uint8_t board_get_boardid(void);
 
 /* return voltage value in millivolt */
 int32_t board_get_vbatt(void);
@@ -32,3 +32,10 @@ int32_t board_get_hs_vsense(void);
 /* factory calibration */
 void board_calibrate_hs(void);
 void board_calibrate_vbatt(void);
+
+esp_err_t board_calibration_set(const char *name, int32_t value);
+
+/* Calibration field name by index, NULL past the last one. */
+const char *board_calibration_field(int index);
+
+void board_print_info(void);

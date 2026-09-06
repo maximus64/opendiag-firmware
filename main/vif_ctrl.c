@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_app_desc.h"
 #include "esp_log.h"
 
 #include "common.h"
@@ -30,8 +31,7 @@
 static void reply(char *out, size_t cap, const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
 
-static void reply(char *out, size_t cap, const char *fmt, ...)
-{
+static void reply(char *out, size_t cap, const char *fmt, ...) {
     va_list ap;
 
     if (!out || !cap) {
@@ -52,8 +52,7 @@ static void reply(char *out, size_t cap, const char *fmt, ...)
  *
  * @return false when the command is empty or too long to be one of ours.
  */
-static bool normalise(const char *cmd, size_t len, char *dst, size_t cap)
-{
+static bool normalise(const char *cmd, size_t len, char *dst, size_t cap) {
     size_t n = 0;
 
     if (!cmd) {
@@ -82,15 +81,15 @@ static bool normalise(const char *cmd, size_t len, char *dst, size_t cap)
 }
 
 /** @brief Every registered grammar, comma separated, into @p dst. */
-static void mode_list(char *dst, size_t cap)
-{
+static void mode_list(char *dst, size_t cap) {
     const vif_frontend_t *fe;
     size_t pos = 0;
 
     dst[0] = '\0';
 
     for (size_t i = 0; (fe = vif_frontend_at(i)) != NULL; i++) {
-        int n = snprintf(dst + pos, cap - pos, "%s%s", pos ? "," : "", fe->name);
+        int n =
+            snprintf(dst + pos, cap - pos, "%s%s", pos ? "," : "", fe->name);
 
         if (n < 0 || (size_t)n >= cap - pos) {
             break;
@@ -99,46 +98,22 @@ static void mode_list(char *dst, size_t cap)
     }
 }
 
-static bool cmd_id(vif_session_t *s, char *out, size_t cap)
-{
+static bool cmd_id(vif_session_t *s, char *out, size_t cap) {
     char modes[64];
     const char *fe = vif_session_frontend_name(s);
 
     mode_list(modes, sizeof(modes));
 
-    reply(out, cap, "%s %s fw=%s link=%s mode=%s modes=%s",
-          OPENDIAG_PRODUCT, OPENDIAG_HARDWARE, OPENDIAG_VERSION,
-          vif_session_name(s) ? vif_session_name(s) : "-",
-          fe ? fe : "-", modes);
+    reply(out, cap, "%s %s fw=%s link=%s mode=%s modes=%s", OPENDIAG_PRODUCT,
+          OPENDIAG_HARDWARE, esp_app_get_description()->version,
+          vif_session_name(s) ? vif_session_name(s) : "-", fe ? fe : "-",
+          modes);
 
     return true;
 }
 
-static bool cmd_bus(char *out, size_t cap)
-{
-    vif_bus_info_t info;
-
-    vif_bus_info(&info);
-
-    if (info.bus == VIF_BUS_NONE) {
-        reply(out, cap, "BUS none");
-        return true;
-    }
-
-    if (info.bitrate) {
-        reply(out, cap, "BUS %s %" PRIu32 " held=%s",
-              vif_bus_name(info.bus), info.bitrate, info.owner);
-    }
-    else {
-        reply(out, cap, "BUS %s held=%s", vif_bus_name(info.bus), info.owner);
-    }
-
-    return true;
-}
-
-static bool cmd_mode_set(vif_session_t *s, const char *name,
-                         char *out, size_t cap)
-{
+static bool cmd_mode_set(vif_session_t *s, const char *name, char *out,
+                         size_t cap) {
     const vif_frontend_t *fe = vif_frontend_find(name);
     char modes[64];
 
@@ -148,12 +123,7 @@ static bool cmd_mode_set(vif_session_t *s, const char *name,
         return false;
     }
 
-    /*
-     * The claims stay exactly where they are. That is the whole point of
-     * switching inside the session rather than opening a second one: a
-     * programming voltage raised under ELM327 is still up when the flash
-     * starts under SLCAN.
-     */
+    /* Every claim goes with the old grammar; vif drops them on the way. */
     if (vif_session_set_frontend(s, fe) != ESP_OK) {
         reply(out, cap, "ERR cannot switch to %s", fe->name);
         return false;
@@ -165,28 +135,79 @@ static bool cmd_mode_set(vif_session_t *s, const char *name,
     return true;
 }
 
-static bool cmd_reset(vif_session_t *s, char *out, size_t cap)
-{
+/**
+ * @brief What is live on the wire, and who holds it.
+ *
+ * Several buses can be up at once, so this is a list. A client refused a
+ * claim has no other way to find out who has it; the shell is not reachable
+ * from a phone.
+ */
+static bool cmd_bus(char *out, size_t cap) {
+    vif_bus_claim_t claim[VIF_BUS_GROUPS];
+    size_t pos = 0;
+
+    vif_bus_info(claim);
+
+    pos += (size_t)snprintf(out, cap, "BUS");
+
+    for (size_t i = 0; i < VIF_BUS_GROUPS && pos < cap; i++) {
+        int n;
+
+        if (claim[i].bus == VIF_BUS_NONE) {
+            continue;
+        }
+
+        n = snprintf(out + pos, cap - pos, " %s", vif_bus_name(claim[i].bus));
+        if (n < 0 || (size_t)n >= cap - pos) {
+            break;
+        }
+        pos += (size_t)n;
+
+        if (claim[i].bitrate) {
+            n = snprintf(out + pos, cap - pos, "@%" PRIu32, claim[i].bitrate);
+            if (n < 0 || (size_t)n >= cap - pos) {
+                break;
+            }
+            pos += (size_t)n;
+        }
+
+        n = snprintf(out + pos, cap - pos, "/%s", claim[i].owner);
+        if (n < 0 || (size_t)n >= cap - pos) {
+            break;
+        }
+        pos += (size_t)n;
+    }
+
+    return true;
+}
+
+static bool cmd_reset(vif_session_t *s, char *out, size_t cap) {
     const vif_frontend_t *fe = vif_session_default_frontend(s);
 
     /*
      * Unlike a client simply going away, this is an explicit request to let
-     * go: the bus and any energised pin are released as well as the grammar.
+     * go: every bus and any energised pin are released as well as the
+     * grammar. Done here rather than left to the switch below, because a
+     * session with no default has no switch to make.
      */
-    vif_bus_close(s);
+    esp_err_t err = vif_bus_release_all(s);
     vif_pin_release_all(s);
 
-    if (fe) {
-        vif_session_set_frontend(s, fe);
+    if (err != ESP_OK) {
+        reply(out, cap, "ERR bus close failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    if (fe && vif_session_set_frontend(s, fe) != ESP_OK) {
+        reply(out, cap, "ERR cannot reset %s", fe->name);
+        return false;
     }
 
     reply(out, cap, "RESET %s", fe ? fe->name : "-");
     return true;
 }
 
-bool vif_ctrl_exec(vif_session_t *s, const char *cmd, size_t len,
-                   char *out, size_t cap)
-{
+bool vif_ctrl_exec(vif_session_t *s, const char *cmd, size_t len, char *out,
+                   size_t cap) {
     char buf[CTRL_CMD_MAX];
 
     if (!out || !cap) {
@@ -208,7 +229,8 @@ bool vif_ctrl_exec(vif_session_t *s, const char *cmd, size_t len,
     }
 
     if (strcmp(buf, "MODE") == 0 || strncmp(buf, "MODE=", 5) == 0) {
-        /* Both forms are about a link's grammar, and the shell is not a link. */
+        /* Both forms are about a link's grammar, and the shell is not a link.
+         */
         if (!vif_session_is_link(s)) {
             reply(out, cap, "ERR '%s' carries no protocol",
                   vif_session_name(s));

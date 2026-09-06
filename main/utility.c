@@ -1,11 +1,10 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
-#include <stdio.h>
 #include <ctype.h>
+#include <stdio.h>
 #include "esp_timer.h"
 
-void hexdump(const void* data, size_t size)
-{
-    const unsigned char* byte_data = (const unsigned char*)data;
+void hexdump(const void *data, size_t size) {
+    const unsigned char *byte_data = (const unsigned char *)data;
     size_t i = 0;
 
     while (i < size) {
@@ -40,18 +39,17 @@ int8_t hex_char_to_int(char c) {
     if (c >= 'A' && c <= 'F') {
         return c - 'A' + 10;
     }
-    return -1; // Invalid hex character
+    return -1;
 }
 
-int hex_string_to_u8_array(const char* hex_str, size_t len, uint8_t* output_array,
-                           size_t output_size)
-{
+int hex_string_to_u8_array(const char *hex_str, size_t len,
+                           uint8_t *output_array, size_t output_size) {
     size_t i = 0;
     int byte_count = 0;
     int8_t high_nibble, low_nibble;
 
     if ((len / 2) > output_size) {
-        return -2; // Output buffer too small
+        return -2;
     }
 
     while (len >= 2) {
@@ -60,14 +58,11 @@ int hex_string_to_u8_array(const char* hex_str, size_t len, uint8_t* output_arra
             return -1;
         }
 
-        low_nibble = hex_char_to_int(hex_str[i+1]);
+        low_nibble = hex_char_to_int(hex_str[i + 1]);
         if (low_nibble < 0) {
             return -1;
         }
 
-        // Combine the two nibbles into a single byte.
-        // For example, "2A" -> high_nibble=2, low_nibble=10 (0xA)
-        // (2 << 4) | 10  ->  0x20 | 0x0A  ->  0x2A
         output_array[byte_count] = (uint8_t)((high_nibble << 4) | low_nibble);
 
         i += 2;
@@ -78,8 +73,7 @@ int hex_string_to_u8_array(const char* hex_str, size_t len, uint8_t* output_arra
     return byte_count;
 }
 
-int hex_string_to_u32_be(const char* hex_str, size_t len, uint32_t *output)
-{
+int hex_string_to_u32_be(const char *hex_str, size_t len, uint32_t *output) {
     uint32_t val = 0;
     size_t i = 0;
 
@@ -100,8 +94,7 @@ int hex_string_to_u32_be(const char* hex_str, size_t len, uint32_t *output)
     return 0;
 }
 
-void delay_us(uint32_t us)
-{
+void delay_us(uint32_t us) {
     int64_t start_time = esp_timer_get_time();
     while (esp_timer_get_time() - start_time < us) {
         continue;

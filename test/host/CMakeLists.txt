@@ -51,8 +51,9 @@ add_library(td_framework STATIC
 )
 
 add_library(td_fakes STATIC
+    fakes/fake_ble_uart.c
     fakes/fake_board.c
-    fakes/fake_bytebus.c
+    fakes/fake_bus.c
     fakes/fake_can_bus.c
     fakes/fake_gpio.c
     fakes/fake_led.c
@@ -73,6 +74,8 @@ target_link_libraries(td_fakes PUBLIC td_framework)
 
 set(ELM327_FW
     ${FW_DIR}/comm_iface.c
+    ${FW_DIR}/kline_codec.c
+    ${FW_DIR}/bus.c
     ${FW_DIR}/timer.c
     ${FW_DIR}/utility.c
     ${FW_DIR}/vif.c
@@ -88,6 +91,12 @@ set(SUITES
     test_vif_ctrl
     test_slcan
     test_button
+    test_can_driver
+    test_kline_driver
+    test_j1850_lifecycle
+    test_j1850_pwm_codec
+    test_j1850_vpw_codec
+    test_kline_codec
 )
 
 set(test_elm327_at_FW      ${ELM327_FW})
@@ -96,17 +105,34 @@ set(test_elm327_bytebus_FW ${ELM327_FW})
 set(test_elm327_search_FW  ${ELM327_FW})
 set(test_comm_iface_FW     "")
 set(test_button_FW         "")
+set(test_ble_pair_policy_FW "")
 set(test_vif_FW
     ${FW_DIR}/comm_iface.c
+    ${FW_DIR}/kline_codec.c
+    ${FW_DIR}/bus.c
     ${FW_DIR}/vif.c
 )
 set(test_vif_ctrl_FW
     ${FW_DIR}/comm_iface.c
+    ${FW_DIR}/kline_codec.c
+    ${FW_DIR}/bus.c
     ${FW_DIR}/vif.c
     ${FW_DIR}/vif_ctrl.c
 )
+set(test_can_driver_FW ${FW_DIR}/can_bus.c driver_stubs/driver_rtos.c)
+set(test_kline_driver_FW ${FW_DIR}/kline_codec.c ${FW_DIR}/bus.c
+    ${FW_DIR}/utility.c driver_stubs/driver_rtos.c)
+set(test_j1850_lifecycle_FW ${FW_DIR}/j1850_lifecycle.c)
+set(test_j1850_pwm_codec_FW ${FW_DIR}/j1850_pwm_codec.c
+    ${FW_DIR}/j1850_common.c)
+set(test_j1850_vpw_codec_FW ${FW_DIR}/j1850_vpw_codec.c
+    ${FW_DIR}/j1850_common.c)
+set(test_kline_codec_FW     ${FW_DIR}/kline_codec.c
+    ${FW_DIR}/bus.c)
 set(test_slcan_FW
     ${FW_DIR}/comm_iface.c
+    ${FW_DIR}/kline_codec.c
+    ${FW_DIR}/bus.c
     ${FW_DIR}/slcan.c
     ${FW_DIR}/utility.c
     ${FW_DIR}/vif.c
@@ -123,6 +149,10 @@ endif()
 foreach(suite ${SUITES})
     add_executable(${suite} suites/${suite}.c ${${suite}_FW})
     target_link_libraries(${suite} PRIVATE td_fakes td_framework)
+    if(suite STREQUAL "test_can_driver" OR suite STREQUAL "test_kline_driver")
+        target_include_directories(${suite} BEFORE PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/driver_stubs)
+    endif()
 
     if(COVERAGE)
         # Only the suite objects are instrumented, and those are the ones

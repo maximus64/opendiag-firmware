@@ -1,12 +1,14 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #include "comm_iface.h"
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
-#include <inttypes.h>
-#include "esp_log.h"
-#include "esp_heap_caps.h"
+#include <strings.h>
 #include "freertos/ringbuf.h"
 #include "freertos/semphr.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "ble_uart.h"
 
 static const char *TAG = "comm_iface";
 
@@ -14,32 +16,32 @@ typedef struct {
     bool active;
     char name[COMM_NAME_LEN];
     comm_port_ops_t ops;
-    RingbufHandle_t rx_stream;      /* Bytes received, waiting for the session */
-    uint32_t rx_dropped;            /* Chunks lost to a full rx_stream */
+    RingbufHandle_t rx_stream; /* Bytes received, waiting for the session */
+    uint32_t rx_dropped;       /* Chunks lost to a full rx_stream */
+    uint32_t rx_discarded;     /* Bytes dropped when a client went away */
+    size_t rx_pending;         /* Received and not yet read */
+    bool muted;                /* Client gone; nothing may be written yet */
 } port_t;
 
 static struct {
     bool initialized;
-    SemaphoreHandle_t lock;         /* Protects the table below */
+    SemaphoreHandle_t lock; /* Protects the table below */
     port_t ports[COMM_MAX_PORTS];
 } g_comm;
 
-#define LOCK()   xSemaphoreTake(g_comm.lock, portMAX_DELAY)
+#define LOCK() xSemaphoreTake(g_comm.lock, portMAX_DELAY)
 #define UNLOCK() xSemaphoreGive(g_comm.lock)
 
-static bool port_valid(comm_port_id_t id)
-{
+static bool port_valid(comm_port_id_t id) {
     return id < COMM_MAX_PORTS && g_comm.ports[id].active;
 }
 
-static void copy_name(char *dst, const char *src)
-{
+static void copy_name(char *dst, const char *src) {
     strncpy(dst, src ? src : "?", COMM_NAME_LEN - 1);
     dst[COMM_NAME_LEN - 1] = '\0';
 }
 
-esp_err_t comm_iface_init(void)
-{
+esp_err_t comm_iface_init(void) {
     if (g_comm.initialized) {
         return ESP_OK;
     }
@@ -58,8 +60,7 @@ esp_err_t comm_iface_init(void)
 }
 
 comm_port_id_t comm_port_register(const char *name, const comm_port_ops_t *ops,
-                                  size_t rx_buf_size)
-{
+                                  size_t rx_buf_size) {
     comm_port_id_t id = COMM_INVALID_PORT_ID;
     RingbufHandle_t stream;
 
@@ -91,6 +92,9 @@ comm_port_id_t comm_port_register(const char *name, const comm_port_ops_t *ops,
         port->ops = *ops;
         port->rx_stream = stream;
         port->rx_dropped = 0;
+        port->rx_discarded = 0;
+        port->rx_pending = 0;
+        port->muted = false;
         copy_name(port->name, name);
     }
     UNLOCK();
@@ -106,8 +110,8 @@ comm_port_id_t comm_port_register(const char *name, const comm_port_ops_t *ops,
     return id;
 }
 
-esp_err_t comm_port_rx(comm_port_id_t port_id, const uint8_t *data, size_t length)
-{
+esp_err_t comm_port_rx(comm_port_id_t port_id, const uint8_t *data,
+                       size_t length) {
     port_t *port;
 
     if (!g_comm.initialized) {
@@ -127,10 +131,14 @@ esp_err_t comm_port_rx(comm_port_id_t port_id, const uint8_t *data, size_t lengt
 
     /* Non-blocking on purpose. We are running in the transport's task, so
      * waiting here would stall USB or BLE for every other consumer. */
-    if (xRingbufferSend(port->rx_stream, data, length, 0) != pdTRUE) {
+    if (xRingbufferSend(port->rx_stream, data, length, 0) == pdTRUE) {
+        port->rx_pending += length;
+    } else {
         port->rx_dropped++;
-        ESP_LOGW(TAG, "port '%s': rx buffer full, dropped %u bytes (%"
-                 PRIu32 " total)", port->name, (unsigned)length, port->rx_dropped);
+        ESP_LOGW(TAG,
+                 "port '%s': rx buffer full, dropped %u bytes (%" PRIu32
+                 " total)",
+                 port->name, (unsigned)length, port->rx_dropped);
     }
     UNLOCK();
 
@@ -138,8 +146,7 @@ esp_err_t comm_port_rx(comm_port_id_t port_id, const uint8_t *data, size_t lengt
 }
 
 size_t comm_port_read(comm_port_id_t port_id, uint8_t *buf, size_t length,
-                      TickType_t timeout)
-{
+                      TickType_t timeout) {
     RingbufHandle_t stream;
     size_t size = 0;
     void *item;
@@ -165,7 +172,90 @@ size_t comm_port_read(comm_port_id_t port_id, uint8_t *buf, size_t length,
     memcpy(buf, item, size);
     vRingbufferReturnItem(stream, item);
 
+    LOCK();
+    if (port_valid(port_id)) {
+        port_t *port = &g_comm.ports[port_id];
+
+        port->rx_pending -= size < port->rx_pending ? size : port->rx_pending;
+    }
+    UNLOCK();
+
     return size;
+}
+
+size_t comm_port_rx_pending(comm_port_id_t port_id) {
+    size_t pending = 0;
+
+    if (!g_comm.initialized) {
+        return 0;
+    }
+
+    LOCK();
+    if (port_valid(port_id)) {
+        pending = g_comm.ports[port_id].rx_pending;
+    }
+    UNLOCK();
+
+    return pending;
+}
+
+/** @brief Throw away everything the port has received and nobody has read. */
+static uint32_t rx_stream_drain(RingbufHandle_t stream) {
+    uint32_t dropped = 0;
+    size_t size;
+    void *item;
+
+    /* The byte buffer hands back a pointer into itself and stops at the wrap,
+     * so one receive is not one drain. SIZE_MAX rather than the ring buffer's
+     * own "0 means everything contiguous": zero is indistinguishable from a
+     * caller asking for nothing, and this asks for as much as there is. */
+    while ((item = xRingbufferReceiveUpTo(stream, &size, 0, SIZE_MAX)) !=
+           NULL) {
+        dropped += (uint32_t)size;
+        vRingbufferReturnItem(stream, item);
+    }
+
+    return dropped;
+}
+
+void comm_port_client_gone(comm_port_id_t port_id) {
+    port_t *port;
+    uint32_t dropped;
+
+    if (!g_comm.initialized) {
+        return;
+    }
+
+    LOCK();
+    if (!port_valid(port_id)) {
+        UNLOCK();
+        return;
+    }
+
+    port = &g_comm.ports[port_id];
+    dropped = rx_stream_drain(port->rx_stream);
+    port->rx_discarded += dropped;
+    port->rx_pending = 0;
+    port->muted = true;
+    UNLOCK();
+
+    if (dropped) {
+        ESP_LOGI(TAG,
+                 "port '%s': client gone, %" PRIu32 " unread byte(s) dropped",
+                 g_comm.ports[port_id].name, dropped);
+    }
+}
+
+void comm_port_client_ready(comm_port_id_t port_id) {
+    if (!g_comm.initialized) {
+        return;
+    }
+
+    LOCK();
+    if (port_valid(port_id)) {
+        g_comm.ports[port_id].muted = false;
+    }
+    UNLOCK();
 }
 
 /**
@@ -175,8 +265,7 @@ size_t comm_port_read(comm_port_id_t port_id, uint8_t *buf, size_t length,
  * response would otherwise be silently truncated when the host is slow.
  */
 static bool port_write_all(const comm_port_ops_t *ops, const uint8_t *data,
-                           size_t length)
-{
+                           size_t length) {
     int written = ops->write(data, length);
 
     if (written <= 0) {
@@ -198,9 +287,10 @@ static bool port_write_all(const comm_port_ops_t *ops, const uint8_t *data,
     return true;
 }
 
-esp_err_t comm_port_write(comm_port_id_t port_id, const void *data, size_t length)
-{
+esp_err_t comm_port_write(comm_port_id_t port_id, const void *data,
+                          size_t length) {
     comm_port_ops_t ops;
+    bool muted;
 
     if (!g_comm.initialized || !data || length == 0) {
         return ESP_ERR_INVALID_ARG;
@@ -214,7 +304,18 @@ esp_err_t comm_port_write(comm_port_id_t port_id, const void *data, size_t lengt
         return ESP_ERR_INVALID_ARG;
     }
     ops = g_comm.ports[port_id].ops;
+    muted = g_comm.ports[port_id].muted;
     UNLOCK();
+
+    /*
+     * The client this was composed for has gone. It is the tail of that
+     * client's conversation - very often the prompt that ends it - and the
+     * one who has connected since did not ask for it and cannot make sense of
+     * it. See comm_port_client_gone().
+     */
+    if (muted) {
+        return ESP_ERR_NOT_FOUND;
+    }
 
     /*
      * Nothing is written to a port with no client. tinyusb_cdcacm_write_queue()
@@ -228,8 +329,7 @@ esp_err_t comm_port_write(comm_port_id_t port_id, const void *data, size_t lengt
     return port_write_all(&ops, data, length) ? ESP_OK : ESP_FAIL;
 }
 
-void comm_port_flush(comm_port_id_t port_id)
-{
+void comm_port_flush(comm_port_id_t port_id) {
     void (*flush)(void) = NULL;
 
     if (!g_comm.initialized) {
@@ -247,8 +347,7 @@ void comm_port_flush(comm_port_id_t port_id)
     }
 }
 
-uint32_t comm_port_rx_dropped(comm_port_id_t port_id)
-{
+uint32_t comm_port_rx_dropped(comm_port_id_t port_id) {
     uint32_t dropped = 0;
 
     if (!g_comm.initialized) {
@@ -264,8 +363,7 @@ uint32_t comm_port_rx_dropped(comm_port_id_t port_id)
     return dropped;
 }
 
-void comm_print_debug_info(void)
-{
+void comm_print_debug_info(void) {
     if (!g_comm.initialized) {
         printf("comm_iface not initialized\n");
         return;
@@ -283,8 +381,30 @@ void comm_print_debug_info(void)
         }
 
         connected = port->ops.is_connected ? port->ops.is_connected() : true;
-        printf("  [%d] %-8s connected:%-4s rx_dropped:%" PRIu32 "\n",
-               i, port->name, connected ? "yes" : "no", port->rx_dropped);
+        printf("  [%d] %-8s connected:%-4s muted:%-4s rx_dropped:%" PRIu32
+               " rx_discarded:%" PRIu32 " backlog:%u\n",
+               i, port->name, connected ? "yes" : "no",
+               port->muted ? "yes" : "no", port->rx_dropped, port->rx_discarded,
+               (unsigned)port->rx_pending);
+
+        /* BLE is the one transport that can lose part of a response rather
+         * than all of it, and a truncated ELM327 reply is the hardest fault
+         * on this device to diagnose from the client's end - it looks like a
+         * flaky bus. So the count is here rather than nowhere. */
+        if (strcasecmp(port->name, "ble") == 0) {
+            uint32_t dropped = 0, retries = 0;
+
+            uint32_t rx_bytes = 0, widest = 0, refused = 0;
+
+            ble_uart_get_notify_stats(&dropped, &retries);
+            ble_uart_get_rx_stats(&rx_bytes, &widest, &refused);
+            printf("           notify_dropped:%" PRIu32
+                   " notify_retries:%" PRIu32 "\n",
+                   dropped, retries);
+            printf("           rx_bytes:%" PRIu32 " widest_write:%" PRIu32
+                   " refused:%" PRIu32 "\n",
+                   rx_bytes, widest, refused);
+        }
     }
 
     UNLOCK();

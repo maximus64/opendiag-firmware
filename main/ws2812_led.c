@@ -1,21 +1,18 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #include "ws2812_led.h"
-#include "driver/spi_master.h"
-#include "esp_log.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/queue.h"
-#include "pinout.h"
 #include <math.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
+#include "esp_log.h"
+#include "driver/spi_master.h"
+#include "pinout.h"
 
-/**
- * @brief Maximum brightness for the LED (0-255).
- * * This value scales the brightness of all colors to prevent the LED from being too bright
- * and to reduce power consumption. A value of 128 is a good starting point.
+/*
+ * This value scales the brightness of all colors to prevent the LED from
+ * being too bright and to reduce power consumption.
  */
 #define LED_MAX_BRIGHTNESS 128
-
-// --- Private Declarations ---
 
 // SPI timing bits for WS2812B protocol.
 // Each 4 bits of color data are encoded into a 16-bit SPI word.
@@ -23,35 +20,22 @@ static const uint16_t timing_bits[16] = {
     0x1111, 0x7111, 0x1711, 0x7711, 0x1171, 0x7171, 0x1771, 0x7771,
     0x1117, 0x7117, 0x1717, 0x7717, 0x1177, 0x7177, 0x1777, 0x7777};
 
-// SPI device handle
 static spi_device_handle_t spi_handle;
-
-// FreeRTOS queue to send state changes to the animation task
 static QueueHandle_t led_state_queue;
-
-// Current state of the LED
 static led_state_t current_state = LED_STATE_IDLE;
 
 // SPI buffer: 6 words for color data + 2 for reset pulse
 static uint16_t led_buf[8] = {0};
 
-// Color definitions
-#define COLOR_CYAN  0x00FFFF
+#define COLOR_CYAN 0x00FFFF
 #define COLOR_GREEN 0x00FF00
-#define COLOR_RED   0xFF0000
+#define COLOR_RED 0xFF0000
 #define COLOR_AMBER 0xFF6000
-#define COLOR_OFF   0x000000
+#define COLOR_BLUE 0x0000FF
+#define COLOR_OFF 0x000000
 
-static const char *TAG = "WS2812_LED";
+static const char *TAG = "RGB_LED";
 
-// --- Private Functions ---
-
-/**
- * @brief Scales a 24-bit RGB color by a brightness value.
- * @param color The input color (0x00RRGGBB).
- * @param brightness The brightness value (0-255).
- * @return The scaled 24-bit RGB color.
- */
 static uint32_t scale_color(uint32_t color, uint8_t brightness) {
     uint8_t r = (color >> 16) & 0xFF;
     uint8_t g = (color >> 8) & 0xFF;
@@ -64,11 +48,6 @@ static uint32_t scale_color(uint32_t color, uint8_t brightness) {
     return (r << 16) | (g << 8) | b;
 }
 
-/**
- * @brief Sends a 24-bit RGB color to the WS2812B LED.
- * This is the low-level function that transmits data over SPI.
- * @param rgb The 24-bit color to set (format: 0x00RRGGBB).
- */
 static void ws2812_write_led(uint32_t rgb) {
     int n = 1; // Start at index 1 to leave room for reset pulse start
 
@@ -94,9 +73,6 @@ static void ws2812_write_led(uint32_t rgb) {
     }
 }
 
-/**
- * @brief The main FreeRTOS task for handling LED animations.
- */
 static void led_animation_task(void *pvParameters) {
     led_state_t new_state;
 
@@ -104,71 +80,76 @@ static void led_animation_task(void *pvParameters) {
         // Check for a new state from the queue without blocking.
         if (xQueueReceive(led_state_queue, &new_state, 0) == pdPASS) {
             if (current_state != new_state) {
-                 ESP_LOGI(TAG, "Changing LED state to %d", new_state);
-                 current_state = new_state;
+                ESP_LOGI(TAG, "Changing LED state to %d", new_state);
+                current_state = new_state;
             }
         }
 
         switch (current_state) {
-            case LED_STATE_IDLE: {
-                // Breathing effect.
-                // The brightness is modulated using a sine wave for a smooth effect.
-                const uint32_t BREATHING_PERIOD_MS = 3000;
-                uint32_t time_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        case LED_STATE_IDLE: {
+            // Breathing effect.
+            const uint32_t BREATHING_PERIOD_MS = 3000;
+            uint32_t time_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
-                // Calculate the angle for the sine function. The angle completes a full 2*PI cycle
-                // every BREATHING_PERIOD_MS. The modulo operator prevents time_ms from overflowing
-                // or losing precision over long uptimes.
-                float angle = (float)(time_ms % BREATHING_PERIOD_MS) / (float)BREATHING_PERIOD_MS * 2.0f * M_PI;
+            float angle = (float)(time_ms % BREATHING_PERIOD_MS) /
+                          (float)BREATHING_PERIOD_MS * 2.0f * M_PI;
 
-                // The sine wave gives a value from -1 to 1. We shift and scale it to get a
-                // brightness factor from 0.0 to 1.0.
-                float brightness_factor = (sinf(angle) + 1.0f) / 2.0f;
+            float brightness_factor = (sinf(angle) + 1.0f) / 2.0f;
 
-                // Apply the brightness factor to the maximum configured brightness.
-                uint8_t brightness = (uint8_t)(brightness_factor * LED_MAX_BRIGHTNESS);
+            // Apply the brightness factor to the maximum configured brightness.
+            uint8_t brightness =
+                (uint8_t)(brightness_factor * LED_MAX_BRIGHTNESS);
 
-                ws2812_write_led(scale_color(COLOR_CYAN, brightness));
-                vTaskDelay(pdMS_TO_TICKS(20)); // Update rate for smooth animation
-                break;
-            }
-            case LED_STATE_RUNNING: {
-                // Solid green
-                ws2812_write_led(scale_color(COLOR_GREEN, LED_MAX_BRIGHTNESS));
-                vTaskDelay(pdMS_TO_TICKS(250)); // No need to update frequently
-                break;
-            }
-            case LED_STATE_PIN_LIVE: {
-                // Pulsing amber at 1Hz. A connector pin stays energised with
-                // no client attached, so the board has to say so on its own.
-                ws2812_write_led(scale_color(COLOR_AMBER, LED_MAX_BRIGHTNESS));
-                vTaskDelay(pdMS_TO_TICKS(750));
-                ws2812_write_led(scale_color(COLOR_AMBER, LED_MAX_BRIGHTNESS / 8));
-                vTaskDelay(pdMS_TO_TICKS(250));
-                break;
-            }
-            case LED_STATE_ERROR: {
-                // Flashing red at 2Hz (500ms period: 250ms on, 250ms off)
-                ws2812_write_led(scale_color(COLOR_RED, LED_MAX_BRIGHTNESS));
-                vTaskDelay(pdMS_TO_TICKS(250));
-                ws2812_write_led(COLOR_OFF);
-                vTaskDelay(pdMS_TO_TICKS(250));
-                break;
-            }
-            case LED_STATE_OFF: // Fall through
-            default:
-                // Turn off LED for any unknown state
-                ws2812_write_led(COLOR_OFF);
-                vTaskDelay(pdMS_TO_TICKS(250));
-                break;
+            ws2812_write_led(scale_color(COLOR_CYAN, brightness));
+            vTaskDelay(pdMS_TO_TICKS(20)); // Update rate
+            break;
+        }
+        case LED_STATE_RUNNING: {
+            // Solid green
+            ws2812_write_led(scale_color(COLOR_GREEN, LED_MAX_BRIGHTNESS));
+            vTaskDelay(pdMS_TO_TICKS(250)); // No need to update frequently
+            break;
+        }
+        case LED_STATE_PIN_LIVE: {
+            // Pulsing amber at 1Hz. A connector pin stays energised with
+            // no client attached, so the board has to say so on its own.
+            ws2812_write_led(scale_color(COLOR_AMBER, LED_MAX_BRIGHTNESS));
+            vTaskDelay(pdMS_TO_TICKS(750));
+            ws2812_write_led(scale_color(COLOR_AMBER, LED_MAX_BRIGHTNESS / 8));
+            vTaskDelay(pdMS_TO_TICKS(250));
+            break;
+        }
+        case LED_STATE_PAIRING: {
+            // Fast blue blink at 2.5Hz. Bluetooth pairing state
+            ws2812_write_led(scale_color(COLOR_BLUE, LED_MAX_BRIGHTNESS));
+            vTaskDelay(pdMS_TO_TICKS(200));
+            ws2812_write_led(COLOR_OFF);
+            vTaskDelay(pdMS_TO_TICKS(200));
+            break;
+        }
+        case LED_STATE_ERROR: {
+            // Flashing red at 2Hz (500ms period: 250ms on, 250ms off)
+            ws2812_write_led(scale_color(COLOR_RED, LED_MAX_BRIGHTNESS));
+            vTaskDelay(pdMS_TO_TICKS(250));
+            ws2812_write_led(COLOR_OFF);
+            vTaskDelay(pdMS_TO_TICKS(250));
+            break;
+        }
+        case LED_STATE_OFF: {
+            ws2812_write_led(COLOR_OFF);
+            vTaskDelay(pdMS_TO_TICKS(250));
+            break;
+        }
+        default: { // Solid red
+            ws2812_write_led(COLOR_RED);
+            vTaskDelay(pdMS_TO_TICKS(250));
+            break;
+        }
         }
     }
 }
 
-// --- Public Functions ---
-
 void ws2812_led_init(void) {
-    // Configuration for the SPI bus
     spi_bus_config_t buscfg = {
         .mosi_io_num = PIN_WS2812_LED,
         .miso_io_num = -1,
@@ -178,7 +159,6 @@ void ws2812_led_init(void) {
         .max_transfer_sz = sizeof(led_buf),
     };
 
-    // Configuration for the SPI device
     spi_device_interface_config_t devcfg = {
         .command_bits = 0,
         .address_bits = 0,
@@ -201,15 +181,15 @@ void ws2812_led_init(void) {
         return;
     }
 
-    // Create the animation task
     xTaskCreate(led_animation_task, "led_animation_task", 2048, NULL, 5, NULL);
 
-    ESP_LOGI(TAG, "WS2812B LED initialized");
+    ESP_LOGI(TAG, "Status RGB LED initialized");
 }
 
 void ws2812_led_set_state(led_state_t new_state) {
-    // Send the new state to the animation task via the queue
-    if (led_state_queue != NULL) {
-        xQueueSend(led_state_queue, &new_state, 0);
+    if (!led_state_queue) {
+        return;
     }
+
+    xQueueSend(led_state_queue, &new_state, 0);
 }

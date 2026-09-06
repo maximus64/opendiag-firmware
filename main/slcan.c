@@ -1,13 +1,12 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
+#include "slcan.h"
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
-
-#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
-
+#include "esp_log.h"
+#include "can_xfer.h"
 #include "comm_iface.h"
-#include "slcan.h"
 #include "utility.h"
 #include "vif.h"
 
@@ -25,7 +24,6 @@ static const char hexval[] = "0123456789ABCDEF";
 typedef struct {
     bool live;
     vif_session_t *session;
-    comm_port_id_t port;
 
     uint32_t bitrate;
 
@@ -48,23 +46,15 @@ static slcan_ctx_t g_slcan[SLCAN_MAX_INSTANCES];
  * Output
  * ------------------------------------------------------------------ */
 
-static void slcan_write(slcan_ctx_t *c, const char *s, size_t len)
-{
-    comm_port_write(c->port, s, len);
+static void slcan_write(slcan_ctx_t *c, const char *s, size_t len) {
+    comm_port_write(vif_session_port(c->session), s, len);
 }
 
-static void slcan_ack(slcan_ctx_t *c)
-{
-    slcan_write(c, "\r", 1);
-}
+static void slcan_ack(slcan_ctx_t *c) { slcan_write(c, "\r", 1); }
 
-static void slcan_nack(slcan_ctx_t *c)
-{
-    slcan_write(c, "\a", 1);
-}
+static void slcan_nack(slcan_ctx_t *c) { slcan_write(c, "\a", 1); }
 
-static void slcan_reply_str(slcan_ctx_t *c, const char *s)
-{
+static void slcan_reply_str(slcan_ctx_t *c, const char *s) {
     slcan_write(c, s, strlen(s));
 }
 
@@ -80,9 +70,8 @@ static void slcan_reply_str(slcan_ctx_t *c, const char *s)
  * still open after it, and a cached flag would only be a second answer waiting
  * to disagree with the first.
  */
-static bool slcan_is_open(const slcan_ctx_t *c)
-{
-    return vif_bus_current(c->session) == VIF_BUS_CAN;
+static bool slcan_is_open(const slcan_ctx_t *c) {
+    return vif_bus_is_open(c->session, VIF_BUS_CAN);
 }
 
 /**
@@ -92,21 +81,26 @@ static bool slcan_is_open(const slcan_ctx_t *c)
  * 800k - return 0 and are refused, rather than quietly running at some other
  * speed on a live vehicle bus.
  */
-static uint32_t slcan_bitrate(char digit)
-{
+static uint32_t slcan_bitrate(char digit) {
     switch (digit) {
-    case '2': return 50000;
-    case '4': return 125000;
-    case '5': return 250000;
-    case '6': return 500000;
-    case '8': return 1000000;
-    default:  return 0;
+    case '2':
+        return 50000;
+    case '4':
+        return 125000;
+    case '5':
+        return 250000;
+    case '6':
+        return 500000;
+    case '8':
+        return 1000000;
+    default:
+        return 0;
     }
 }
 
 /** @brief Parse a t/T/r/R command into @p f. 0 on success. */
-static int slcan_parse_frame(const char *buf, bool rtr, bool ext, struct can_frame *f)
-{
+static int slcan_parse_frame(const char *buf, bool rtr, bool ext,
+                             struct can_frame *f) {
     const int id_len = ext ? 8 : 3;
     size_t len = strlen(buf);
     uint32_t id;
@@ -147,8 +141,8 @@ static int slcan_parse_frame(const char *buf, bool rtr, bool ext, struct can_fra
     return 0;
 }
 
-static void slcan_send_frame(slcan_ctx_t *c, const char *buf, bool rtr, bool ext)
-{
+static void slcan_send_frame(slcan_ctx_t *c, const char *buf, bool rtr,
+                             bool ext) {
     struct can_frame frame;
 
     if (!slcan_is_open(c)) {
@@ -161,7 +155,7 @@ static void slcan_send_frame(slcan_ctx_t *c, const char *buf, bool rtr, bool ext
         return;
     }
 
-    if (vif_can_send(c->session, &frame) != 0) {
+    if (can_frame_send(c->session, &frame) != 0) {
         ESP_LOGE(TAG, "transmit failed");
         slcan_nack(c);
         return;
@@ -170,9 +164,8 @@ static void slcan_send_frame(slcan_ctx_t *c, const char *buf, bool rtr, bool ext
     slcan_ack(c);
 }
 
-static void slcan_open_bus(slcan_ctx_t *c)
-{
-    vif_bus_cfg_t cfg = { .bitrate = c->bitrate };
+static void slcan_open_bus(slcan_ctx_t *c) {
+    vif_bus_cfg_t cfg = {.bitrate = c->bitrate};
 
     if (slcan_is_open(c)) {
         slcan_ack(c);
@@ -188,17 +181,16 @@ static void slcan_open_bus(slcan_ctx_t *c)
     slcan_ack(c);
 }
 
-static void slcan_close_bus(slcan_ctx_t *c)
-{
-    if (slcan_is_open(c)) {
-        vif_bus_close(c->session);
+static void slcan_close_bus(slcan_ctx_t *c) {
+    if (vif_bus_current(c->session, VIF_BUS_CAN) == VIF_BUS_CAN &&
+        vif_bus_close(c->session, VIF_BUS_CAN) != ESP_OK) {
+        slcan_nack(c);
+        return;
     }
-
     slcan_ack(c);
 }
 
-static void slcan_parse_command(slcan_ctx_t *c, const char *buf)
-{
+static void slcan_parse_command(slcan_ctx_t *c, const char *buf) {
     switch (buf[0]) {
     case 'O': /* open the channel */
         slcan_open_bus(c);
@@ -239,7 +231,7 @@ static void slcan_parse_command(slcan_ctx_t *c, const char *buf)
          * the new one up, and the claim never leaves this session.
          */
         if (slcan_is_open(c)) {
-            vif_bus_cfg_t cfg = { .bitrate = rate };
+            vif_bus_cfg_t cfg = {.bitrate = rate};
 
             if (vif_bus_open(c->session, VIF_BUS_CAN, &cfg) != ESP_OK) {
                 slcan_nack(c);
@@ -277,8 +269,7 @@ static void slcan_parse_command(slcan_ctx_t *c, const char *buf)
  * Received frames
  * ------------------------------------------------------------------ */
 
-static void slcan_print_frame(slcan_ctx_t *c, const struct can_frame *f)
-{
+static void slcan_print_frame(slcan_ctx_t *c, const struct can_frame *f) {
     char buf[28];
     int pos = 0;
 
@@ -289,8 +280,7 @@ static void slcan_print_frame(slcan_ctx_t *c, const struct can_frame *f)
         for (int shift = 28; shift >= 0; shift -= 4) {
             buf[pos++] = hexval[(id >> shift) & 0xf];
         }
-    }
-    else {
+    } else {
         uint32_t id = f->id & CAN_SFF_MASK;
 
         buf[pos++] = (f->id & CAN_RTR_FLAG) ? 'r' : 't';
@@ -310,7 +300,7 @@ static void slcan_print_frame(slcan_ctx_t *c, const struct can_frame *f)
 
     buf[pos++] = '\r';
 
-    comm_port_write(c->port, buf, pos);
+    comm_port_write(vif_session_port(c->session), buf, pos);
 }
 
 /* ------------------------------------------------------------------ *
@@ -323,8 +313,7 @@ static void slcan_print_frame(slcan_ctx_t *c, const struct can_frame *f)
  * A session already speaking SLCAN keeps the instance it has, so re-installing
  * the front-end that is already running is not an error.
  */
-static slcan_ctx_t *slcan_instance_claim(vif_session_t *s)
-{
+static slcan_ctx_t *slcan_instance_claim(vif_session_t *s) {
     for (int i = 0; i < SLCAN_MAX_INSTANCES; i++) {
         if (g_slcan[i].live && g_slcan[i].session == s) {
             return &g_slcan[i];
@@ -340,8 +329,7 @@ static slcan_ctx_t *slcan_instance_claim(vif_session_t *s)
     return NULL;
 }
 
-static void *slcan_fe_create(vif_session_t *s, comm_port_id_t port)
-{
+static void *slcan_fe_create(vif_session_t *s) {
     slcan_ctx_t *c = slcan_instance_claim(s);
 
     if (!c) {
@@ -352,14 +340,12 @@ static void *slcan_fe_create(vif_session_t *s, comm_port_id_t port)
     memset(c, 0, sizeof(*c));
     c->live = true;
     c->session = s;
-    c->port = port;
     c->bitrate = 500000;
 
     return c;
 }
 
-static void slcan_fe_feed(void *ctx, const uint8_t *data, size_t len)
-{
+static void slcan_fe_feed(void *ctx, const uint8_t *data, size_t len) {
     slcan_ctx_t *c = ctx;
 
     for (size_t i = 0; i < len; i++) {
@@ -369,13 +355,12 @@ static void slcan_fe_feed(void *ctx, const uint8_t *data, size_t len)
             if (c->discard) {
                 c->discard = false;
                 slcan_nack(c);
-            }
-            else if (c->cmdidx > 0) {
+            } else if (c->cmdidx > 0) {
                 c->cmdbuf[c->cmdidx] = '\0';
                 slcan_parse_command(c, c->cmdbuf);
             }
             c->cmdidx = 0;
-            comm_port_flush(c->port);
+            comm_port_flush(vif_session_port(c->session));
             continue;
         }
 
@@ -392,8 +377,7 @@ static void slcan_fe_feed(void *ctx, const uint8_t *data, size_t len)
     }
 }
 
-static void slcan_fe_poll(void *ctx)
-{
+static void slcan_fe_poll(void *ctx) {
     slcan_ctx_t *c = ctx;
     struct can_frame frame;
     int forwarded = 0;
@@ -403,25 +387,23 @@ static void slcan_fe_poll(void *ctx)
     }
 
     while (forwarded < SLCAN_RX_BURST &&
-           vif_can_recv(c->session, &frame, 0) == 0) {
+           can_frame_recv(c->session, &frame, 0) == 0) {
         slcan_print_frame(c, &frame);
         forwarded++;
     }
 
     if (forwarded) {
-        comm_port_flush(c->port);
+        comm_port_flush(vif_session_port(c->session));
     }
 }
 
-static void slcan_fe_destroy(void *ctx)
-{
+static void slcan_fe_destroy(void *ctx) {
     slcan_ctx_t *c = ctx;
 
-    /* The CAN claim belongs to the session and outlives the front-end, so a
-     * switch to another protocol does not interrupt a transfer in progress. */
+    /* vif releases the CAN claim as it swaps the grammar, so there is nothing
+     * to hand back here beyond the instance itself. */
     c->live = false;
     c->session = NULL;
-    c->port = COMM_INVALID_PORT_ID;
 }
 
 const vif_frontend_t slcan_frontend = {
@@ -432,8 +414,7 @@ const vif_frontend_t slcan_frontend = {
     .destroy = slcan_fe_destroy,
 };
 
-void slcan_register(void)
-{
+void slcan_register(void) {
     if (vif_frontend_register(&slcan_frontend) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register the SLCAN front-end");
     }

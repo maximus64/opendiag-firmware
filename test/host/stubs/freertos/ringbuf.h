@@ -18,8 +18,8 @@
 #pragma once
 
 /* The real header exposes the capability flags used by the WithCaps calls. */
-#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
+#include "esp_heap_caps.h"
 
 typedef enum {
     RINGBUF_TYPE_NOSPLIT = 0,

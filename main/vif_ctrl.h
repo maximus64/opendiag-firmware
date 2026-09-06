@@ -21,8 +21,8 @@
  *
  *   ID            product, firmware, this link, its grammar, and every grammar
  *   MODE          the grammar running now
- *   MODE=<name>   switch to it, keeping the session's bus and pin claims
- *   BUS           which bus is live, how fast, and which link holds it
+ *   MODE=<name>   switch to it, releasing every claim the session held
+ *   BUS           which buses are live, how fast, and which link holds each
  *   RESET         release this link's claims and go back to its default
  */
 
@@ -46,5 +46,5 @@
  * @return true when the command was understood. A false return still fills
  *         @p out with something worth showing the client.
  */
-bool vif_ctrl_exec(vif_session_t *s, const char *cmd, size_t len,
-                   char *out, size_t cap);
+bool vif_ctrl_exec(vif_session_t *s, const char *cmd, size_t len, char *out,
+                   size_t cap);

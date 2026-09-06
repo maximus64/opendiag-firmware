@@ -22,9 +22,9 @@
 #define configTICK_RATE_HZ 1000
 
 #define pdMS_TO_TICKS(ms) ((TickType_t)(ms))
-#define pdTICKS_TO_MS(t)  ((uint32_t)(t))
+#define pdTICKS_TO_MS(t) ((uint32_t)(t))
 
-#define pdTRUE  1
+#define pdTRUE 1
 #define pdFALSE 0
-#define pdPASS  1
-#define pdFAIL  0
+#define pdPASS 1
+#define pdFAIL 0

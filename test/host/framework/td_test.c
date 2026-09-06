@@ -18,7 +18,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#define TD_MAX_TESTS   256
+#define TD_MAX_TESTS 256
 #define TD_TIMEOUT_SEC 10
 
 typedef struct {
@@ -34,10 +34,10 @@ static jmp_buf g_abort_test;
 static int g_in_test;
 static const char *g_current_name = "<none>";
 
-void td_register(const char *name, td_test_fn fn, const char *file)
-{
+void td_register(const char *name, td_test_fn fn, const char *file) {
     if (g_case_count >= TD_MAX_TESTS) {
-        fprintf(stderr, "td_test: more than %d tests in one binary\n", TD_MAX_TESTS);
+        fprintf(stderr, "td_test: more than %d tests in one binary\n",
+                TD_MAX_TESTS);
         exit(2);
     }
 
@@ -52,13 +52,12 @@ void td_register(const char *name, td_test_fn fn, const char *file)
  * ------------------------------------------------------------------ */
 
 #define TD_SCRATCH_SLOTS 4
-#define TD_SCRATCH_SIZE  1024
+#define TD_SCRATCH_SIZE 1024
 
 static char g_scratch[TD_SCRATCH_SLOTS][TD_SCRATCH_SIZE];
 static int g_scratch_next;
 
-static char *scratch_take(void)
-{
+static char *scratch_take(void) {
     char *p = g_scratch[g_scratch_next];
 
     g_scratch_next = (g_scratch_next + 1) % TD_SCRATCH_SLOTS;
@@ -67,8 +66,7 @@ static char *scratch_take(void)
     return p;
 }
 
-const char *td_escape(const void *data, size_t len)
-{
+const char *td_escape(const void *data, size_t len) {
     const unsigned char *src = data;
     char *out = scratch_take();
     size_t o = 0;
@@ -81,10 +79,18 @@ const char *td_escape(const void *data, size_t len)
         unsigned char c = src[i];
 
         switch (c) {
-        case '\r': o += (size_t)sprintf(out + o, "\\r"); break;
-        case '\n': o += (size_t)sprintf(out + o, "\\n"); break;
-        case '\t': o += (size_t)sprintf(out + o, "\\t"); break;
-        case '\\': o += (size_t)sprintf(out + o, "\\\\"); break;
+        case '\r':
+            o += (size_t)sprintf(out + o, "\\r");
+            break;
+        case '\n':
+            o += (size_t)sprintf(out + o, "\\n");
+            break;
+        case '\t':
+            o += (size_t)sprintf(out + o, "\\t");
+            break;
+        case '\\':
+            o += (size_t)sprintf(out + o, "\\\\");
+            break;
         default:
             if (c < 0x20 || c >= 0x7f) {
                 o += (size_t)sprintf(out + o, "\\x%02X", c);
@@ -99,8 +105,7 @@ const char *td_escape(const void *data, size_t len)
     return out;
 }
 
-const char *td_hex(const void *data, size_t len)
-{
+const char *td_hex(const void *data, size_t len) {
     const unsigned char *src = data;
     char *out = scratch_take();
     size_t o = 0;
@@ -117,8 +122,7 @@ const char *td_hex(const void *data, size_t len)
     return out;
 }
 
-int td_string_equal(const char *a, const char *b)
-{
+int td_string_equal(const char *a, const char *b) {
     if (a == b) {
         return 1;
     }
@@ -134,8 +138,7 @@ int td_string_equal(const char *a, const char *b)
 
 static int g_failures;
 
-void td_fail(const char *file, int line, const char *fmt, ...)
-{
+void td_fail(const char *file, int line, const char *fmt, ...) {
     va_list ap;
 
     printf("  FAIL %s\n    at %s:%d\n    ", g_current_name, file, line);
@@ -154,8 +157,7 @@ void td_fail(const char *file, int line, const char *fmt, ...)
     exit(1);
 }
 
-static void on_alarm(int sig)
-{
+static void on_alarm(int sig) {
     (void)sig;
 
     /* Cannot longjmp safely out of a signal handler into an unknown state, so
@@ -175,8 +177,7 @@ static void on_alarm(int sig)
  * Runner
  * ------------------------------------------------------------------ */
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
     const char *filter = NULL;
     int run = 0, passed = 0;
 

@@ -1,3 +1,14 @@
+# ELM327 AT command support
+
+What this firmware answers to, against the ELM327 v2.3 datasheet. Anything
+unticked is parsed far enough to be refused with `?` rather than silently
+ignored - a client that asks for something and gets `OK` for it has been lied
+to, which is worse than being told no.
+
+`N/A` marks commands that describe hardware this adapter does not have: the
+RS232 baud rate divisors, for instance, on a device whose links are USB and
+Bluetooth.
+
 ### General Commands
 
 | CMD | Description | Supported |
@@ -11,12 +22,12 @@
 | `I` | print the version ID | ✅ |
 | `L0, L1` | Linefeeds off, or on | ✅ |
 | `LP` | go to Low Power mode | |
-| `M0, M1` | Memory off, or on | |
+| `M0, M1` | Memory off, or on | ✅ |
 | `RD` | Read the stored Data byte | |
 | `SD hh` | Save Data byte hh | |
-| `WS` | Warm Start (quick software reset) | |
+| `WS` | Warm Start (quick software reset) | ✅ |
 | `Z` | reset all | ✅ |
-| `@1` | display the device description | |
+| `@1` | display the device description | ✅ |
 | `@2` | display the device identifier | |
 | `@3 cccccccccccc` | store the @2 identifier | |
 
@@ -43,71 +54,71 @@
 
 | CMD | Description | Supported |
 | :--- | :--- | :--- |
-| `IGN` | read the IgnMon input level | |
+| `IGN` | read the IgnMon input level | N/A |
 
 ### OBD Commands
 
 | CMD | Description | Supported |
 | :--- | :--- | :--- |
-| `AL` | Allow Long (>7 byte) messages | |
+| `AL` | Allow Long (>7 byte) messages | ✅ |
 | `AMC` | display Activity Monitor Count | |
 | `AMT hh` | set the Activity Mon Timeout to hh | |
-| `AR` | Automatically Receive | |
-| `AT0, 1, 2` | Adaptive Timing off, auto1, auto2 | |
+| `AR` | Automatically Receive | ✅ |
+| `AT0, 1, 2` | Adaptive Timing off, auto1, auto2 | ✅ |
 | `BD` | perform a Buffer Dump | |
-| `BI` | Bypass the Initialization sequence | |
-| `DP` | Describe the current Protocol | |
+| `BI` | Bypass the Initialization sequence | ✅ |
+| `DP` | Describe the current Protocol | ✅ |
 | `DPN` | Describe the Protocol by Number | ✅ |
-| `FT` | Filter for Transmitter off | |
-| `FT hh` | Filter for Transmitter = hh | |
+| `FT` | Filter for Transmitter off | ✅ |
+| `FT hh` | Filter for Transmitter = hh | ✅ |
 | `H0, H1` | Headers off, or on | ✅ |
-| `IA` | Is the protocol Active? | |
+| `IA` | Is the protocol Active? | ✅ |
 | `MA` | Monitor All | |
 | `MR hh` | Monitor for Receiver = hh | |
 | `MT hh` | Monitor for Transmitter = hh | |
-| `NL` | Normal Length messages | |
-| `PC` | Protocol Close | |
-| `R0, R1` | Responses off, or on | |
-| `RA hh` | set the Receive Address to hh | |
+| `NL` | Normal Length messages | ✅ |
+| `PC` | Protocol Close | ✅ |
+| `R0, R1` | Responses off, or on | ✅ |
+| `RA hh` | set the Receive Address to hh | ✅ |
 | `S0, S1` | printing of Spaces off, or on | ✅ |
 | `SH xyz` | Set Header to xyz | ✅ |
 | `SH xxyyzz` | Set Header to xxyyzz | ✅ |
 | `SH wwxxyyzz` | Set Header to wwxxyyzz | ✅ |
 | `SP h` | Set Protocol to h and save it | ✅ |
-| `SP Ah` | Set Protocol to Auto, h and save it | |
-| `SP 00` | Erase stored protocol | |
-| `SR hh` | Set the Receive address to hh | |
-| `SS` | use Standard Search order (J1978) | |
+| `SP Ah` | Set Protocol to Auto, h and save it | ✅ |
+| `SP 00` | Erase stored protocol | ✅ |
+| `SR hh` | Set the Receive address to hh | ✅ |
+| `SS` | use Standard Search order (J1978) | ✅ |
 | `ST hh` | Set Timeout to hh x 4 msec | ✅ |
-| `TA hh` | set Tester Address to hh | |
-| `TP h` | Try Protocol h | |
-| `TP Ah` | Try Protocol h with Auto search | |
+| `TA hh` | set Tester Address to hh | ✅ |
+| `TP h` | Try Protocol h | ✅ |
+| `TP Ah` | Try Protocol h with Auto search | ✅ |
 
 ### J1850 Specific Commands (protocols 1 and 2)
 
 | CMD | Description | Supported |
 | :--- | :--- | :--- |
-| `IFR0, 1, 2` | IFRs off, auto, or on, if not monitoring | |
-| `IFR4, 5, 6` | IFRs off, auto, or on, at all times | |
-| `IFRH, S` | IFR value from Header or Source | |
+| `IFR0, 1, 2` | IFRs off, auto, or on, if not monitoring | ✅ |
+| `IFR4, 5, 6` | IFRs off, auto, or on, at all times | ✅ |
+| `IFRH, S` | IFR value from Header or Source | ✅ |
 
 ### ISO Specific Commands (protocols 3 to 5)
 
 | CMD | Description | Supported |
 | :--- | :--- | :--- |
-| `FI` | perform a Fast Initiation | |
-| `IB10` | set the ISO Baud rate to 10400 | |
-| `IB12` | set the ISO Baud rate to 12500 | |
-| `IB15` | set the ISO Baud rate to 15625 | |
-| `IB48` | set the ISO Baud rate to 4800 | |
-| `IB96` | set the ISO Baud rate to 9600 | |
-| `IIA hh` | set ISO (slow) Init Address to hh | |
-| `KW` | display the Key Words | |
-| `KW0, KW1` | Key Word checking off, or on | |
-| `SI` | perform a Slow (5 baud) Initiation | |
-| `SW hh` | Set Wakeup interval to hh x 20 msec | |
-| `SW 00` | Stop sending Wakeup messages | |
-| `WM [1 - 6 bytes]` | set the Wakeup Message | |
+| `FI` | perform a Fast Initiation | ✅ |
+| `IB10` | set the ISO Baud rate to 10400 | ✅ |
+| `IB12` | set the ISO Baud rate to 12500 | ✅ |
+| `IB15` | set the ISO Baud rate to 15625 | ✅ |
+| `IB48` | set the ISO Baud rate to 4800 | ✅ |
+| `IB96` | set the ISO Baud rate to 9600 | ✅ |
+| `IIA hh` | set ISO (slow) Init Address to hh | ✅ |
+| `KW` | display the Key Words | ✅ |
+| `KW0, KW1` | Key Word checking off, or on | ✅ |
+| `SI` | perform a Slow (5 baud) Initiation | ✅ |
+| `SW hh` | Set Wakeup interval to hh x 20 msec | ✅ |
+| `SW 00` | Stop sending Wakeup messages | ✅ |
+| `WM [1 - 6 bytes]` | set the Wakeup Message | ✅ |
 
 ### CAN Specific Commands (protocols 6 to C)
 
@@ -131,7 +142,7 @@
 | `CSM0, CSM1` | Silent Monitoring off, or on | |
 | `CTM1` | set Timer Multiplier to 1 | |
 | `CTM5` | set Timer Multiplier to 5 | |
-| `D0, D1` | display of the DLC off, or on | |
+| `D0, D1` | display of the DLC off, or on | ✅ |
 | `FC SM h` | Flow Control, Set the Mode to h | |
 | `FC SH hhh` | FC, Set the Header to hhh | |
 | `FC SH hhhhhhhh` | Set the Header to hhhhhhhh | |
@@ -154,3 +165,9 @@
 | `MP hhhh n` | " and get n messages | |
 | `MP hhhhhh` | Monitor for PGN hhhhhh | |
 | `MP hhhhhh n` | " and get n messages | |
+
+### Custom Extensions (Not in ELM327 Spec)
+
+| CMD | Description | Supported |
+| :--- | :--- | :--- |
+| `PROGV p vvvvvvvv` | drive an OBD-II pin `p`, or release it | ✅ |

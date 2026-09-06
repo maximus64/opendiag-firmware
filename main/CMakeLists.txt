@@ -11,11 +11,30 @@ idf_component_register(SRCS main.c
                             ble_uart.c
                             can_bus.c
                             kline.c
+                            kline_codec.c
+                            bus.c
                             j1850_pwm.c
+                            j1850_pwm_codec.c
                             j1850_vpw.c
+                            j1850_vpw_codec.c
+                            j1850_common.c
+                            j1850_lifecycle.c
                             comm_iface.c
                             vif.c
                             vif_ctrl.c
-                       PRIV_REQUIRES spi_flash bt nvs_flash esp_adc esp_ringbuf
-                       REQUIRES driver
+                       PRIV_REQUIRES
+                            esp_hal_usb
+                            spi_flash
+                            bt
+                            nvs_flash
+                            esp_adc
+                            esp_ringbuf
+                            esp_app_format
+                            esp_driver_ledc
+                            esp_driver_gpio
+                            esp_driver_uart
+                            esp_driver_rmt
+                            esp_driver_gptimer
+                            esp_driver_twai
+                       REQUIRES driver freertos
                        INCLUDE_DIRS "")

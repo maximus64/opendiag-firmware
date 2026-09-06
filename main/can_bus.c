@@ -1,49 +1,78 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
+#include "can_bus.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_twai.h"
+#include "esp_twai_onchip.h"
 #include "driver/gpio.h"
-#include "driver/twai.h"
 #include "pinout.h"
-#include "can_bus.h"
 
 #define TAG "CANBUS"
 
 #define CAN_RX_QUEUE_LEN 32
 
-static twai_handle_t can_bus_handle;
+/** How many frames the driver will hold for us behind the one in hardware. */
+#define CAN_TX_QUEUE_LEN 4
+
+/**
+ * @brief Frames we own on the driver's behalf.
+ *
+ * twai_node_transmit() stores the pointer it is given; the driver reads
+ * through it when the hardware frees up, and again if a bus-off recovery has
+ * to restart the transmission. A frame built on the caller's stack would be
+ * gone by then. So the frames live here, and a send takes the next slot.
+ *
+ * Two more slots than the driver can be holding at once (CAN_TX_QUEUE_LEN
+ * queued plus the one in hardware) is what makes reuse safe: by the time the
+ * round trip comes back to a slot, every one of those has been handed over
+ * since, so the frame in it cannot still be in flight.
+ */
+#define CAN_TX_POOL_LEN (CAN_TX_QUEUE_LEN + 2)
+
+/** How long a send waits for room when the driver is still busy. */
+#define CAN_TX_TIMEOUT_MS 1000
+
+static twai_node_handle_t can_node;
 static QueueHandle_t rx_frame_queue;
-static volatile TaskHandle_t can_bus_task_handle = NULL;
-static volatile bool task_should_exit = false;
+static TaskHandle_t can_bus_task_handle;
+static bool task_should_exit;
+static bool can_started;
+static portMUX_TYPE task_notify_lock = portMUX_INITIALIZER_UNLOCKED;
 static SemaphoreHandle_t task_exit_semaphore = NULL;
 
-static const char* can_get_state_str(int state)
-{
+static twai_frame_t tx_pool[CAN_TX_POOL_LEN];
+static uint8_t tx_pool_data[CAN_TX_POOL_LEN][8];
+static unsigned tx_pool_next;
+
+/** Frames received with nowhere to put them. Nothing else counts these. */
+static volatile uint32_t rx_dropped;
+
+static const char *can_get_state_str(twai_error_state_t state) {
     switch (state) {
-        case TWAI_STATE_STOPPED:
-            return "TWAI_STATE_STOPPED";
-            break;
-        case TWAI_STATE_RUNNING:
-            return "TWAI_STATE_RUNNING";
-        case TWAI_STATE_BUS_OFF:
-            return "TWAI_STATE_BUS_OFF";
-        case TWAI_STATE_RECOVERING:
-            return "TWAI_STATE_RECOVERING";
-            break;
-        default:
-            return "UNKNOWN";
+    case TWAI_ERROR_ACTIVE:
+        return "error active";
+    case TWAI_ERROR_WARNING:
+        return "error warning";
+    case TWAI_ERROR_PASSIVE:
+        return "error passive";
+    case TWAI_ERROR_BUS_OFF:
+        /* The driver uses this for a node that was never started as well
+         * as one the bus threw off, so it cannot be reported as either. */
+        return "bus off or stopped";
+    default:
+        return "UNKNOWN";
     }
 }
 
-int can_receive(struct can_frame *frame, TickType_t ticks_to_wait)
-{
-    if (frame == NULL || rx_frame_queue == NULL) {
+int can_receive(struct can_frame *frame, TickType_t ticks_to_wait) {
+    if (!can_started || frame == NULL || rx_frame_queue == NULL) {
         return -1;
     }
 
@@ -54,9 +83,8 @@ int can_receive(struct can_frame *frame, TickType_t ticks_to_wait)
     return 0;
 }
 
-int can_send(const struct can_frame *frame)
-{
-    if (frame == NULL || can_bus_handle == NULL) {
+int can_send(const struct can_frame *frame) {
+    if (!can_started || frame == NULL || can_node == NULL) {
         return -1;
     }
 
@@ -64,254 +92,222 @@ int can_send(const struct can_frame *frame)
 
     if (frame->id & CAN_EFF_FLAG) {
         canid = frame->id & CAN_EFF_MASK;
-    }
-    else {
+    } else {
         canid = frame->id & CAN_SFF_MASK;
     }
 
-    twai_message_t req_msg = {
-        .identifier = canid,
-        .data_length_code = frame->dlc,
-        .self = false, // True: Transmitted message will also received by the same node 
-        .extd = (frame->id & CAN_EFF_FLAG) ? true : false, // Extended Frame Format (29bit ID)
-        .rtr = (frame->id & CAN_RTR_FLAG) ? true : false, // remote transmission request
-    };
-
-    /* copy data over with bounds checking */
+    /* Only one link may hold the CAN bus at a time, so there is one sender and
+     * this index needs no lock. */
+    twai_frame_t *msg = &tx_pool[tx_pool_next];
+    uint8_t *data = tx_pool_data[tx_pool_next];
     size_t copy_len = (frame->dlc > 8) ? 8 : frame->dlc;
-    memcpy(req_msg.data, frame->data, copy_len);
 
-    /* transmit can frame */
-    // TODO: do something smarter with the timeout.
-    esp_err_t err = twai_transmit_v2(can_bus_handle, &req_msg, pdMS_TO_TICKS(1000));
-    if (err == ESP_OK) {
-        return 0;
+    memset(msg, 0, sizeof(*msg));
+    msg->header.id = canid;
+    msg->header.ide =
+        (frame->id & CAN_EFF_FLAG) ? 1 : 0; // Extended Frame Format (29bit ID)
+    msg->header.rtr =
+        (frame->id & CAN_RTR_FLAG) ? 1 : 0; // remote transmission request
+
+    if (msg->header.rtr) {
+        /* A remote frame carries no data, but its length code still asks for
+         * that many bytes back, so it has to be set rather than derived. */
+        msg->header.dlc = copy_len;
+        msg->buffer = data;
+        msg->buffer_len = 0;
     } else {
+        memcpy(data, frame->data, copy_len);
+        msg->buffer = data;
+        msg->buffer_len = copy_len; /* the driver derives the length code */
+    }
+
+    // TODO: do something smarter with the timeout.
+    esp_err_t err = twai_node_transmit(can_node, msg, CAN_TX_TIMEOUT_MS);
+    if (err != ESP_OK) {
         printf("Failed to transmit err=%d\n", err);
         return -1;
     }
+
+    tx_pool_next = (tx_pool_next + 1) % CAN_TX_POOL_LEN;
+    return 0;
 }
 
 void can_print_stat(void) {
-    if (can_bus_handle == NULL) {
+    if (!can_started || can_node == NULL) {
         ESP_LOGE(TAG, "CAN bus not initialized");
         return;
     }
 
-    twai_status_info_t status_info = {0};
-    esp_err_t err = twai_get_status_info_v2(can_bus_handle, &status_info);
-    ESP_ERROR_CHECK(err);
+    twai_node_status_t status = {0};
+    twai_node_record_t record = {0};
+    esp_err_t err = twai_node_get_info(can_node, &status, &record);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "twai_node_get_info failed: %s", esp_err_to_name(err));
+        return;
+    }
 
     printf("CAN bus status info:\n");
-    printf("state: %s\n", can_get_state_str(status_info.state));
-    printf("msgs_to_tx: %ld\n", status_info.msgs_to_tx);
-    printf("msgs_to_rx: %ld\n", status_info.msgs_to_rx);
-    printf("tx_error_counter: %ld\n", status_info.tx_error_counter);
-    printf("rx_error_counter: %ld\n", status_info.rx_error_counter);
-    printf("tx_failed_count: %ld\n", status_info.tx_failed_count);
-    printf("rx_missed_count: %ld\n", status_info.rx_missed_count);
-    printf("rx_overrun_count: %ld\n", status_info.rx_overrun_count);
-    printf("arb_lost_count: %ld\n", status_info.arb_lost_count);
-    printf("bus_error_count: %ld\n", status_info.bus_error_count);
+    printf("state: %s\n", can_get_state_str(status.state));
+    printf("tx_error_counter: %u\n", status.tx_error_count);
+    printf("rx_error_counter: %u\n", status.rx_error_count);
+    printf("tx_queue_free: %lu\n", status.tx_queue_remaining);
+    printf("bus_error_count: %lu\n", record.bus_err_num);
+    printf("rx_dropped: %lu\n", (unsigned long)rx_dropped);
 }
 
-
-static void can_bus_task(void *param)
-{
-    esp_err_t err;
-    twai_message_t msg = {0};
-    uint32_t alerts = 0;
+/**
+ * @brief A frame arrived. Runs in the driver's interrupt.
+ *
+ * The only place a received frame can be read from - the driver hands it over
+ * here or not at all, so this cannot defer the read to the worker task.
+ */
+static bool can_rx_done(twai_node_handle_t node,
+                        const twai_rx_done_event_data_t *edata, void *ctx) {
+    BaseType_t task_woken = pdFALSE;
+    uint8_t buffer[8];
+    twai_frame_t rx = {
+        .buffer = buffer,
+        .buffer_len = sizeof(buffer),
+    };
     struct can_frame frame = {0};
 
-    while (!task_should_exit) {
-        err = twai_read_alerts_v2(can_bus_handle, &alerts, 0);
+    if (twai_node_receive_from_isr(node, &rx) != ESP_OK) {
+        return false;
+    }
 
-        if (err == ESP_OK) {
-            if (alerts & TWAI_ALERT_ABOVE_ERR_WARN) {
-                ESP_LOGE(TAG, "Surpassed Error Warning Limit");
-            }
-            if (alerts & TWAI_ALERT_ERR_PASS) {
-                ESP_LOGE(TAG, "Entered Error Passive state");
-            }
-            if (alerts & TWAI_ALERT_BUS_OFF) {
-                ESP_LOGE(TAG, "Bus Off state");
-                //Prepare to initiate bus recovery, reconfigure alerts to detect bus recovery completion
-                ESP_LOGI(TAG, "Initiate bus recovery");
-                twai_initiate_recovery_v2(can_bus_handle);
-            }
-            if (alerts & TWAI_ALERT_BUS_RECOVERED) {
-                //Bus recovery was successful
-                ESP_LOGI(TAG, "Bus Recovered");
-                ESP_LOGI(TAG, "Restart CAN bus");
-                twai_start_v2(can_bus_handle);
-            }
-        }
+    frame.id = rx.header.id;
+    frame.id |= rx.header.ide ? CAN_EFF_FLAG : 0;
+    frame.id |= rx.header.rtr ? CAN_RTR_FLAG : 0;
+    frame.dlc = rx.header.dlc;
 
-        //receive next CAN frame from queue
-        err = twai_receive_v2(can_bus_handle, &msg, pdMS_TO_TICKS(100));
-        if (err != ESP_OK) {
+    /* copy data with bounds checking */
+    size_t copy_len = (rx.header.dlc > 8) ? 8 : rx.header.dlc;
+    memcpy(frame.data, buffer, copy_len);
+
+    /* No waiting here, and nothing that could wait: a client that has stopped
+     * draining the queue must cost frames, not the interrupt. */
+    if (xQueueSendFromISR(rx_frame_queue, &frame, &task_woken) != pdTRUE) {
+        rx_dropped++;
+    }
+
+    return task_woken == pdTRUE;
+}
+
+/**
+ * @brief The controller changed error state. Runs in the driver's interrupt.
+ *
+ * Both edges of a bus-off are worth waking the worker for: the way in, because
+ * recovery has to be asked for and asking is not an interrupt-safe call, and
+ * the way out, because that is the only notice anybody gets that the bus came
+ * back. Recovery finishing needs nothing from us - the controller returns to
+ * error-active on its own after 128 runs of 11 recessive bits, and the driver
+ * restarts whatever transmissions were queued when it does.
+ *
+ * The worker reads the state for itself rather than being told which edge this
+ * was, so two notifications collapsing into one wakeup cannot lose a recovery.
+ */
+static bool can_state_change(twai_node_handle_t node,
+                             const twai_state_change_event_data_t *edata,
+                             void *ctx) {
+    BaseType_t task_woken = pdFALSE;
+    bool crossed = (edata->new_sta == TWAI_ERROR_BUS_OFF) ||
+                   (edata->old_sta == TWAI_ERROR_BUS_OFF);
+
+    portENTER_CRITICAL_ISR(&task_notify_lock);
+    if (crossed && !__atomic_load_n(&task_should_exit, __ATOMIC_ACQUIRE) &&
+        can_bus_task_handle != NULL) {
+        vTaskNotifyGiveFromISR(can_bus_task_handle, &task_woken);
+    }
+    portEXIT_CRITICAL_ISR(&task_notify_lock);
+
+    return task_woken == pdTRUE;
+}
+
+/**
+ * @brief Recovers the controller when the bus has thrown it off.
+ *
+ * All that is left of what used to be a polling loop: reception and the error
+ * states both arrive as interrupts now. The wait has a timeout only so that a
+ * teardown does not have to wake it.
+ */
+static void can_bus_task(void *param) {
+    while (!__atomic_load_n(&task_should_exit, __ATOMIC_ACQUIRE)) {
+        twai_node_status_t status = {0};
+        esp_err_t err;
+
+        if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100)) == 0) {
             continue;
         }
 
-        frame.id = msg.identifier;
-        frame.id |= msg.extd ? CAN_EFF_FLAG : 0;
-        frame.id |= msg.rtr ? CAN_RTR_FLAG : 0;
-        frame.dlc = msg.data_length_code;
-        
-        /* copy data with bounds checking */
-        size_t copy_len = (msg.data_length_code > 8) ? 8 : msg.data_length_code;
-        memset(frame.data, 0, 8); // Clear buffer first
-        memcpy(frame.data, msg.data, copy_len);
+        if (__atomic_load_n(&task_should_exit, __ATOMIC_ACQUIRE)) {
+            break;
+        }
 
-        while (xQueueSend(rx_frame_queue, &frame, pdMS_TO_TICKS(100)) != pdTRUE) {
-            if (task_should_exit) {
-                break;
-            }
+        if (twai_node_get_info(can_node, &status, NULL) != ESP_OK) {
+            continue;
+        }
+
+        if (status.state != TWAI_ERROR_BUS_OFF) {
+            ESP_LOGI(TAG, "Bus Recovered");
+            continue;
+        }
+
+        ESP_LOGE(TAG, "Bus Off state");
+        ESP_LOGI(TAG, "Initiate bus recovery");
+
+        err = twai_node_recover(can_node);
+        if (err != ESP_OK) {
+            /* INVALID_STATE here means the node was disabled rather than
+             * thrown off, which a teardown does on its way past. */
+            ESP_LOGW(TAG, "twai_node_recover failed: %s", esp_err_to_name(err));
         }
     }
-    
+
     ESP_LOGI(TAG, "CAN bus task exiting gracefully");
-    
-    // Signal that the task is about to exit
+
     xSemaphoreGive(task_exit_semaphore);
-    
-    // Clear the task handle from within the task before self-deletion
-    // This is safe because we're about to delete ourselves
-    can_bus_task_handle = NULL;
-    
-    vTaskDelete(NULL); // Delete self
+    vTaskDelete(NULL);
 }
 
-esp_err_t can_bus_setup(int baud_rate)
-{
-    // Prevent double initialization
-    if (can_bus_task_handle != NULL) {
-        ESP_LOGW(TAG, "CAN bus already initialized, call teardown first");
-        return ESP_ERR_INVALID_STATE;
-    }
+/**
+ * @brief Release everything can_bus_setup() claimed, in reverse.
+ *
+ * Shared with the setup failure path, so it has to tolerate a half built
+ * driver: every step is guarded by whether that step ever happened.
+ *
+ * The caller must have stopped can_bus_task() first - it is the only other
+ * thing that touches the controller.
+ */
+static esp_err_t can_bus_release(void) {
+    if (can_node != NULL) {
+        esp_err_t err;
+        twai_node_status_t status = {0};
 
-    static const twai_timing_config_t t_config_1mbits = TWAI_TIMING_CONFIG_1MBITS();
-    static const twai_timing_config_t t_config_500kbits = TWAI_TIMING_CONFIG_500KBITS();
-    static const twai_timing_config_t t_config_250kbits = TWAI_TIMING_CONFIG_250KBITS();
-    static const twai_timing_config_t t_config_125kbits = TWAI_TIMING_CONFIG_125KBITS();
-    static const twai_timing_config_t t_config_50kbits = TWAI_TIMING_CONFIG_50KBITS();
-    const twai_timing_config_t *t_config = NULL;
-    twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
-    twai_general_config_t general_config = TWAI_GENERAL_CONFIG_DEFAULT(
-        PIN_CAN0_TX, PIN_CAN0_RX, TWAI_MODE_NORMAL);
-    general_config.controller_id = 0;
-
-    if (baud_rate == 1000000) {
-        t_config = &t_config_1mbits;
-    }
-    else if (baud_rate == 500000) {
-        t_config = &t_config_500kbits;
-    }
-    else if (baud_rate == 250000) {
-        t_config = &t_config_250kbits;
-    }
-    else if (baud_rate == 125000) {
-        t_config = &t_config_125kbits;
-    }
-    else if (baud_rate == 50000) {
-        t_config = &t_config_50kbits;
-    }
-    else {
-        ESP_LOGE(TAG, "Unsupported CAN baud rate %d\n", baud_rate);
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    ESP_LOGI(TAG, "Init CAN driver\n");
-
-    /* Deep enough to hold what a saturated 500 kbit/s bus delivers between two
-     * drains by the client above: the SLCAN front-end empties this every 2 ms,
-     * and a bus of back-to-back minimum length frames produces about 21 in
-     * that time. */
-    rx_frame_queue = xQueueCreate(CAN_RX_QUEUE_LEN, sizeof(struct can_frame));
-    if (rx_frame_queue == NULL) {
-        ESP_LOGE(TAG, "Failed to create RX frame queue");
-        abort();
-    }
-
-    // Create semaphore for task synchronization
-    task_exit_semaphore = xSemaphoreCreateBinary();
-    if (task_exit_semaphore == NULL) {
-        ESP_LOGE(TAG, "Failed to create task exit semaphore");
-        abort();
-    }
-
-    // Reset task exit flag
-    task_should_exit = false;
-
-    ESP_ERROR_CHECK(twai_driver_install_v2(&general_config, t_config, &f_config, &can_bus_handle));
-
-    //Start TWAI driver
-    ESP_ERROR_CHECK(twai_start_v2(can_bus_handle));
-
-    /* Let the transceiver drive the bus. Active high, so low is not silent. */
-    gpio_set_level(PIN_CAN0_SILENT, 0);
-
-    //Prepare to trigger errors, reconfigure alerts to detect change in error state
-    twai_reconfigure_alerts_v2(can_bus_handle,
-        TWAI_ALERT_ABOVE_ERR_WARN | TWAI_ALERT_ERR_PASS | TWAI_ALERT_BUS_OFF | TWAI_ALERT_BUS_RECOVERED, NULL);
-
-    BaseType_t task_result = xTaskCreate(can_bus_task, "canbus", 4096, NULL, 5, (TaskHandle_t *)&can_bus_task_handle);
-    if (task_result != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create CAN bus task");
-        abort();
-    }
-
-    ESP_LOGI(TAG, "Init CAN driver - Done!\n");
-
-    return ESP_OK;
-}
-
-void can_bus_teardown(void)
-{
-    ESP_LOGI(TAG, "Teardown CAN driver\n");
-
-    /* Back to listening only, so nothing this adapter does can reach the bus
-     * while no channel is open. */
-    gpio_set_level(PIN_CAN0_SILENT, 1);
-
-    // Signal the task to exit gracefully
-    if (can_bus_task_handle != NULL) {
-        task_should_exit = true;
-        
-        // Wait for the task to signal completion (with timeout)
-        if (task_exit_semaphore != NULL) {
-            if (xSemaphoreTake(task_exit_semaphore, pdMS_TO_TICKS(1000)) == pdTRUE) {
-                ESP_LOGI(TAG, "CAN bus task exited gracefully");
-                // Task has signaled completion, handle should already be NULL
-            } else {
-                ESP_LOGW(TAG, "Timeout waiting for task to exit gracefully");
-                // If task still exists after timeout, force delete it
-                if (can_bus_task_handle != NULL) {
-                    ESP_LOGW(TAG, "Force deleting CAN bus task");
-                    vTaskDelete(can_bus_task_handle);
-                    can_bus_task_handle = NULL;
-                }
-            }
-        } else {
-            // No semaphore available, force delete
-            ESP_LOGW(TAG, "No semaphore available, force deleting task");
-            vTaskDelete(can_bus_task_handle);
-            can_bus_task_handle = NULL;
+        err = twai_node_get_info(can_node, &status, NULL);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "twai_node_get_info failed: %s",
+                     esp_err_to_name(err));
+            return err;
         }
+
+        if (status.state != TWAI_ERROR_BUS_OFF) {
+            err = twai_node_disable(can_node);
+            /* Bus-off can occur after the status read. */
+            if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+                ESP_LOGW(TAG, "twai_node_disable failed: %s",
+                         esp_err_to_name(err));
+                return err;
+            }
+        }
+
+        err = twai_node_delete(can_node);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "twai_node_delete failed: %s", esp_err_to_name(err));
+            return err;
+        }
+        can_node = NULL;
     }
 
-    if (can_bus_handle) {
-        //Stop TWAI driver
-        ESP_ERROR_CHECK(twai_stop_v2(can_bus_handle));
-
-        //Uninstall TWAI driver
-        ESP_ERROR_CHECK(twai_driver_uninstall_v2(can_bus_handle));
-
-        can_bus_handle = NULL;
-    }
-
-
-    // Clean up synchronization objects
     if (task_exit_semaphore != NULL) {
         vSemaphoreDelete(task_exit_semaphore);
         task_exit_semaphore = NULL;
@@ -321,6 +317,249 @@ void can_bus_teardown(void)
         vQueueDelete(rx_frame_queue);
         rx_frame_queue = NULL;
     }
-
-    ESP_LOGI(TAG, "Teardown CAN driver - Done!\n");
+    return ESP_OK;
 }
+
+/**
+ * @brief Ask can_bus_task() to leave, and wait for it to say that it has.
+ */
+static esp_err_t can_bus_stop_task(void) {
+    /* Drain notifications before the worker can delete its task handle. */
+    portENTER_CRITICAL(&task_notify_lock);
+    __atomic_store_n(&task_should_exit, true, __ATOMIC_RELEASE);
+    portEXIT_CRITICAL(&task_notify_lock);
+
+    if (can_bus_task_handle == NULL)
+        return ESP_OK;
+    if (xSemaphoreTake(task_exit_semaphore, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGE(TAG, "worker did not exit; resources retained");
+        return ESP_ERR_TIMEOUT;
+    }
+    can_bus_task_handle = NULL;
+    return ESP_OK;
+}
+
+/**
+ * @brief Where the bit is sampled, in permille of the bit time.
+ *
+ * The driver picks its own if this is left at zero, and would pick differently
+ * from the legacy timing tables this firmware was tested against: 80% at
+ * 500 kbit/s and 87.5% below it, where the old macros used 75% everywhere
+ * except 50 kbit/s. Both are defensible and the difference only shows on a
+ * long or noisy bus, but a port is the wrong place to change how the adapter
+ * sits on somebody's vehicle. These are the old numbers.
+ */
+static uint16_t can_sample_point_permille(int baud_rate) {
+    return (baud_rate == 50000) ? 800 : 750;
+}
+
+esp_err_t can_bus_setup(int baud_rate) {
+    esp_err_t err;
+
+    if (can_bus_task_handle || can_node || rx_frame_queue ||
+        task_exit_semaphore) {
+        ESP_LOGW(TAG, "CAN bus already initialized, call teardown first");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    switch (baud_rate) {
+    case 1000000:
+    case 500000:
+    case 250000:
+    case 125000:
+    case 50000:
+        break;
+    default:
+        ESP_LOGE(TAG, "Unsupported CAN baud rate %d\n", baud_rate);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    twai_onchip_node_config_t node_config = {
+        .io_cfg =
+            {
+                .tx = PIN_CAN0_TX,
+                .rx = PIN_CAN0_RX,
+                .quanta_clk_out = GPIO_NUM_NC,
+                .bus_off_indicator = GPIO_NUM_NC,
+            },
+        .bit_timing =
+            {
+                .bitrate = (uint32_t)baud_rate,
+                .sp_permill = can_sample_point_permille(baud_rate),
+            },
+        .tx_queue_depth = CAN_TX_QUEUE_LEN,
+        /* Retry forever, which is what the old driver did and what the
+         * teardown path is written around: transmitting into a bus with no ECU
+         * answering is what drives the controller to bus-off, and the ELM327
+         * protocol search depends on getting there rather than on being told
+         * about a single failed frame. */
+        .fail_retry_cnt = -1,
+    };
+
+    ESP_LOGI(TAG, "Init CAN driver\n");
+
+    /* Deep enough to hold what a saturated 500 kbit/s bus delivers between two
+     * drains by the client above: the SLCAN front-end empties this every 2 ms,
+     * and a bus of back-to-back minimum length frames produces about 21 in
+     * that time. */
+    rx_frame_queue = xQueueCreate(CAN_RX_QUEUE_LEN, sizeof(struct can_frame));
+    task_exit_semaphore = xSemaphoreCreateBinary();
+    if (rx_frame_queue == NULL || task_exit_semaphore == NULL) {
+        ESP_LOGE(
+            TAG,
+            "Failed to create the RX frame queue or the task exit semaphore");
+        err = ESP_ERR_NO_MEM;
+        goto fail;
+    }
+
+    // Reset task exit flag
+    __atomic_store_n(&task_should_exit, false, __ATOMIC_RELEASE);
+    tx_pool_next = 0;
+    rx_dropped = 0;
+
+    /* A bus that will not come up is a protocol the client cannot have, not a
+     * reason to restart the adapter: vif_bus_open() turns any error here into
+     * an ELM327 protocol failure, and the search moves on to the next one. */
+    err = twai_new_node_onchip(&node_config, &can_node);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "twai_new_node_onchip failed: %s", esp_err_to_name(err));
+        can_node = NULL;
+        goto fail;
+    }
+
+    /* No filter is configured: the hardware accepts every ID until one is,
+     * which is what an OBD adapter wants. */
+
+    const twai_event_callbacks_t callbacks = {
+        .on_rx_done = can_rx_done,
+        .on_state_change = can_state_change,
+    };
+    err = twai_node_register_event_callbacks(can_node, &callbacks, NULL);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "twai_node_register_event_callbacks failed: %s",
+                 esp_err_to_name(err));
+        goto fail;
+    }
+
+    /* The worker has to exist before the node is enabled: a bus-off can arrive
+     * with the first frame, and the interrupt has nothing to wake without it.
+     */
+    BaseType_t task_result = xTaskCreate(can_bus_task, "canbus", 4096, NULL, 5,
+                                         &can_bus_task_handle);
+    if (task_result != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create CAN bus task");
+        can_bus_task_handle = NULL;
+        err = ESP_ERR_NO_MEM;
+        goto fail;
+    }
+
+    err = twai_node_enable(can_node);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "twai_node_enable failed: %s", esp_err_to_name(err));
+        goto fail;
+    }
+
+    /* Let the transceiver drive the bus. Active high, so low is not silent. */
+    gpio_set_level(PIN_CAN0_SILENT, 0);
+    can_started = true;
+
+    ESP_LOGI(TAG, "Init CAN driver - Done!\n");
+
+    return ESP_OK;
+
+fail: {
+    esp_err_t cleanup = can_bus_teardown();
+    if (cleanup != ESP_OK) {
+        ESP_LOGE(TAG, "startup cleanup incomplete: %s",
+                 esp_err_to_name(cleanup));
+    }
+}
+    return err;
+}
+
+esp_err_t can_bus_teardown(void) {
+    can_started = false;
+    gpio_set_level(PIN_CAN0_SILENT, 1);
+
+    esp_err_t err = can_bus_stop_task();
+    if (err != ESP_OK)
+        return err;
+    err = can_bus_release();
+    if (err == ESP_OK)
+        ESP_LOGI(TAG, "Teardown CAN driver - Done!");
+    return err;
+}
+
+/* ------------------------------------------------------------------ *
+ * The bus interface
+ *
+ * CAN behind the same vtable as the byte buses. A frame is an id and a
+ * payload, which is exactly what bus_msg_t carries, so there is nothing to
+ * translate: the length code goes in len, the id and its flags in id.
+ * ------------------------------------------------------------------ */
+
+static esp_err_t can_ops_open(const bus_cfg_t *cfg) {
+    /* The controller takes its rate at install time and cannot be retimed
+     * while up, so a claim without one is refused here rather than later. */
+    if (!cfg || cfg->bitrate == 0) {
+        ESP_LOGE(TAG, "CAN needs a bit rate");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    return can_bus_setup((int)cfg->bitrate);
+}
+
+static esp_err_t can_ops_close(void) { return can_bus_teardown(); }
+
+static int can_ops_send(const bus_msg_t *msg, uint32_t flags) {
+    struct can_frame f = {0};
+
+    (void)flags; /* No per-message bits on CAN. */
+
+    f.id = msg->id;
+    f.dlc = (uint8_t)msg->len;
+
+    /* A remote frame asks for len bytes and carries none. The copy is
+     * clamped because the length code may legally exceed the eight bytes a
+     * classic frame can hold. */
+    if (!(f.id & CAN_RTR_FLAG)) {
+        memcpy(f.data, msg->data, msg->len > 8 ? 8 : msg->len);
+    }
+
+    return can_send(&f) == 0 ? 0 : BUS_ERR_TX_FAILED;
+}
+
+static int can_ops_recv(bus_msg_t *msg, TickType_t wait) {
+    struct can_frame f;
+    size_t len;
+
+    if (can_receive(&f, wait) != 0) {
+        return BUS_ERR_TIMEOUT;
+    }
+
+    len = (f.dlc > 8) ? 8 : f.dlc;
+    if (f.id & CAN_RTR_FLAG) {
+        len = 0;
+    }
+    if (msg->cap < len) {
+        return BUS_ERR_NO_SPACE;
+    }
+
+    memcpy(msg->data, f.data, len);
+    msg->id = f.id;
+    msg->len = f.dlc;
+
+    return (int)len;
+}
+
+/* set_param, get_param and ioctl stay NULL: the rate is fixed at open and
+ * the rest of bus_param_t is byte bus timing. The generic calls answer
+ * BUS_ERR_UNSUPPORTED for them, which is the honest answer. Statistics come
+ * from the controller instead, through can_print_stat(). */
+const bus_ops_t can_bus_ops = {
+    .name = "CAN",
+    .open = can_ops_open,
+    .close = can_ops_close,
+    .send = can_ops_send,
+    .recv = can_ops_recv,
+};

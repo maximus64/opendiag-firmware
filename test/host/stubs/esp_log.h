@@ -15,10 +15,11 @@
 /** True when TD_VERBOSE is set in the environment. */
 int idf_stub_log_enabled(void);
 
-#define IDF_STUB_LOG(level, tag, fmt, ...) do {                             \
-        if (idf_stub_log_enabled()) {                                       \
-            fprintf(stderr, "%c (%s) " fmt "\n", level, tag, ##__VA_ARGS__);\
-        }                                                                   \
+#define IDF_STUB_LOG(level, tag, fmt, ...)                                     \
+    do {                                                                       \
+        if (idf_stub_log_enabled()) {                                          \
+            fprintf(stderr, "%c (%s) " fmt "\n", level, tag, ##__VA_ARGS__);   \
+        }                                                                      \
     } while (0)
 
 #define ESP_LOGE(tag, fmt, ...) IDF_STUB_LOG('E', tag, fmt, ##__VA_ARGS__)

@@ -19,7 +19,7 @@
 #define FAKE_PORT_RX_BUF 256
 
 #define FAKE_PORT_COUNT 2
-#define FAKE_PORT_CAP   2048
+#define FAKE_PORT_CAP 2048
 
 /** Registers FAKE_PORT_COUNT ports with comm_iface. Call once per process. */
 void fake_port_register_all(void);

@@ -24,4 +24,3 @@ void fake_clock_advance_ms(uint32_t ms);
 
 /** Rewinds to zero. Call from the per-test fixture. */
 void fake_clock_reset(void);
-

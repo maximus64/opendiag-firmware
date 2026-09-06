@@ -8,9 +8,14 @@ build/
 # Host test build trees
 build-cov/
 
+# Python bytecode from the target test scripts
+__pycache__/
+
 # HTML documentation
 html_doc/
 
 managed_components/
 
 .DS_Store
+
+/private

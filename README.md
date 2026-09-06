@@ -19,7 +19,7 @@ found on an OBD-II connector.
 ## Building
 
 This is an [ESP-IDF](https://docs.espressif.com/projects/esp-idf/) project, developed against
-IDF v5.5.1. Install and activate the toolchain first:
+IDF v6.1. Install and activate the toolchain first:
 
 ```bash
 . $IDF_PATH/export.sh

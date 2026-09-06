@@ -9,21 +9,21 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "esp_err.h"
-#include "esp_log.h"
-#include "esp_timer.h"
-#include "fake_clock.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/ringbuf.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "esp_app_desc.h"
+#include "esp_err.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "fake_clock.h"
 
 /* ------------------------------------------------------------------ *
  * Failure reporting
  * ------------------------------------------------------------------ */
 
-void idf_stub_abort(const char *file, int line, const char *fmt, ...)
-{
+void idf_stub_abort(const char *file, int line, const char *fmt, ...) {
     va_list ap;
 
     fprintf(stderr, "\nIDF STUB FATAL %s:%d: ", file, line);
@@ -36,24 +36,42 @@ void idf_stub_abort(const char *file, int line, const char *fmt, ...)
     abort();
 }
 
-const char *esp_err_to_name(esp_err_t code)
-{
+const char *esp_err_to_name(esp_err_t code) {
     switch (code) {
-    case ESP_OK:                  return "ESP_OK";
-    case ESP_FAIL:                return "ESP_FAIL";
-    case ESP_ERR_NO_MEM:          return "ESP_ERR_NO_MEM";
-    case ESP_ERR_INVALID_ARG:     return "ESP_ERR_INVALID_ARG";
-    case ESP_ERR_INVALID_STATE:   return "ESP_ERR_INVALID_STATE";
-    case ESP_ERR_INVALID_SIZE:    return "ESP_ERR_INVALID_SIZE";
-    case ESP_ERR_NOT_FOUND:       return "ESP_ERR_NOT_FOUND";
-    case ESP_ERR_NOT_SUPPORTED:   return "ESP_ERR_NOT_SUPPORTED";
-    case ESP_ERR_TIMEOUT:         return "ESP_ERR_TIMEOUT";
-    default:                      return "ESP_ERR_UNKNOWN";
+    case ESP_OK:
+        return "ESP_OK";
+    case ESP_FAIL:
+        return "ESP_FAIL";
+    case ESP_ERR_NO_MEM:
+        return "ESP_ERR_NO_MEM";
+    case ESP_ERR_INVALID_ARG:
+        return "ESP_ERR_INVALID_ARG";
+    case ESP_ERR_INVALID_STATE:
+        return "ESP_ERR_INVALID_STATE";
+    case ESP_ERR_INVALID_SIZE:
+        return "ESP_ERR_INVALID_SIZE";
+    case ESP_ERR_NOT_FOUND:
+        return "ESP_ERR_NOT_FOUND";
+    case ESP_ERR_NOT_SUPPORTED:
+        return "ESP_ERR_NOT_SUPPORTED";
+    case ESP_ERR_TIMEOUT:
+        return "ESP_ERR_TIMEOUT";
+    default:
+        return "ESP_ERR_UNKNOWN";
     }
 }
 
-int idf_stub_log_enabled(void)
-{
+/* ------------------------------------------------------------------ *
+ * Application descriptor
+ * ------------------------------------------------------------------ */
+
+const esp_app_desc_t *esp_app_get_description(void) {
+    static const esp_app_desc_t desc = {.version = "host-test"};
+
+    return &desc;
+}
+
+int idf_stub_log_enabled(void) {
     static int cached = -1;
 
     if (cached < 0) {
@@ -71,24 +89,16 @@ int idf_stub_log_enabled(void)
 static uint32_t g_now_ms;
 static uint32_t g_now_sub_us;
 
-uint32_t fake_clock_ms(void)
-{
-    return g_now_ms;
-}
+uint32_t fake_clock_ms(void) { return g_now_ms; }
 
-void fake_clock_advance_ms(uint32_t ms)
-{
-    g_now_ms += ms;
-}
+void fake_clock_advance_ms(uint32_t ms) { g_now_ms += ms; }
 
-void fake_clock_reset(void)
-{
+void fake_clock_reset(void) {
     g_now_ms = 0;
     g_now_sub_us = 0;
 }
 
-int64_t esp_timer_get_time(void)
-{
+int64_t esp_timer_get_time(void) {
     /* delay_us() busy-waits on this, so every read has to move forward or the
      * caller never leaves the loop. One microsecond per read is enough, and it
      * keeps the microsecond clock consistent with the millisecond one. */
@@ -101,10 +111,15 @@ int64_t esp_timer_get_time(void)
  * ------------------------------------------------------------------ */
 
 static int g_task_starts;
+static TaskHandle_t g_current_task;
+static TaskHandle_t g_created_task;
 
-BaseType_t xTaskCreate(TaskFunction_t fn, const char *name, uint32_t stack_depth,
-                       void *param, UBaseType_t priority, TaskHandle_t *created)
-{
+void idf_stub_set_current_task(TaskHandle_t task) { g_current_task = task; }
+void idf_stub_set_created_task(TaskHandle_t task) { g_created_task = task; }
+
+BaseType_t xTaskCreate(TaskFunction_t fn, const char *name,
+                       uint32_t stack_depth, void *param, UBaseType_t priority,
+                       TaskHandle_t *created) {
     (void)fn;
     (void)name;
     (void)param;
@@ -112,7 +127,7 @@ BaseType_t xTaskCreate(TaskFunction_t fn, const char *name, uint32_t stack_depth
     (void)priority;
 
     if (created) {
-        *created = NULL;
+        *created = g_created_task;
     }
 
     g_task_starts++;
@@ -121,35 +136,59 @@ BaseType_t xTaskCreate(TaskFunction_t fn, const char *name, uint32_t stack_depth
     return pdPASS;
 }
 
-int idf_stub_task_starts(void)
-{
-    return g_task_starts;
+int idf_stub_task_starts(void) { return g_task_starts; }
+
+TaskHandle_t xTaskGetCurrentTaskHandle(void) {
+    static int the_one_thread;
+
+    return g_current_task ? g_current_task : &the_one_thread;
 }
 
-void idf_stub_reset_task_starts(void)
-{
-    g_task_starts = 0;
-}
+void idf_stub_reset_task_starts(void) { g_task_starts = 0; }
 
-TickType_t xTaskGetTickCount(void)
-{
-    return (TickType_t)g_now_ms;
-}
+TickType_t xTaskGetTickCount(void) { return (TickType_t)g_now_ms; }
 
-void vTaskDelay(TickType_t ticks)
-{
-    fake_clock_advance_ms((uint32_t)ticks);
-}
+void vTaskDelay(TickType_t ticks) { fake_clock_advance_ms((uint32_t)ticks); }
 
-void vTaskDelete(TaskHandle_t task)
-{
+void vTaskDelete(TaskHandle_t task) {
     /* xTaskCreate() never started anything, so a task deleting itself at the
      * end of its loop has nothing to unwind here. */
     (void)task;
 }
 
-void vPortYield(void)
-{
+void vPortYield(void) {}
+
+/* ------------------------------------------------------------------ *
+ * Task notifications
+ * ------------------------------------------------------------------ */
+
+static bool g_notify_pending;
+
+void vTaskNotifyGiveFromISR(TaskHandle_t task, BaseType_t *woken) {
+    (void)task;
+
+    g_notify_pending = true;
+    if (woken) {
+        *woken = pdFALSE;
+    }
+}
+
+uint32_t ulTaskNotifyTake(BaseType_t clear_on_exit, TickType_t ticks_to_wait) {
+    if (g_notify_pending) {
+        if (clear_on_exit) {
+            g_notify_pending = false;
+        }
+        return 1;
+    }
+
+    /* Nothing pending: this is where a real task would have blocked. */
+    if (ticks_to_wait == portMAX_DELAY) {
+        idf_stub_abort(__FILE__, __LINE__,
+                       "blocking wait with portMAX_DELAY and no notification "
+                       "pending would never return under test");
+    }
+    fake_clock_advance_ms((uint32_t)ticks_to_wait);
+    return 0;
 }
 
 /* ------------------------------------------------------------------ *
@@ -159,19 +198,14 @@ void vPortYield(void)
 static int g_lock_balance;
 static int g_mutex_token;
 
-SemaphoreHandle_t xSemaphoreCreateMutex(void)
-{
+SemaphoreHandle_t xSemaphoreCreateMutex(void) {
     /* Any distinct non-NULL pointer will do; nothing dereferences it. */
     return (SemaphoreHandle_t)&g_mutex_token;
 }
 
-void vSemaphoreDelete(SemaphoreHandle_t sem)
-{
-    (void)sem;
-}
+void vSemaphoreDelete(SemaphoreHandle_t sem) { (void)sem; }
 
-BaseType_t xSemaphoreTake(SemaphoreHandle_t sem, TickType_t timeout)
-{
+BaseType_t xSemaphoreTake(SemaphoreHandle_t sem, TickType_t timeout) {
     (void)timeout;
 
     if (!sem) {
@@ -182,8 +216,7 @@ BaseType_t xSemaphoreTake(SemaphoreHandle_t sem, TickType_t timeout)
     return pdTRUE;
 }
 
-BaseType_t xSemaphoreGive(SemaphoreHandle_t sem)
-{
+BaseType_t xSemaphoreGive(SemaphoreHandle_t sem) {
     if (!sem) {
         idf_stub_abort(__FILE__, __LINE__, "give on a NULL semaphore");
     }
@@ -192,10 +225,7 @@ BaseType_t xSemaphoreGive(SemaphoreHandle_t sem)
     return pdTRUE;
 }
 
-int idf_stub_lock_balance(void)
-{
-    return g_lock_balance;
-}
+int idf_stub_lock_balance(void) { return g_lock_balance; }
 
 /* ------------------------------------------------------------------ *
  * Byte-mode ring buffer
@@ -204,15 +234,14 @@ int idf_stub_lock_balance(void)
 struct ringbuf_stub {
     uint8_t *buf;
     size_t cap;
-    size_t head;     /* Write cursor */
-    size_t tail;     /* Read cursor */
-    size_t count;    /* Bytes held */
-    size_t lent;     /* Bytes handed out and not yet returned */
+    size_t head;  /* Write cursor */
+    size_t tail;  /* Read cursor */
+    size_t count; /* Bytes held */
+    size_t lent;  /* Bytes handed out and not yet returned */
 };
 
 RingbufHandle_t xRingbufferCreateWithCaps(size_t size, RingbufferType_t type,
-                                          uint32_t caps)
-{
+                                          uint32_t caps) {
     struct ringbuf_stub *rb;
 
     (void)caps;
@@ -240,8 +269,7 @@ RingbufHandle_t xRingbufferCreateWithCaps(size_t size, RingbufferType_t type,
     return rb;
 }
 
-void vRingbufferDeleteWithCaps(RingbufHandle_t rb)
-{
+void vRingbufferDeleteWithCaps(RingbufHandle_t rb) {
     if (!rb) {
         return;
     }
@@ -250,8 +278,7 @@ void vRingbufferDeleteWithCaps(RingbufHandle_t rb)
 }
 
 BaseType_t xRingbufferSend(RingbufHandle_t rb, const void *data, size_t size,
-                           TickType_t timeout)
-{
+                           TickType_t timeout) {
     const uint8_t *src = data;
 
     (void)timeout;
@@ -285,8 +312,7 @@ BaseType_t xRingbufferSend(RingbufHandle_t rb, const void *data, size_t size,
 }
 
 void *xRingbufferReceiveUpTo(RingbufHandle_t rb, size_t *item_size,
-                             TickType_t timeout, size_t wanted)
-{
+                             TickType_t timeout, size_t wanted) {
     size_t n;
 
     if (item_size) {
@@ -300,7 +326,8 @@ void *xRingbufferReceiveUpTo(RingbufHandle_t rb, size_t *item_size,
     if (rb->lent) {
         idf_stub_abort(__FILE__, __LINE__,
                        "receive while %zu bytes are still lent out; the "
-                       "previous item was never returned", rb->lent);
+                       "previous item was never returned",
+                       rb->lent);
     }
 
     if (rb->count == 0) {
@@ -331,8 +358,7 @@ void *xRingbufferReceiveUpTo(RingbufHandle_t rb, size_t *item_size,
     return &rb->buf[rb->tail];
 }
 
-void vRingbufferReturnItem(RingbufHandle_t rb, void *item)
-{
+void vRingbufferReturnItem(RingbufHandle_t rb, void *item) {
     (void)item;
 
     if (!rb || rb->lent == 0) {
@@ -343,4 +369,3 @@ void vRingbufferReturnItem(RingbufHandle_t rb, void *item)
     rb->count -= rb->lent;
     rb->lent = 0;
 }
-

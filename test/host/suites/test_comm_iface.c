@@ -26,8 +26,8 @@
 
 #include "td_test.h"
 
-#include "fake_port.h"
 #include "freertos/semphr.h"
+#include "fake_port.h"
 
 #include "comm_iface.c"
 
@@ -35,17 +35,15 @@
 #define P1 (fake_port_id(1))
 
 /** Delivers @p s to @p port and drains it into @p buf. Returns bytes read. */
-static size_t round_trip(comm_port_id_t port, const char *s,
-                         uint8_t *buf, size_t cap)
-{
+static size_t round_trip(comm_port_id_t port, const char *s, uint8_t *buf,
+                         size_t cap) {
     TEST_ASSERT_EQUAL_INT(ESP_OK,
-        comm_port_rx(port, (const uint8_t *)s, strlen(s)));
+                          comm_port_rx(port, (const uint8_t *)s, strlen(s)));
 
     return comm_port_read(port, buf, cap, pdMS_TO_TICKS(100));
 }
 
-void td_setup(void)
-{
+void td_setup(void) {
     /* Release the buffers the previous test's ports owned, then start from an
      * empty table. */
     for (int i = 0; i < COMM_MAX_PORTS; i++) {
@@ -62,18 +60,16 @@ void td_setup(void)
                     "the fake ports did not register");
 }
 
-void td_teardown(void)
-{
-    TEST_ASSERT_MSG(idf_stub_lock_balance() == 0,
-                    "left %d locks held", idf_stub_lock_balance());
+void td_teardown(void) {
+    TEST_ASSERT_MSG(idf_stub_lock_balance() == 0, "left %d locks held",
+                    idf_stub_lock_balance());
 }
 
 /* ------------------------------------------------------------------ *
  * Receiving
  * ------------------------------------------------------------------ */
 
-TEST(received_bytes_reach_the_reader)
-{
+TEST(received_bytes_reach_the_reader) {
     uint8_t buf[32] = {0};
     size_t n = round_trip(P0, "ATZ\r", buf, sizeof(buf));
 
@@ -81,27 +77,24 @@ TEST(received_bytes_reach_the_reader)
     TEST_ASSERT_EQUAL_STRING("ATZ\r", (const char *)buf);
 }
 
-TEST(a_read_returns_nothing_when_the_transport_is_idle)
-{
+TEST(a_read_returns_nothing_when_the_transport_is_idle) {
     uint8_t buf[8];
 
-    TEST_ASSERT_EQUAL_INT(0, comm_port_read(P0, buf, sizeof(buf),
-                                            pdMS_TO_TICKS(10)));
+    TEST_ASSERT_EQUAL_INT(
+        0, comm_port_read(P0, buf, sizeof(buf), pdMS_TO_TICKS(10)));
 }
 
-TEST(a_port_does_not_see_traffic_from_another_port)
-{
+TEST(a_port_does_not_see_traffic_from_another_port) {
     uint8_t buf[16];
 
     TEST_ASSERT_EQUAL_INT(ESP_OK,
-        comm_port_rx(P1, (const uint8_t *)"hello", 5));
+                          comm_port_rx(P1, (const uint8_t *)"hello", 5));
 
     TEST_ASSERT_EQUAL_INT(0, comm_port_read(P0, buf, sizeof(buf), 0));
     TEST_ASSERT_EQUAL_INT(5, (int)comm_port_read(P1, buf, sizeof(buf), 0));
 }
 
-TEST(an_overflowing_receive_buffer_drops_and_counts_instead_of_blocking)
-{
+TEST(an_overflowing_receive_buffer_drops_and_counts_instead_of_blocking) {
     uint8_t big[FAKE_PORT_RX_BUF];
     uint8_t buf[64];
 
@@ -124,24 +117,21 @@ TEST(an_overflowing_receive_buffer_drops_and_counts_instead_of_blocking)
  * Writing
  * ------------------------------------------------------------------ */
 
-TEST(a_write_goes_out_the_port_it_names)
-{
+TEST(a_write_goes_out_the_port_it_names) {
     TEST_ASSERT_EQUAL_INT(ESP_OK, comm_port_write(P0, "X\r", 2));
 
     TEST_ASSERT_EQUAL_STRING("X\r", fake_port_text(0));
     TEST_ASSERT_EQUAL_INT(0, (int)fake_port_len(1));
 }
 
-TEST(a_flush_reaches_the_transport)
-{
+TEST(a_flush_reaches_the_transport) {
     comm_port_flush(P0);
 
     TEST_ASSERT_EQUAL_INT(1, fake_port_flush_count(0));
     TEST_ASSERT_EQUAL_INT(0, fake_port_flush_count(1));
 }
 
-TEST(a_short_write_is_completed_through_a_flush)
-{
+TEST(a_short_write_is_completed_through_a_flush) {
     /* A slow host leaves room for only part of the response in the FIFO. */
     fake_port_set_write_limit(0, 4);
 
@@ -152,8 +142,7 @@ TEST(a_short_write_is_completed_through_a_flush)
                     "the remainder went out without draining the FIFO first");
 }
 
-TEST(a_disconnected_port_is_not_written_to)
-{
+TEST(a_disconnected_port_is_not_written_to) {
     fake_port_set_connected(0, false);
 
     /* Not merely pointless: the USB FIFO would accept the bytes and nobody
@@ -170,18 +159,17 @@ TEST(a_disconnected_port_is_not_written_to)
  * Registration
  * ------------------------------------------------------------------ */
 
-TEST(registering_more_ports_than_there_are_slots_fails)
-{
-    static const comm_port_ops_t ops = { .write = NULL };
+TEST(registering_more_ports_than_there_are_slots_fails) {
+    static const comm_port_ops_t ops = {.write = NULL};
     comm_port_ops_t writable = ops;
-    int registered = 2;     /* The two fake ports already hold slots. */
+    int registered = 2; /* The two fake ports already hold slots. */
 
     /* Any non-NULL write is enough; nothing is transmitted here. */
     writable.write = (int (*)(const void *, uint32_t))(void *)&registered;
 
     while (registered < COMM_MAX_PORTS) {
-        TEST_ASSERT_MSG(comm_port_register("X", &writable, 32)
-                        != COMM_INVALID_PORT_ID,
+        TEST_ASSERT_MSG(comm_port_register("X", &writable, 32) !=
+                            COMM_INVALID_PORT_ID,
                         "slot %d should still have been free", registered);
         registered++;
     }
@@ -192,9 +180,8 @@ TEST(registering_more_ports_than_there_are_slots_fails)
                           comm_port_register("OVER", &writable, 32));
 }
 
-TEST(a_port_needs_a_write_function)
-{
-    static const comm_port_ops_t no_write = { .write = NULL };
+TEST(a_port_needs_a_write_function) {
+    static const comm_port_ops_t no_write = {.write = NULL};
 
     TEST_ASSERT_EQUAL_INT(COMM_INVALID_PORT_ID,
                           comm_port_register("BAD", &no_write, 32));
@@ -202,9 +189,8 @@ TEST(a_port_needs_a_write_function)
                           comm_port_register("BAD", NULL, 32));
 }
 
-TEST(a_port_needs_a_receive_buffer)
-{
-    static const comm_port_ops_t ops = { .write = NULL };
+TEST(a_port_needs_a_receive_buffer) {
+    static const comm_port_ops_t ops = {.write = NULL};
     comm_port_ops_t writable = ops;
     int dummy = 0;
 
@@ -214,9 +200,8 @@ TEST(a_port_needs_a_receive_buffer)
                           comm_port_register("BAD", &writable, 0));
 }
 
-TEST(a_name_longer_than_the_limit_is_truncated_not_overrun)
-{
-    static const comm_port_ops_t ops = { .write = NULL };
+TEST(a_name_longer_than_the_limit_is_truncated_not_overrun) {
+    static const comm_port_ops_t ops = {.write = NULL};
     comm_port_ops_t writable = ops;
     comm_port_id_t id;
     int dummy = 0;
@@ -229,14 +214,14 @@ TEST(a_name_longer_than_the_limit_is_truncated_not_overrun)
     TEST_ASSERT_EQUAL_STRING("VERYLON", g_comm.ports[id].name);
 }
 
-TEST(invalid_ids_are_rejected_everywhere)
-{
+TEST(invalid_ids_are_rejected_everywhere) {
     uint8_t buf[8];
 
-    TEST_ASSERT_MSG(comm_port_rx(COMM_INVALID_PORT_ID, (const uint8_t *)"x", 1)
-                    != ESP_OK, "rx accepted an invalid port");
-    TEST_ASSERT_EQUAL_INT(0, comm_port_read(COMM_INVALID_PORT_ID, buf,
-                                            sizeof(buf), 0));
+    TEST_ASSERT_MSG(
+        comm_port_rx(COMM_INVALID_PORT_ID, (const uint8_t *)"x", 1) != ESP_OK,
+        "rx accepted an invalid port");
+    TEST_ASSERT_EQUAL_INT(
+        0, comm_port_read(COMM_INVALID_PORT_ID, buf, sizeof(buf), 0));
     TEST_ASSERT_MSG(comm_port_write(COMM_INVALID_PORT_ID, "x", 1) != ESP_OK,
                     "write accepted an invalid port");
     TEST_ASSERT_EQUAL_INT(0, comm_port_rx_dropped(COMM_INVALID_PORT_ID));
@@ -244,4 +229,94 @@ TEST(invalid_ids_are_rejected_everywhere)
     /* A slot nobody registered is as invalid as the sentinel. */
     TEST_ASSERT_MSG(comm_port_write(COMM_MAX_PORTS - 1, "x", 1) != ESP_OK,
                     "write accepted an unregistered port slot");
+}
+
+/* ------------------------------------------------------------------ *
+ * A client going away
+ *
+ * The transport is the only layer that learns about this at the moment it
+ * happens. The session task can be several seconds deep in one request when a
+ * BLE central drops, and the next central can be connected and sending before
+ * that request has even finished - so what the departing client left behind
+ * has to be dealt with here rather than whenever the session notices.
+ * ------------------------------------------------------------------ */
+
+TEST(a_departing_client_takes_its_unread_input_with_it) {
+    uint8_t buf[64] = {0};
+
+    /* A command line the session never got round to reading, and the front of
+     * a second one that the client was still sending when it vanished. */
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+                          comm_port_rx(P0, (const uint8_t *)"ATI\r010", 7));
+
+    comm_port_client_gone(P0);
+    comm_port_client_ready(P0);
+
+    /*
+     * Nothing of it survives. "010" prepended to the next client's first line
+     * turns "ATZ" into "010ATZ", which is one unanswerable line where the
+     * client sent two - and an ELM327 client that is a prompt short stays a
+     * reply behind for the rest of its session.
+     */
+    TEST_ASSERT_EQUAL_INT(0, (int)comm_port_read(P0, buf, sizeof(buf), 0));
+
+    TEST_ASSERT_EQUAL_INT(4, (int)round_trip(P0, "ATZ\r", buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_INT(0, memcmp(buf, "ATZ\r", 4));
+}
+
+TEST(the_answer_to_a_departed_client_is_not_given_to_the_next_one) {
+    fake_port_reset();
+
+    comm_port_client_gone(P0);
+
+    /* Still being composed when the client left, and addressed to nobody. */
+    TEST_ASSERT_MSG(comm_port_write(P0, "OK\r\r>", 5) != ESP_OK,
+                    "a muted port accepted a write");
+    TEST_ASSERT_EQUAL_INT(0, (int)fake_port_len(0));
+
+    /* The front-end that answers the next client says so, and the port talks
+     * again. */
+    comm_port_client_ready(P0);
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, comm_port_write(P0, "ELM327 v2.3\r\r>", 14));
+    TEST_ASSERT_EQUAL_STRING("ELM327 v2.3\r\r>", fake_port_text(0));
+}
+
+TEST(one_client_leaving_does_not_mute_another_port) {
+    fake_port_reset();
+
+    comm_port_client_gone(P0);
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, comm_port_write(P1, "OK\r\r>", 5));
+    TEST_ASSERT_EQUAL_STRING("OK\r\r>", fake_port_text(1));
+}
+
+TEST(what_a_departing_client_left_is_counted) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+                          comm_port_rx(P0, (const uint8_t *)"0100\r", 5));
+
+    comm_port_client_gone(P0);
+
+    /* Silent discards are how a desync stays a mystery; this is the number to
+     * look at when one is suspected. */
+    TEST_ASSERT_EQUAL_INT(5, (int)g_comm.ports[P0].rx_discarded);
+}
+
+TEST(the_backlog_is_what_the_client_is_ahead_by) {
+    uint8_t buf[8] = {0};
+
+    TEST_ASSERT_EQUAL_INT(0, (int)comm_port_rx_pending(P0));
+
+    /* Two command lines sent while the session is busy with an earlier one. */
+    TEST_ASSERT_EQUAL_INT(
+        ESP_OK, comm_port_rx(P0, (const uint8_t *)"0100\r010C\r", 10));
+    TEST_ASSERT_EQUAL_INT(10, (int)comm_port_rx_pending(P0));
+
+    /* Reading draws it down, byte for byte. */
+    TEST_ASSERT_EQUAL_INT(5, (int)comm_port_read(P0, buf, 5, 0));
+    TEST_ASSERT_EQUAL_INT(5, (int)comm_port_rx_pending(P0));
+
+    /* And a client that leaves takes its backlog with it. */
+    comm_port_client_gone(P0);
+    TEST_ASSERT_EQUAL_INT(0, (int)comm_port_rx_pending(P0));
 }

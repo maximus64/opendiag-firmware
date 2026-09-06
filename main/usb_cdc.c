@@ -1,18 +1,20 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
-#include <stdio.h>
+#include "usb_cdc.h"
 #include <inttypes.h>
-#include "sdkconfig.h"
+#include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/ringbuf.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_private/periph_ctrl.h"
 #include "esp_system.h"
+#include "hal/usb_wrap_ll.h"
+#include "sdkconfig.h"
+#include "soc/rtc_cntl_reg.h"
 #include "tinyusb.h"
 #include "tusb_cdc_acm.h"
 #include "tusb_console.h"
-
-#include "usb_cdc.h"
 
 #define TAG "USB_CDC"
 
@@ -20,7 +22,7 @@
 #define USB_CDC_INTERFACE_NUM 2
 
 static volatile bool line_status[USB_CDC_INTERFACE_NUM];
-static interface_rx_cb_t tx_callback[USB_CDC_INTERFACE_NUM];
+static usb_cdc_rx_cb_t rx_callback[USB_CDC_INTERFACE_NUM];
 static usb_cdc_line_cb_t line_callback;
 
 enum {
@@ -33,11 +35,11 @@ enum {
 
 enum {
     EPNUM_CDC_0_NOTIF = 0x81,
-    EPNUM_CDC_0_OUT   = 0x02,
-    EPNUM_CDC_0_IN    = 0x82,
+    EPNUM_CDC_0_OUT = 0x02,
+    EPNUM_CDC_0_IN = 0x82,
     EPNUM_CDC_1_NOTIF = 0x83,
-    EPNUM_CDC_1_OUT   = 0x04,
-    EPNUM_CDC_1_IN    = 0x84,
+    EPNUM_CDC_1_OUT = 0x04,
+    EPNUM_CDC_1_IN = 0x84,
 };
 
 static const tusb_desc_device_t cdc_device_descriptor = {
@@ -54,50 +56,57 @@ static const tusb_desc_device_t cdc_device_descriptor = {
     .iManufacturer = 0x01,
     .iProduct = 0x02,
     .iSerialNumber = 0x03,
-    .bNumConfigurations = 0x01
-};
+    .bNumConfigurations = 0x01};
 
 static const uint8_t desc_configuration[] = {
-    // Config number, interface count, string index, total length, attribute, power in mA
-    TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, TUSB_DESC_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
+    // Config number, interface count, string index, total length, attribute,
+    // power in mA
+    TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, TUSB_DESC_TOTAL_LEN,
+                          TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
 
-    // 1st CDC: Interface number, string index, EP notification, EP notification size, EP data out, EP data in, EP data packet size
-    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_0, 4, EPNUM_CDC_0_NOTIF, 8, EPNUM_CDC_0_OUT, EPNUM_CDC_0_IN, 64),
+    // 1st CDC: Interface number, string index, EP notification, EP notification
+    // size, EP data out, EP data in, EP data packet size
+    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_0, 4, EPNUM_CDC_0_NOTIF, 8, EPNUM_CDC_0_OUT,
+                       EPNUM_CDC_0_IN, 64),
 
-    // 2nd CDC: Interface number, string index, EP notification, EP notification size, EP data out, EP data in, EP data packet size
-    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_1, 5, EPNUM_CDC_1_NOTIF, 8, EPNUM_CDC_1_OUT, EPNUM_CDC_1_IN, 64),
+    // 2nd CDC: Interface number, string index, EP notification, EP notification
+    // size, EP data out, EP data in, EP data packet size
+    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_1, 5, EPNUM_CDC_1_NOTIF, 8, EPNUM_CDC_1_OUT,
+                       EPNUM_CDC_1_IN, 64),
 };
 
 static char serial_str[13] = "000000000000";
 
 static const char *string_desc_arr[] = {
-    (static const char[]){0x09, 0x04}, // 0: is supported language is English (0x0409)
-    "Dalalogic",          // 1: Manufacturer
-    "OpenDiag",           // 2: Product
-    serial_str,           // 3: Serials,
-    "OpenDiag Data",      // 4: CDC 0 - the protocol data link
-    "Console",            // 5: CDC 1 - console and debug shell
+    (static const char[]){0x09,
+                          0x04}, // 0: is supported language is English (0x0409)
+    OPENDIAG_MANUFACTURE,        // 1: Manufacturer
+    OPENDIAG_PRODUCT,            // 2: Product
+    serial_str,                  // 3: Serials,
+    "COM",                       // 4: CDC 0 - the protocol data link
+    "DEBUG",                     // 5: CDC 1 - console and debug shell
 };
 
 static const tinyusb_config_t tusb_cfg = {
     .device_descriptor = NULL,
     .string_descriptor = string_desc_arr,
-    .string_descriptor_count = sizeof(string_desc_arr) / sizeof(string_desc_arr[0]),
+    .string_descriptor_count =
+        sizeof(string_desc_arr) / sizeof(string_desc_arr[0]),
     .external_phy = false, // In the most cases you need to use a `false` value
     .configuration_descriptor = desc_configuration,
 };
 
-
 /**
  * @brief Invoked when a line state change event occurs
  *
- * This callback is used to detect when a serial terminal is connected or disconnected.
+ * This callback is used to detect when a serial terminal is connected or
+ * disconnected.
  */
-static void tinyusb_cdc_line_state_cb(int itf, cdcacm_event_t *event)
-{
+static void tinyusb_cdc_line_state_cb(int itf, cdcacm_event_t *event) {
     bool open = false;
 
-    if (event->line_state_changed_data.dtr && event->line_state_changed_data.rts) {
+    if (event->line_state_changed_data.dtr &&
+        event->line_state_changed_data.rts) {
         ESP_LOGI(TAG, "Serial terminal connected on CDC interface %d", itf);
         open = true;
     } else {
@@ -114,11 +123,11 @@ static void tinyusb_cdc_line_state_cb(int itf, cdcacm_event_t *event)
 /**
  * @brief Invoked when received new data
  *
- * This callback is triggered when the host sends data to either of the CDC interfaces.
- * The `itf` parameter is used to distinguish between the two interfaces.
+ * This callback is triggered when the host sends data to either of the CDC
+ * interfaces. The `itf` parameter is used to distinguish between the two
+ * interfaces.
  */
-static void tinyusb_cdc_rx_cb(int itf, cdcacm_event_t *event)
-{
+static void tinyusb_cdc_rx_cb(int itf, cdcacm_event_t *event) {
     /* initialization */
     size_t rx_size = 0;
     uint8_t rx_buf[64];
@@ -130,50 +139,44 @@ static void tinyusb_cdc_rx_cb(int itf, cdcacm_event_t *event)
         return;
     }
 
-    if (tx_callback[itf]) {
-        tx_callback[itf](rx_buf, rx_size);
+    if (rx_callback[itf]) {
+        rx_callback[itf](rx_buf, rx_size);
     }
 }
 
-void usb_cdc_set_line_callback(usb_cdc_line_cb_t callback)
-{
+void usb_cdc_set_line_callback(usb_cdc_line_cb_t callback) {
     line_callback = callback;
 }
 
-void usb_cdc_rx_set_callback(int itf, interface_rx_cb_t callback)
-{
+void usb_cdc_rx_set_callback(int itf, usb_cdc_rx_cb_t callback) {
     assert(itf < USB_CDC_INTERFACE_NUM);
-    tx_callback[itf] = callback;
+    rx_callback[itf] = callback;
 }
 
-int usb_cdc_tx_write(int itf, const void* buf, uint32_t length)
-{
+int usb_cdc_tx_write(int itf, const void *buf, uint32_t length) {
     assert(itf < USB_CDC_INTERFACE_NUM);
     return tinyusb_cdcacm_write_queue(itf, buf, length);
 }
 
-void usb_cdc_tx_flush(int itf)
-{
+void usb_cdc_tx_flush(int itf) {
     assert(itf < USB_CDC_INTERFACE_NUM);
     tinyusb_cdcacm_write_flush(itf, 0);
 }
 
-bool usb_cdc_get_line_status(int itf)
-{
+bool usb_cdc_get_line_status(int itf) {
     assert(itf < USB_CDC_INTERFACE_NUM);
     return line_status[itf];
 }
 
-void usb_cdc_setup(void)
-{
+void usb_cdc_setup(void) {
     ESP_LOGI(TAG, "USB initialization");
 
     // Populate serial string with MAC address
     uint8_t base_mac[6] = {0};
     if (esp_efuse_mac_get_default(base_mac) == ESP_OK) {
         snprintf(serial_str, sizeof(serial_str), "%02X%02X%02X%02X%02X%02X",
-                 base_mac[0], base_mac[1], base_mac[2],
-                 base_mac[3], base_mac[4], base_mac[5]);
+                 base_mac[0], base_mac[1], base_mac[2], base_mac[3],
+                 base_mac[4], base_mac[5]);
         ESP_LOGI(TAG, "USB serial (eFuse MAC): %s", serial_str);
     } else {
         ESP_LOGW(TAG, "Failed to get MAC address for USB serial number");
@@ -185,14 +188,13 @@ void usb_cdc_setup(void)
 
     /* CDC 0 is the data link: its receive callback drains the FIFO and hands
      * the bytes to comm_iface. */
-    tinyusb_config_cdcacm_t acm_cfg = {
-        .usb_dev = TINYUSB_USBDEV_0,
-        .cdc_port = TINYUSB_CDC_ACM_0,
-        .callback_rx = tinyusb_cdc_rx_cb,
-        .callback_rx_wanted_char = NULL,
-        .callback_line_state_changed = tinyusb_cdc_line_state_cb,
-        .callback_line_coding_changed = NULL
-    };
+    tinyusb_config_cdcacm_t acm_cfg = {.usb_dev = TINYUSB_USBDEV_0,
+                                       .cdc_port = TINYUSB_CDC_ACM_0,
+                                       .callback_rx = tinyusb_cdc_rx_cb,
+                                       .callback_rx_wanted_char = NULL,
+                                       .callback_line_state_changed =
+                                           tinyusb_cdc_line_state_cb,
+                                       .callback_line_coding_changed = NULL};
     ESP_ERROR_CHECK(tusb_cdc_acm_init(&acm_cfg));
 
     /*
@@ -211,8 +213,22 @@ void usb_cdc_setup(void)
     ESP_LOGI(TAG, "USB initialization finished.");
 }
 
-void usb_cdc_teardown(void)
-{
-    ESP_LOGI(TAG, "USB taredown...");
+void usb_cdc_teardown(void) {
+    ESP_LOGI(TAG, "USB teardown...");
     tinyusb_driver_uninstall();
+
+    /*
+     * Workaround for `reboot dl` command. The download shutdown path resets USB
+     * after TinyUSB teardown: TinyUSB can gate the DWC2 clocks, and
+     * `esp_restart()` does not reset the USB peripheral. Leaving that state for
+     * ROM can cause USB enumeration failures such as Linux `device descriptor
+     * read/64, error -71` even when BOOT + RESET works.
+     */
+    if (REG_GET_BIT(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT)) {
+        /* TinyUSB gates USB clocks; CPU reset leaves them gated for ROM. */
+        PERIPH_RCC_ATOMIC() {
+            usb_wrap_ll_enable_bus_clock(true);
+            usb_wrap_ll_reset_register();
+        }
+    }
 }

@@ -1,0 +1,16 @@
+BasedOnStyle: llvm
+IndentWidth: 4
+IncludeCategories:
+  # 1. Main header (automatically priority 0)
+  # 2. C System headers
+  - Regex:           '^<[^.]+\.h>'
+    Priority:        1
+  # 3. FreeRTOS headers
+  - Regex:           '^"freertos/.*"'
+    Priority:        2
+  # 4. ESP headers
+  - Regex:           '^"esp_.*.h"'
+    Priority:        3
+  # 5. Project-specific headers
+  - Regex:           '^".*"'
+    Priority:        4

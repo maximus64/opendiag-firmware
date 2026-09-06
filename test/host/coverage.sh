@@ -20,11 +20,11 @@ set -e
 cd "$BUILD_DIR"
 
 # Passed in by the CMake target so the list lives in one place.
-: "${SUITE_LIST:=test_elm327_at test_elm327_can test_elm327_bytebus test_elm327_search test_comm_iface test_vif test_slcan}"
+: "${SUITE_LIST:=test_elm327_at test_elm327_can test_elm327_bytebus test_elm327_search test_comm_iface test_vif test_slcan test_j1850_pwm_codec}"
 SUITES="$SUITE_LIST"
 
 # Named one by one rather than as a directory: llvm-cov only filters on files.
-SOURCES="$FW_DIR/elm327_at.c $FW_DIR/vif.c $FW_DIR/slcan.c $FW_DIR/comm_iface.c $FW_DIR/timer.c $FW_DIR/utility.c"
+SOURCES="$FW_DIR/elm327_at.c $FW_DIR/vif.c $FW_DIR/slcan.c $FW_DIR/comm_iface.c $FW_DIR/timer.c $FW_DIR/utility.c $FW_DIR/j1850_pwm_codec.c $FW_DIR/j1850_vpw_codec.c $FW_DIR/j1850_common.c"
 
 for suite in $SUITES; do
     if [ ! -x "./$suite" ]; then

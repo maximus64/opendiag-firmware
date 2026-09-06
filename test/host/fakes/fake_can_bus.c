@@ -8,8 +8,8 @@
 
 #include <string.h>
 
-#include "fake_clock.h"
 #include "freertos/FreeRTOS.h"
+#include "fake_clock.h"
 
 /* Large enough to stage a full multi-frame transfer: a 400 byte ISO-TP
  * reply is 58 frames, and long replies are exactly what the tx path
@@ -19,7 +19,7 @@
 typedef struct {
     struct can_frame frame;
     uint32_t delay_ms;
-    int release_at;                 /* Transmit count that frees this frame */
+    int release_at; /* Transmit count that frees this frame */
 } staged_t;
 
 static struct {
@@ -30,19 +30,18 @@ static struct {
     bool fail_next_send;
     bool fail_setup;
 
-    staged_t live[MAX_FRAMES];      /* Readable now */
+    staged_t live[MAX_FRAMES]; /* Readable now */
     int live_head, live_count;
 
-    staged_t pending[MAX_FRAMES];   /* Waiting for their release_at transmit */
+    staged_t pending[MAX_FRAMES]; /* Waiting for their release_at transmit */
     int pending_count;
 
     struct can_frame sent[MAX_FRAMES];
     int sent_count;
-    int sent_total;                 /* Includes transmits past the log's end */
+    int sent_total; /* Includes transmits past the log's end */
 } g;
 
-void fake_can_reset(void)
-{
+void fake_can_reset(void) {
     memset(&g, 0, sizeof(g));
     g.baud = -1;
 }
@@ -52,8 +51,7 @@ void fake_can_reset(void)
  * ------------------------------------------------------------------ */
 
 static void stage(staged_t *slot, uint32_t id, uint8_t dlc, const uint8_t *data,
-                  uint32_t delay_ms)
-{
+                  uint32_t delay_ms) {
     memset(slot, 0, sizeof(*slot));
 
     slot->frame.id = id;
@@ -65,8 +63,7 @@ static void stage(staged_t *slot, uint32_t id, uint8_t dlc, const uint8_t *data,
 }
 
 void fake_can_stage_response_at(uint32_t id, uint8_t dlc, const uint8_t *data,
-                                uint32_t delay_ms, int after_sends)
-{
+                                uint32_t delay_ms, int after_sends) {
     staged_t *slot;
 
     if (g.pending_count >= MAX_FRAMES) {
@@ -79,13 +76,11 @@ void fake_can_stage_response_at(uint32_t id, uint8_t dlc, const uint8_t *data,
 }
 
 void fake_can_stage_response(uint32_t id, uint8_t dlc, const uint8_t *data,
-                             uint32_t delay_ms)
-{
+                             uint32_t delay_ms) {
     fake_can_stage_response_at(id, dlc, data, delay_ms, 1);
 }
 
-void fake_can_stage_stale(uint32_t id, uint8_t dlc, const uint8_t *data)
-{
+void fake_can_stage_stale(uint32_t id, uint8_t dlc, const uint8_t *data) {
     int slot;
 
     if (g.live_count >= MAX_FRAMES) {
@@ -97,16 +92,15 @@ void fake_can_stage_stale(uint32_t id, uint8_t dlc, const uint8_t *data)
     g.live_count++;
 }
 
-int fake_can_setup_count(void)    { return g.setup_count; }
+int fake_can_setup_count(void) { return g.setup_count; }
 int fake_can_teardown_count(void) { return g.teardown_count; }
-int fake_can_last_baud(void)      { return g.baud; }
-bool fake_can_is_up(void)         { return g.up; }
-int fake_can_sent_count(void)     { return g.sent_count; }
+int fake_can_last_baud(void) { return g.baud; }
+bool fake_can_is_up(void) { return g.up; }
+int fake_can_sent_count(void) { return g.sent_count; }
 
 void fake_can_fail_next_send(void) { g.fail_next_send = true; }
 
-const struct can_frame *fake_can_sent(int idx)
-{
+const struct can_frame *fake_can_sent(int idx) {
     if (idx < 0 || idx >= g.sent_count) {
         return NULL;
     }
@@ -117,8 +111,7 @@ const struct can_frame *fake_can_sent(int idx)
  * can_bus.h implementation
  * ------------------------------------------------------------------ */
 
-esp_err_t can_bus_setup(int baud_rate)
-{
+esp_err_t can_bus_setup(int baud_rate) {
     g.setup_count++;
 
     if (g.fail_setup) {
@@ -131,23 +124,17 @@ esp_err_t can_bus_setup(int baud_rate)
     return ESP_OK;
 }
 
-void fake_can_fail_setup(bool fail)
-{
-    g.fail_setup = fail;
-}
+void fake_can_fail_setup(bool fail) { g.fail_setup = fail; }
 
-void can_bus_teardown(void)
-{
+esp_err_t can_bus_teardown(void) {
     g.up = false;
     g.teardown_count++;
+    return ESP_OK;
 }
 
-void can_print_stat(void)
-{
-}
+void can_print_stat(void) {}
 
-int can_send(const struct can_frame *frame)
-{
+int can_send(const struct can_frame *frame) {
     if (!frame) {
         return -1;
     }
@@ -166,7 +153,8 @@ int can_send(const struct can_frame *frame)
      * keeping the rest waiting for a later one. */
     int kept = 0;
     for (int i = 0; i < g.pending_count; i++) {
-        if (g.pending[i].release_at > g.sent_total || g.live_count >= MAX_FRAMES) {
+        if (g.pending[i].release_at > g.sent_total ||
+            g.live_count >= MAX_FRAMES) {
             g.pending[kept++] = g.pending[i];
             continue;
         }
@@ -179,8 +167,7 @@ int can_send(const struct can_frame *frame)
     return 0;
 }
 
-int can_receive(struct can_frame *frame, TickType_t ticks_to_wait)
-{
+int can_receive(struct can_frame *frame, TickType_t ticks_to_wait) {
     staged_t *s;
 
     if (g.live_count == 0) {
@@ -212,3 +199,66 @@ int can_receive(struct can_frame *frame, TickType_t ticks_to_wait)
 
     return 0;
 }
+
+/* ------------------------------------------------------------------ *
+ * The bus interface
+ *
+ * The same shape as can_bus.c's, over the same marshalling, so vif.c reaches
+ * the fake exactly as it reaches the driver.
+ * ------------------------------------------------------------------ */
+
+static esp_err_t can_ops_open(const bus_cfg_t *cfg) {
+    if (!cfg || cfg->bitrate == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    return can_bus_setup((int)cfg->bitrate);
+}
+
+static esp_err_t can_ops_close(void) { return can_bus_teardown(); }
+
+static int can_ops_send(const bus_msg_t *msg, uint32_t flags) {
+    struct can_frame f = {0};
+
+    (void)flags;
+
+    f.id = msg->id;
+    f.dlc = (uint8_t)msg->len;
+
+    if (!(f.id & CAN_RTR_FLAG)) {
+        memcpy(f.data, msg->data, msg->len > 8 ? 8 : msg->len);
+    }
+
+    return can_send(&f) == 0 ? 0 : BUS_ERR_TX_FAILED;
+}
+
+static int can_ops_recv(bus_msg_t *msg, TickType_t wait) {
+    struct can_frame f;
+    size_t len;
+
+    if (can_receive(&f, wait) != 0) {
+        return BUS_ERR_TIMEOUT;
+    }
+
+    len = (f.dlc > 8) ? 8 : f.dlc;
+    if (f.id & CAN_RTR_FLAG) {
+        len = 0;
+    }
+    if (msg->cap < len) {
+        return BUS_ERR_NO_SPACE;
+    }
+
+    memcpy(msg->data, f.data, len);
+    msg->id = f.id;
+    msg->len = f.dlc;
+
+    return (int)len;
+}
+
+const bus_ops_t can_bus_ops = {
+    .name = "CAN",
+    .open = can_ops_open,
+    .close = can_ops_close,
+    .send = can_ops_send,
+    .recv = can_ops_recv,
+};

@@ -10,8 +10,7 @@
  * @param data A const pointer to the memory region to be dumped.
  * @param size The total number of bytes to dump.
  */
-void hexdump(const void* data, size_t size);
-
+void hexdump(const void *data, size_t size);
 
 /**
  * @brief Converts a hex string into a byte array.
@@ -23,8 +22,8 @@ void hexdump(const void* data, size_t size);
  * @return Number of bytes written, -1 on an invalid hex character,
  *         or -2 if output_array is too small to hold len/2 bytes.
  */
-int hex_string_to_u8_array(const char* hex_str, size_t len, uint8_t* output_array,
-                           size_t output_size);
-int hex_string_to_u32_be(const char* hex_str, size_t len, uint32_t *output);
+int hex_string_to_u8_array(const char *hex_str, size_t len,
+                           uint8_t *output_array, size_t output_size);
+int hex_string_to_u32_be(const char *hex_str, size_t len, uint32_t *output);
 int8_t hex_char_to_int(char c);
 void delay_us(uint32_t us);
