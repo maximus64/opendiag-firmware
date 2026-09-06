@@ -503,8 +503,9 @@ TEST(every_frame_of_a_multi_frame_reply_is_printed_in_order) {
                              elm_ask("0902\r"));
 }
 
-TEST(a_complete_multi_frame_reply_ends_the_exchange_immediately) {
+TEST(a_complete_directed_multi_frame_reply_ends_the_exchange_immediately) {
     on_can_11bit();
+    elm_ok("ATSH7E0\r");
     stage_vin_reply();
 
     uint32_t before = fake_clock_ms();
@@ -529,29 +530,35 @@ TEST(a_gap_in_the_consecutive_frame_sequence_is_an_error) {
                              elm_ask("0902\r"));
 }
 
-TEST(a_second_first_frame_before_the_transfer_finishes_is_an_error) {
+TEST(a_new_first_frame_restarts_reception_and_reports_the_old_one_aborted) {
     on_can_11bit();
     fake_can_stage_response(0x7E8, 8, vin_ff, 5);
     fake_can_stage_response_at(0x7E8, 8, vin_ff, 5, 2);
+    fake_can_stage_response_at(0x7E8, 8, vin_cf1, 5, 3);
+    fake_can_stage_response_at(0x7E8, 8, vin_cf2, 5, 3);
 
-    /* Two multi-frame transfers cannot be reassembled at once. */
-    TEST_ASSERT_EQUAL_STRING("7E8 10 14 49 02 01 31 32 33 \r?\r" ELM_PROMPT,
+    TEST_ASSERT_EQUAL_STRING("7E8 10 14 49 02 01 31 32 33 \r?\r"
+                             "7E8 10 14 49 02 01 31 32 33 \r"
+                             "7E8 21 34 35 36 37 38 39 41 \r"
+                             "7E8 22 42 43 44 45 46 47 48 \r" ELM_PROMPT,
                              elm_ask("0902\r"));
+    TEST_ASSERT_EQUAL_INT(3, fake_can_sent_count());
 }
 
-TEST(an_unrecognised_pci_nibble_is_an_error) {
+TEST(an_unrecognised_pci_nibble_is_ignored) {
     static const uint8_t bad_pci[8] = {0x40, 0x01, 0, 0, 0, 0, 0, 0};
 
     on_can_11bit();
     fake_can_stage_response(0x7E8, 8, bad_pci, 5);
 
-    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("0100\r"));
+    TEST_ASSERT_EQUAL_STRING("NO DATA\r" ELM_PROMPT, elm_ask("0100\r"));
 }
 
-TEST(a_flow_control_frame_from_the_ecu_is_handed_to_the_client) {
+TEST(a_flow_control_frame_from_the_ecu_is_handed_to_the_raw_client) {
     static const uint8_t fc[8] = {0x30, 0x00, 0x00, 0, 0, 0, 0, 0};
 
     on_can_11bit();
+    elm_ok("ATCAF0\r");
     fake_can_stage_response(0x7E8, 8, fc, 5);
 
     TEST_ASSERT_EQUAL_STRING("7E8 30 00 00 00 00 00 00 00 \r" ELM_PROMPT,
@@ -781,4 +788,177 @@ TEST(at_d_still_sets_everything_to_defaults) {
     TEST_ASSERT_TRUE(g_elm->settings.echo);
     TEST_ASSERT_FALSE(g_elm->settings.show_header);
     TEST_ASSERT_FALSE(g_elm->settings.can_show_dlc);
+}
+
+TEST(interleaved_ecu_transfers_have_independent_sequence_numbers) {
+    on_can_11bit();
+    fake_can_stage_response(0x7e8, 8, vin_ff, 1);
+    fake_can_stage_response(0x7e9, 8, vin_ff, 1);
+    fake_can_stage_response_at(0x7e8, 8, vin_cf1, 1, 3);
+    fake_can_stage_response_at(0x7e9, 8, vin_cf1, 1, 3);
+    fake_can_stage_response_at(0x7e8, 8, vin_cf2, 1, 3);
+    fake_can_stage_response_at(0x7e9, 8, vin_cf2, 1, 3);
+    const char *out = elm_ask("0902\r");
+    TEST_ASSERT_NULL(strchr(out, '?'));
+    TEST_ASSERT_NOT_NULL(strstr(out, "7E8 22 "));
+    TEST_ASSERT_NOT_NULL(strstr(out, "7E9 22 "));
+    TEST_ASSERT_EQUAL_INT(0x7e0, fake_can_sent(1)->id);
+    TEST_ASSERT_EQUAL_INT(0x7e1, fake_can_sent(2)->id);
+}
+
+TEST(single_frame_from_another_ecu_does_not_change_cf_sequence) {
+    on_can_11bit();
+    fake_can_stage_response(0x7e9, 8, supported_pids, 1);
+    stage_vin_reply();
+    const char *out = elm_ask("0902\r");
+    TEST_ASSERT_NULL(strchr(out, '?'));
+    TEST_ASSERT_NOT_NULL(strstr(out, "7E8 22 "));
+}
+
+TEST(a_cf_from_another_ecu_cannot_complete_the_active_transfer) {
+    on_can_11bit();
+    fake_can_stage_response(0x7e8, 8, vin_ff, 1);
+    fake_can_stage_response_at(0x7e9, 8, vin_cf1, 1, 2);
+    TEST_ASSERT_EQUAL_STRING("7E8 10 14 49 02 01 31 32 33 \r?\r" ELM_PROMPT,
+                             elm_ask("0902\r"));
+}
+
+TEST(a_missing_final_frame_is_a_transport_error) {
+    on_can_11bit();
+    fake_can_stage_response(0x7e8, 8, vin_ff, 1);
+    uint32_t before = fake_clock_ms();
+    const char *out = elm_ask("0902\r");
+    TEST_ASSERT_NOT_NULL(strstr(out, "?\r"));
+    TEST_ASSERT_EQUAL_INT(1001, fake_clock_ms() - before);
+}
+
+TEST(consecutive_frames_use_transport_timeout_instead_of_at_st) {
+    on_can_11bit();
+    fake_can_stage_response(0x7e8, 8, vin_ff, 1);
+    fake_can_stage_response_at(0x7e8, 8, vin_cf1, 900, 2);
+    fake_can_stage_response_at(0x7e8, 8, vin_cf2, 900, 2);
+    const char *out = elm_ask("0902\r");
+    TEST_ASSERT_NULL(strchr(out, '?'));
+    TEST_ASSERT_NOT_NULL(strstr(out, "7E8 22 "));
+}
+
+TEST(final_cf_padding_is_removed_only_in_the_formatted_view) {
+    elm_echo_off();
+    elm_ok(CAN_11BIT_500K);
+    uint8_t ff[8] = {0x10, 8, 1, 2, 3, 4, 5, 6};
+    uint8_t cf[8] = {0x21, 7, 8, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa};
+    fake_can_stage_response(0x7e8, 8, ff, 1);
+    fake_can_stage_response_at(0x7e8, 8, cf, 1, 2);
+    TEST_ASSERT_EQUAL_STRING(
+        "008\r0: 01 02 03 04 05 06 \r1: 07 08 \r" ELM_PROMPT,
+        elm_ask("0902\r"));
+}
+
+TEST(malformed_and_unsolicited_frames_do_not_count_as_replies) {
+    on_can_11bit();
+    uint8_t bad_sf[8] = {0x07};
+    uint8_t fc[8] = {0x30};
+    fake_can_stage_response(0x7e8, 2, bad_sf, 1);
+    fake_can_stage_response(0x7e8, 7, vin_ff, 1);
+    fake_can_stage_response(0x7e8, 8, vin_cf1, 1);
+    fake_can_stage_response(0x7e8, 8, fc, 1);
+    TEST_ASSERT_EQUAL_STRING("NO DATA\r" ELM_PROMPT, elm_ask("0100\r"));
+    TEST_ASSERT_EQUAL_INT(1, fake_can_sent_count());
+}
+
+TEST(directed_request_ignores_other_ecus) {
+    on_can_11bit();
+    elm_ok("ATSH7E0\r");
+    fake_can_stage_response(0x7e9, 8, supported_pids, 1);
+    fake_can_stage_response(0x7e8, 8, supported_pids, 1);
+    TEST_ASSERT_EQUAL_STRING("7E8 06 41 00 BE 3F B8 13 00 \r" ELM_PROMPT,
+                             elm_ask("0100\r"));
+}
+
+TEST(broadcast_reception_keeps_listening_after_a_complete_segmented_reply) {
+    on_can_11bit();
+    stage_vin_reply();
+    fake_can_stage_response_at(0x7e9, 8, supported_pids, 100, 2);
+    const char *out = elm_ask("0902\r");
+    TEST_ASSERT_NOT_NULL(strstr(out, "7E8 22 "));
+    TEST_ASSERT_NOT_NULL(strstr(out, "7E9 06 "));
+}
+
+TEST(failed_flow_control_send_is_reported) {
+    on_can_11bit();
+    fake_can_fail_confirmed_send();
+    stage_vin_reply();
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("0902\r"));
+    TEST_ASSERT_EQUAL_INT(1, fake_can_sent_count());
+}
+
+TEST(custom_priority_request_accepts_default_priority_response) {
+    on_can_29bit();
+    elm_ok("ATSH0CDA10F1\r");
+    fake_can_stage_response(CAN_EFF_FLAG | 0x18DAF111, 8, supported_pids, 1);
+    fake_can_stage_response(CAN_EFF_FLAG | 0x18DAF110, 8, supported_pids, 1);
+    TEST_ASSERT_EQUAL_STRING("18DAF110 06 41 00 BE 3F B8 13 00 \r" ELM_PROMPT,
+                             elm_ask("0100\r"));
+}
+
+TEST(normal_fixed_reply_priority_can_change_between_segments) {
+    on_can_29bit();
+    elm_ok("ATSH0CDA10F1\r");
+    fake_can_stage_response(CAN_EFF_FLAG | 0x04DAF110, 8, vin_ff, 1);
+    fake_can_stage_response_at(CAN_EFF_FLAG | 0x08DAF110, 8, vin_cf1, 1, 2);
+    fake_can_stage_response_at(CAN_EFF_FLAG | 0x18DAF110, 8, vin_cf2, 1, 2);
+    const char *out = elm_ask("0902\r");
+    TEST_ASSERT_NULL(strchr(out, '?'));
+    TEST_ASSERT_NOT_NULL(strstr(out, "04DAF110 10 14 "));
+    TEST_ASSERT_NOT_NULL(strstr(out, "08DAF110 21 "));
+    TEST_ASSERT_NOT_NULL(strstr(out, "18DAF110 22 "));
+    TEST_ASSERT_EQUAL_INT(2, fake_can_sent_count());
+    TEST_ASSERT_EQUAL_HEX32(CAN_EFF_FLAG | 0x18DA10F1, fake_can_sent(1)->id);
+}
+
+TEST(custom_priority_functional_request_accepts_multiple_responders) {
+    on_can_29bit();
+    elm_ok("ATSH0CDB33F1\r");
+    fake_can_stage_response(CAN_EFF_FLAG | 0x18DAF110, 8, supported_pids, 1);
+    fake_can_stage_response(CAN_EFF_FLAG | 0x04DAF111, 8, supported_pids, 1);
+    const char *out = elm_ask("0100\r");
+    TEST_ASSERT_NOT_NULL(strstr(out, "18DAF110 06 "));
+    TEST_ASSERT_NOT_NULL(strstr(out, "04DAF111 06 "));
+}
+
+TEST(
+    aborted_flow_control_closes_can_and_next_request_reopens_with_same_header) {
+    on_can_29bit();
+    elm_ok("ATSH0CDA10F1\r");
+    fake_can_abort_confirmed_send();
+    fake_can_stage_response(CAN_EFF_FLAG | 0x18DAF110, 8, vin_ff, 1);
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("0902\r"));
+    TEST_ASSERT_FALSE(vif_bus_is_open(g_elm_session, VIF_BUS_CAN));
+    TEST_ASSERT_FALSE(fake_can_is_up());
+    int setups = fake_can_setup_count();
+    fake_can_stage_response(CAN_EFF_FLAG | 0x18DAF110, 8, supported_pids, 1);
+    TEST_ASSERT_EQUAL_STRING("18DAF110 06 41 00 BE 3F B8 13 00 \r" ELM_PROMPT,
+                             elm_ask("0100\r"));
+    TEST_ASSERT_EQUAL_INT(setups + 1, fake_can_setup_count());
+    TEST_ASSERT_EQUAL_INT(500000, fake_can_last_baud());
+    TEST_ASSERT_EQUAL_HEX32(CAN_EFF_FLAG | 0x0CDA10F1, fake_can_sent(1)->id);
+    TEST_ASSERT_EQUAL_STRING("7\r" ELM_PROMPT, elm_ask("ATDPN\r"));
+}
+
+TEST(failed_flow_control_keeps_can_open_for_the_next_request) {
+    on_can_29bit();
+    elm_ok("ATSH0CDA10F1\r");
+    int setups = fake_can_setup_count();
+    int teardowns = fake_can_teardown_count();
+    fake_can_fail_confirmed_send();
+    fake_can_stage_response(CAN_EFF_FLAG | 0x18DAF110, 8, vin_ff, 1);
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("0902\r"));
+    TEST_ASSERT_TRUE(vif_bus_is_open(g_elm_session, VIF_BUS_CAN));
+    TEST_ASSERT_TRUE(fake_can_is_up());
+    fake_can_stage_response(CAN_EFF_FLAG | 0x18DAF110, 8, supported_pids, 1);
+    TEST_ASSERT_EQUAL_STRING("18DAF110 06 41 00 BE 3F B8 13 00 \r" ELM_PROMPT,
+                             elm_ask("0100\r"));
+    TEST_ASSERT_EQUAL_INT(setups, fake_can_setup_count());
+    TEST_ASSERT_EQUAL_INT(teardowns, fake_can_teardown_count());
+    TEST_ASSERT_EQUAL_HEX32(CAN_EFF_FLAG | 0x0CDA10F1, fake_can_sent(1)->id);
 }

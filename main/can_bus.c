@@ -53,6 +53,45 @@ static unsigned tx_pool_next;
 
 /** Frames received with nowhere to put them. Nothing else counts these. */
 static volatile uint32_t rx_dropped;
+static uint32_t tx_failed;
+static uint32_t bus_errors;
+static uint32_t arbitration_lost;
+static uint32_t bit_errors;
+static uint32_t form_errors;
+static uint32_t stuff_errors;
+static uint32_t ack_errors;
+static uint32_t unclassified_errors;
+
+static bool can_error(twai_node_handle_t node,
+                      const twai_error_event_data_t *event, void *ctx) {
+    twai_error_flags_t errors = event->err_flags;
+    if (errors.arb_lost)
+        __atomic_fetch_add(&arbitration_lost, 1, __ATOMIC_RELAXED);
+    errors.arb_lost = 0;
+    /* IDF combines bus errors and normal arbitration losses in bus_err_num.
+     * Empty flags can denote an unclassified bus error (e.g. CRC on S3). */
+    if (errors.val || !event->err_flags.arb_lost)
+        __atomic_fetch_add(&bus_errors, 1, __ATOMIC_RELAXED);
+    if (errors.bit_err)
+        __atomic_fetch_add(&bit_errors, 1, __ATOMIC_RELAXED);
+    if (errors.form_err)
+        __atomic_fetch_add(&form_errors, 1, __ATOMIC_RELAXED);
+    if (errors.stuff_err)
+        __atomic_fetch_add(&stuff_errors, 1, __ATOMIC_RELAXED);
+    if (errors.ack_err)
+        __atomic_fetch_add(&ack_errors, 1, __ATOMIC_RELAXED);
+    if (!errors.bit_err && !errors.form_err && !errors.stuff_err &&
+        !errors.ack_err && (errors.val || !event->err_flags.arb_lost))
+        __atomic_fetch_add(&unclassified_errors, 1, __ATOMIC_RELAXED);
+    return false;
+}
+
+static bool can_tx_done(twai_node_handle_t node,
+                        const twai_tx_done_event_data_t *event, void *ctx) {
+    if (!event->is_tx_success)
+        __atomic_fetch_add(&tx_failed, 1, __ATOMIC_RELAXED);
+    return false;
+}
 
 static const char *can_get_state_str(twai_error_state_t state) {
     switch (state) {
@@ -151,7 +190,24 @@ void can_print_stat(void) {
     printf("tx_error_counter: %u\n", status.tx_error_count);
     printf("rx_error_counter: %u\n", status.rx_error_count);
     printf("tx_queue_free: %lu\n", status.tx_queue_remaining);
-    printf("bus_error_count: %lu\n", record.bus_err_num);
+    printf("driver_error_events: %lu\n", record.bus_err_num);
+    printf("bus_error_count: %lu\n",
+           (unsigned long)__atomic_load_n(&bus_errors, __ATOMIC_RELAXED));
+    printf("arb_lost_count: %lu\n",
+           (unsigned long)__atomic_load_n(&arbitration_lost, __ATOMIC_RELAXED));
+    printf("bit_error_count: %lu\n",
+           (unsigned long)__atomic_load_n(&bit_errors, __ATOMIC_RELAXED));
+    printf("form_error_count: %lu\n",
+           (unsigned long)__atomic_load_n(&form_errors, __ATOMIC_RELAXED));
+    printf("stuff_error_count: %lu\n",
+           (unsigned long)__atomic_load_n(&stuff_errors, __ATOMIC_RELAXED));
+    printf("ack_error_count: %lu\n",
+           (unsigned long)__atomic_load_n(&ack_errors, __ATOMIC_RELAXED));
+    printf(
+        "unclassified_error_count: %lu\n",
+        (unsigned long)__atomic_load_n(&unclassified_errors, __ATOMIC_RELAXED));
+    printf("tx_failed_count: %lu\n",
+           (unsigned long)__atomic_load_n(&tx_failed, __ATOMIC_RELAXED));
     printf("rx_dropped: %lu\n", (unsigned long)rx_dropped);
 }
 
@@ -416,6 +472,14 @@ esp_err_t can_bus_setup(int baud_rate) {
     __atomic_store_n(&task_should_exit, false, __ATOMIC_RELEASE);
     tx_pool_next = 0;
     rx_dropped = 0;
+    __atomic_store_n(&tx_failed, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&bus_errors, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&arbitration_lost, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&bit_errors, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&form_errors, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&stuff_errors, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&ack_errors, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&unclassified_errors, 0, __ATOMIC_RELAXED);
 
     /* A bus that will not come up is a protocol the client cannot have, not a
      * reason to restart the adapter: vif_bus_open() turns any error here into
@@ -432,6 +496,8 @@ esp_err_t can_bus_setup(int baud_rate) {
 
     const twai_event_callbacks_t callbacks = {
         .on_rx_done = can_rx_done,
+        .on_tx_done = can_tx_done,
+        .on_error = can_error,
         .on_state_change = can_state_change,
     };
     err = twai_node_register_event_callbacks(can_node, &callbacks, NULL);
@@ -514,8 +580,6 @@ static esp_err_t can_ops_close(void) { return can_bus_teardown(); }
 static int can_ops_send(const bus_msg_t *msg, uint32_t flags) {
     struct can_frame f = {0};
 
-    (void)flags; /* No per-message bits on CAN. */
-
     f.id = msg->id;
     f.dlc = (uint8_t)msg->len;
 
@@ -526,7 +590,28 @@ static int can_ops_send(const bus_msg_t *msg, uint32_t flags) {
         memcpy(f.data, msg->data, msg->len > 8 ? 8 : msg->len);
     }
 
-    return can_send(&f) == 0 ? 0 : BUS_ERR_TX_FAILED;
+    uint32_t failures = __atomic_load_n(&tx_failed, __ATOMIC_RELAXED);
+    if (can_send(&f) != 0)
+        return BUS_ERR_TX_FAILED;
+    if (flags & BUS_TX_WAIT_DONE) {
+        esp_err_t err =
+            twai_node_transmit_wait_all_done(can_node, CAN_TX_TIMEOUT_MS);
+        /* Completion may race the end of the blocking wait. */
+        if (err != ESP_OK)
+            err = twai_node_transmit_wait_all_done(can_node, 0);
+        if (err != ESP_OK) {
+            /* Disable alone retains queued frames. Silence now, then delete
+             * the node; failed cleanup keeps sends blocked until close. */
+            esp_err_t cleanup = can_bus_teardown();
+            if (cleanup != ESP_OK)
+                ESP_LOGE(TAG, "TX abort cleanup failed: %s",
+                         esp_err_to_name(cleanup));
+            return BUS_ERR_TX_ABORTED;
+        }
+        if (__atomic_load_n(&tx_failed, __ATOMIC_RELAXED) != failures)
+            return BUS_ERR_TX_FAILED;
+    }
+    return 0;
 }
 
 static int can_ops_recv(bus_msg_t *msg, TickType_t wait) {

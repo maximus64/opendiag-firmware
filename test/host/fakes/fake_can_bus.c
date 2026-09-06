@@ -29,6 +29,7 @@ static struct {
     int teardown_count;
     bool fail_next_send;
     bool fail_setup;
+    int confirmed_send_error;
 
     staged_t live[MAX_FRAMES]; /* Readable now */
     int live_head, live_count;
@@ -97,6 +98,14 @@ int fake_can_teardown_count(void) { return g.teardown_count; }
 int fake_can_last_baud(void) { return g.baud; }
 bool fake_can_is_up(void) { return g.up; }
 int fake_can_sent_count(void) { return g.sent_count; }
+
+void fake_can_fail_confirmed_send(void) {
+    g.confirmed_send_error = BUS_ERR_TX_FAILED;
+}
+
+void fake_can_abort_confirmed_send(void) {
+    g.confirmed_send_error = BUS_ERR_TX_ABORTED;
+}
 
 void fake_can_fail_next_send(void) { g.fail_next_send = true; }
 
@@ -220,7 +229,11 @@ static esp_err_t can_ops_close(void) { return can_bus_teardown(); }
 static int can_ops_send(const bus_msg_t *msg, uint32_t flags) {
     struct can_frame f = {0};
 
-    (void)flags;
+    if ((flags & BUS_TX_WAIT_DONE) && g.confirmed_send_error) {
+        int error = g.confirmed_send_error;
+        g.confirmed_send_error = 0;
+        return error;
+    }
 
     f.id = msg->id;
     f.dlc = (uint8_t)msg->len;

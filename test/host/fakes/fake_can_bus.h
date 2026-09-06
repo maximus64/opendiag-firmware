@@ -66,3 +66,6 @@ int fake_can_sent_count(void);
 
 /** Frame at @p idx of the transmit log, or NULL. */
 const struct can_frame *fake_can_sent(int idx);
+
+void fake_can_fail_confirmed_send(void);
+void fake_can_abort_confirmed_send(void);

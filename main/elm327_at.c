@@ -14,6 +14,7 @@
 #include "can_xfer.h"
 #include "comm_iface.h"
 #include "common.h"
+#include "isotp.h"
 #include "j1850_pwm.h"
 #include "j1850_vpw.h"
 #include "kline_codec.h"
@@ -1693,13 +1694,15 @@ static bool elm327_can_is_11bit(const elm327_ctx_t *e) {
            e->settings.current_protocol == ELM327_PROTO_CAN_11BIT_500K;
 }
 
+#define ELM327_CAN_PRIORITY_MASK 0x1C000000u
+
 /**
  * @brief Is @p id one this request could be answered on?
  *
  * ISO 15765-4 clause 8 fixes both ranges: 0x7E8 to 0x7EF for the 11 bit
  * addressing scheme, and 0x18DAF100 to 0x18DAF1FF - a physical reply to the
- * tester, F1 - for the 29 bit one. The low bits are the ECU that answered, so
- * they are masked off rather than compared.
+ * tester, F1 - for the 29 bit one. Mask the ECU address and, for custom
+ * headers, the normal-fixed priority bits (ISO 15765-2 A.2.3).
  *
  * The mask for the 11 bit range has to be 0x7F8, not 0x7E8: an identifier is
  * only in the range when the bits *outside* it are clear, and testing
@@ -1723,7 +1726,7 @@ static bool elm327_can_reply_id_ok(const elm327_ctx_t *e, uint32_t id) {
         return !extended && (id & 0x7F8u) == 0x7E8u;
     }
 
-    return extended && (id & CAN_EFF_MASK & 0x1FFFFF00u) == 0x18DAF100u;
+    return extended && (id & CAN_EFF_MASK & 0x03FFFF00u) == 0x00DAF100u;
 }
 
 /**
@@ -1753,13 +1756,23 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
     int ret;
     struct can_frame tx_frame = {0};
 
+    if (!vif_bus_is_open(e->session, VIF_BUS_CAN)) {
+        vif_bus_cfg_t cfg = {0};
+        elm327_bus_for_protocol(e->settings.current_protocol, &cfg, NULL);
+        if (vif_bus_open(e->session, VIF_BUS_CAN, &cfg) != ESP_OK)
+            return -2;
+        elm327_apply_bus_policy(e, VIF_BUS_CAN, e->settings.current_protocol);
+    }
+
     /* UDS framing. Single frame */
     tx_frame.id = e->settings.header_id;
 
-    bool multicast = false;
-    if (tx_frame.id == 0x7DF || tx_frame.id == 0x18DB33F1) {
-        multicast = true;
-    }
+    /* Normal-fixed priority is not part of the transport address. */
+    uint32_t address_mask =
+        elm327_can_is_11bit(e) ? UINT32_MAX : ~ELM327_CAN_PRIORITY_MASK;
+    bool multicast = elm327_can_is_11bit(e)
+                         ? tx_frame.id == 0x7DF
+                         : (tx_frame.id & address_mask) == 0x00DB33F1;
 
     // Set extended ID flag for 29 bit ID protocols
     if (e->settings.current_protocol == ELM327_PROTO_CAN_29BIT_250K ||
@@ -1775,9 +1788,14 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
             return -2;
         }
 
-        tx_frame.data[0] = len; /* single frame transfer */
-        memcpy(&tx_frame.data[1], frame, len);
-        tx_frame.dlc = len + 1;
+        isotp_config_t config = isotp_config_default(tx_frame.id, tx_frame.id);
+        config.functional = multicast;
+        config.pad = e->settings.current_protocol != ELM327_PROTO_CAN_SAE_J1939;
+        isotp_tx_t transport;
+        if (isotp_tx_init(&transport, &config) < 0 ||
+            isotp_tx_start(&transport, frame, len, 0) < 0 ||
+            isotp_tx_next(&transport, &tx_frame, 0) != ISOTP_FRAME)
+            return -2;
     } else {
         if (len > sizeof(tx_frame.data)) {
             ESP_LOGE(TAG, "%u bytes do not fit a CAN frame", (unsigned)len);
@@ -1814,123 +1832,109 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
         return 0;
     }
 
-    uint16_t pkt_size = 0;
-    uint16_t curr_size = 0;
-    uint8_t frame_counter = 0;
+    /* Independent streams for the eight OBD responders, without payload
+     * buffers. */
+    isotp_rx_t streams[8] = {0};
+    unsigned frame_counter = 0;
     uint32_t window = elm327_reply_window(e);
-
-    /* Started once and never restarted, so it measures each reply against the
-     * request rather than against the reply before it. That is what the
-     * adaptive algorithm is defined on: "the actual response times that your
-     * vehicle is responding in". */
     Timer since_request;
     Timer_init(&since_request);
     Timer_start(&since_request, 0);
-
     Timer timer;
     Timer_init(&timer);
     Timer_start(&timer, window);
-    while (!Timer_is_expired(&timer)) {
-        struct can_frame rx = {0};
 
-        ret = can_frame_recv(e->session, &rx, pdMS_TO_TICKS(window));
+    for (;;) {
+        uint32_t now = (uint32_t)Timer_elapsed_ms(&since_request) * 1000u;
+        uint32_t wait_us = Timer_remaining_ms(&timer) * 1000u;
+        bool active = false;
+        for (unsigned i = 0; i < 8; i++) {
+            if (isotp_rx_check_timeout(&streams[i], now) < 0)
+                goto fail;
+            if (streams[i].state == ISOTP_RX_IDLE)
+                continue;
+            uint32_t left = streams[i].deadline_us - now;
+            if (!active && !wait_us)
+                wait_us = left;
+            else if (left < wait_us)
+                wait_us = left;
+            active = true;
+        }
+        if (!active && Timer_is_expired(&timer))
+            break;
+        struct can_frame rx;
+        TickType_t ticks = pdMS_TO_TICKS((wait_us + 999u) / 1000u);
+        ret = can_frame_recv(e->session, &rx, ticks ? ticks : 1);
+        if (ret || !rx.dlc || rx.dlc > 8 || !elm327_can_reply_id_ok(e, rx.id))
+            continue;
+        now = (uint32_t)Timer_elapsed_ms(&since_request) * 1000u;
 
-        // Filter incoming frames
-        // TODO: add support for user defined CAN ID filtering
-        if (ret || rx.dlc < 1 || !elm327_can_reply_id_ok(e, rx.id)) {
+        if (!multicast &&
+            ((elm327_can_flow_control_id(e, rx.id) ^ tx_frame.id) &
+             address_mask))
+            continue;
+
+        /* Raw clients use CAF0 to conduct their own outgoing FC exchange. */
+        if (!e->settings.can_auto_format && rx.dlc >= 3 &&
+            rx.data[0] >> 4 == 3) {
+            elm327_print_can_frame(e, rx.id, rx.dlc, rx.data);
+            return 0;
+        }
+        isotp_rx_t *stream = NULL;
+        isotp_rx_t *free_stream = NULL;
+        for (unsigned i = 0; i < 8; i++) {
+            if (streams[i].state != ISOTP_RX_IDLE &&
+                !((streams[i].config.rx_id ^ rx.id) & address_mask))
+                stream = &streams[i];
+            if (streams[i].state == ISOTP_RX_IDLE && !free_stream)
+                free_stream = &streams[i];
+        }
+        if (!stream) {
+            if (!free_stream)
+                goto fail;
+            stream = free_stream;
+            isotp_config_t config = isotp_config_default(
+                elm327_can_flow_control_id(e, rx.id), rx.id);
+            config.rx_mask = address_mask;
+            isotp_rx_init(stream, &config, NULL, ISOTP_MAX_PAYLOAD);
+        }
+        isotp_segment_t segment;
+        ret = isotp_rx_feed(stream, &rx, now, &segment);
+        if (ret < 0)
+            goto fail;
+        if (ret == ISOTP_IGNORED)
+            continue;
+        if (segment.replaced)
+            elm327_send_string(e, "?\r");
+
+        struct can_frame fc;
+        int fc_result = isotp_rx_flow_control(stream, &fc, now);
+        if (fc_result < 0)
+            goto fail;
+        if (fc_result == ISOTP_FRAME) {
+            int sent = can_frame_send_confirmed(e->session, &fc);
+            now = (uint32_t)Timer_elapsed_ms(&since_request) * 1000u;
+            if (isotp_rx_confirm(stream, sent == 0, now) < 0)
+                goto fail;
+        }
+        uint8_t display_dlc = rx.dlc;
+        if (e->settings.can_auto_format && !e->settings.show_header &&
+            !segment.started)
+            display_dlc = 1 + segment.length;
+        elm327_print_can_frame(e, rx.id, display_dlc, rx.data);
+        e->last_latency_ms = (uint32_t)Timer_elapsed_ms(&since_request);
+        frame_counter++;
+        if (segment.started && segment.complete && segment.length == 3 &&
+            segment.data[0] == 0x7f && segment.data[2] == 0x78) {
+            Timer_start(&timer, 3000);
             continue;
         }
-
-        if (((rx.data[0] >> 4) & 0xf) == 0) {
-            /* Single Frame */
-            elm327_print_can_frame(e, rx.id, rx.dlc, rx.data);
-
-            e->last_latency_ms = (uint32_t)Timer_elapsed_ms(&since_request);
-
-            // Response pending frames
-            if (rx.data[0] == 0x03 && rx.data[1] == 0x7f &&
-                rx.data[3] == 0x78) {
-                /* restart timer */
-                Timer_start(&timer, 3000); // FIX ME
-                continue;
-            }
-
-            if (!multicast) {
-                return 0;
-            }
-            frame_counter++;
-        } else if (((rx.data[0] >> 4) & 0xf) == 1) {
-            /* Multi frame: First Frame */
-            if (pkt_size) {
-                ESP_LOGE(TAG, "Pending multi frame transfer\n");
-                goto fail;
-            }
-            pkt_size = (((uint16_t)rx.data[0] & 0xf) << 8) | rx.data[1];
-
-            curr_size = rx.dlc - 2;
-
-            elm327_print_can_frame(e, rx.id, rx.dlc, rx.data);
-
-            /* Send flow control, to the ECU that sent the first frame rather
-             * than to whatever the request went out on. Clear to send, no
-             * block size limit, no separation time: get all remaining frames.
-             * A copy, because tx_frame still holds the request that a later
-             * retry would want. */
-            struct can_frame fc = {
-                .id = elm327_can_flow_control_id(e, rx.id),
-                .dlc = 8, /* ISO 15765-4: DLC 8, always. */
-                .data = {0x30, 0x00, 0x00},
-            };
-            can_frame_send(e->session, &fc);
-
-            /* restart timer */
-            Timer_start(&timer, window);
-            frame_counter++;
-        } else if (((rx.data[0] >> 4) & 0xf) == 2) {
-            uint8_t index = rx.data[0] & 0xf;
-
-            /* The sequence number is 4 bits and rolls over after 15, so the
-             * counter has to be masked to match. Comparing it unmasked broke
-             * every transfer longer than 15 consecutive frames, which is any
-             * payload over 111 bytes. */
-            e->last_latency_ms = (uint32_t)Timer_elapsed_ms(&since_request);
-
-            if (index != (frame_counter & 0x0f)) {
-                ESP_LOGE(TAG, "Frame drop\n");
-                goto fail;
-            }
-
-            elm327_print_can_frame(e, rx.id, rx.dlc, rx.data);
-            frame_counter++;
-            curr_size += 7;
-
-            if (curr_size >= pkt_size) {
-                /* got all frame. We are done here */
-                return 0;
-            }
-
-            /* restart timer */
-            Timer_start(&timer, window);
-        } else if (((rx.data[0] >> 4) & 0xf) == 3) {
-            /* Flow control frame - let host handle */
-            elm327_print_can_frame(e, rx.id, rx.dlc, rx.data);
+        if (num_frame > 0 && frame_counter >= (unsigned)num_frame)
             return 0;
-        } else {
-            ESP_LOGE(TAG, "Unknow code: %02x", rx.data[0]);
-            goto fail;
-        }
-
-        if (num_frame > 0 && frame_counter >= num_frame) {
-            // reach number of frame needed. We done
+        if (!multicast && segment.complete)
             return 0;
-        }
     }
-
-    if (frame_counter == 0) {
-        ESP_LOGE(TAG, "NO DATA / TIMEOUT");
-        return -1;
-    }
-    return 0;
+    return frame_counter ? 0 : -1;
 
 fail:
     return -2;

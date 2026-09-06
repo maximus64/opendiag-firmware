@@ -10,6 +10,7 @@ idf_component_register(SRCS main.c
                             usb_cdc.c
                             ble_uart.c
                             can_bus.c
+                            isotp.c
                             kline.c
                             kline_codec.c
                             bus.c

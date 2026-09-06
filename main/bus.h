@@ -58,6 +58,8 @@ typedef struct {
 #define BUS_TX_NO_CHECKSUM (1u << 0)
 /* J2534 WAIT_P3_MIN_ONLY: ignore P2max between requests, wait P3min only. */
 #define BUS_TX_WAIT_P3_MIN_ONLY (1u << 1)
+/* CAN: wait for completion; unresolved TX returns BUS_ERR_TX_ABORTED. */
+#define BUS_TX_WAIT_DONE (1u << 2)
 
 #define BUS_ERR_TIMEOUT (-1)   /* Timeout error */
 #define BUS_ERR_NO_SPACE (-2)  /* Message is longer than the buffer. */
@@ -70,6 +72,8 @@ typedef struct {
 #define BUS_ERR_UNSUPPORTED (-9) /* Not a parameter this bus has. */
 #define BUS_ERR_BUS_BUSY (-10)   /* Never went idle long enough to start. */
 #define BUS_ERR_ARBITRATION (-11)
+/* CAN was stopped to cancel unresolved TX; close/reopen before retrying. */
+#define BUS_ERR_TX_ABORTED (-12)
 
 /* ------------------------------------------------------------------ *
  * Parameters

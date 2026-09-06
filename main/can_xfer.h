@@ -25,17 +25,30 @@
 #include "can_frame.h"
 #include "vif.h"
 
-/** @brief Send one frame. 0, VIF_ERR_NO_CLAIM, or a BUS_ERR_* code. */
+/** @brief Send one frame. 0, BUS_ERR_BAD_ARG, or a BUS_ERR_* code. */
 static inline int can_frame_send(vif_session_t *s, const struct can_frame *f) {
     bus_msg_t msg;
 
     if (!f) {
-        return VIF_ERR_NO_CLAIM;
+        return BUS_ERR_BAD_ARG;
     }
 
     bus_msg_tx(&msg, f->data, f->dlc, f->id);
 
     return vif_bus_send(s, VIF_BUS_CAN, &msg, 0);
+}
+
+/* Only BUS_ERR_TX_ABORTED closes the claim and requires reopening. */
+static inline int can_frame_send_confirmed(vif_session_t *s,
+                                           const struct can_frame *f) {
+    if (!f)
+        return BUS_ERR_BAD_ARG;
+    bus_msg_t msg;
+    bus_msg_tx(&msg, f->data, f->dlc, f->id);
+    int ret = vif_bus_send(s, VIF_BUS_CAN, &msg, BUS_TX_WAIT_DONE);
+    if (ret == BUS_ERR_TX_ABORTED)
+        vif_bus_close(s, VIF_BUS_CAN);
+    return ret;
 }
 
 /** @brief Receive one frame. 0 when one arrived, negative otherwise. */
@@ -45,7 +58,7 @@ static inline int can_frame_recv(vif_session_t *s, struct can_frame *f,
     int rc;
 
     if (!f) {
-        return VIF_ERR_NO_CLAIM;
+        return BUS_ERR_BAD_ARG;
     }
 
     /* Straight into the caller's frame; the driver's copy is the only one. */

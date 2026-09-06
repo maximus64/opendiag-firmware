@@ -73,6 +73,7 @@ target_link_libraries(td_fakes PUBLIC td_framework)
 # ------------------------------------------------------------------ #
 
 set(ELM327_FW
+    ${FW_DIR}/isotp.c
     ${FW_DIR}/comm_iface.c
     ${FW_DIR}/kline_codec.c
     ${FW_DIR}/bus.c
@@ -82,6 +83,7 @@ set(ELM327_FW
 )
 
 set(SUITES
+    test_isotp
     test_bus_params
     test_elm327_at
     test_elm327_can
@@ -101,6 +103,7 @@ set(SUITES
 )
 
 set(test_elm327_at_FW      ${ELM327_FW})
+set(test_isotp_FW          ${FW_DIR}/isotp.c)
 set(test_bus_params_FW    ${FW_DIR}/bus.c)
 set(test_elm327_can_FW     ${ELM327_FW})
 set(test_elm327_bytebus_FW ${ELM327_FW})
