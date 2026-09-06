@@ -4,8 +4,8 @@
  * @brief A comm_iface transport that captures everything written to it.
  *
  * The real comm_iface.c is linked into the tests, so responses travel the
- * production path: elm327 tx ring buffer, comm_port_write(), the port's write
- * vtable. This is where they land.
+ * production path: the front-end's tx buffer, comm_port_write(), the port's
+ * write vtable. This is where they land.
  */
 
 #pragma once
@@ -36,6 +36,9 @@ const char *fake_port_text(int idx);
 size_t fake_port_len(int idx);
 
 int fake_port_flush_count(int idx);
+
+/** How many times the transport's write() was called. What batching buys. */
+int fake_port_write_count(int idx);
 
 /** Marks a port disconnected, so comm_iface should skip it. */
 void fake_port_set_connected(int idx, bool connected);

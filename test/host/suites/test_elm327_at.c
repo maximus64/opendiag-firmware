@@ -197,13 +197,17 @@ TEST(at_sp_accepts_every_documented_protocol_number) {
     }
 }
 
-TEST(at_sp_is_refused_while_another_client_holds_the_bus) {
+TEST(at_sp_is_refused_while_the_shell_holds_the_bus) {
     const vif_bus_cfg_t cfg = {.bitrate = 500000};
-    vif_session_t *other = vif_session_open("other", COMM_INVALID_PORT_ID);
 
     elm_echo_off();
-    TEST_ASSERT_NOT_NULL(other);
-    TEST_ASSERT_EQUAL_INT(ESP_OK, vif_bus_open(other, VIF_BUS_CAN, &cfg));
+
+    /* This thread stands in for the link task; it is also the only thread
+     * there is, so it can be the shell's for as long as the shell holds
+     * something. */
+    vif_shell_bind();
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+                          vif_bus_open(VIF_OWNER_SHELL, VIF_BUS_CAN, &cfg));
 
     /* One bus, one holder. Answering OK here would leave the client believing
      * it had CAN while every request came back NO DATA. */
@@ -211,9 +215,63 @@ TEST(at_sp_is_refused_while_another_client_holds_the_bus) {
     TEST_ASSERT_EQUAL_STRING("0\r" ELM_PROMPT, elm_ask("ATDPN\r"));
     TEST_ASSERT_EQUAL_INT(1, fake_can_setup_count());
 
-    vif_session_close(other);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, vif_bus_release_all(VIF_OWNER_SHELL));
 
     elm_ok("ATSP6\r");
+}
+
+/* ------------------------------------------------------------------ *
+ * The transmit buffer
+ *
+ * Filled and drained by the one task, so it is a plain array. What matters is
+ * the discipline around it: a response too long to hold is pushed out as it
+ * is composed rather than truncated, and nothing is ever written past the
+ * end. No command on this bench composes 512 bytes in one reply - that takes
+ * a segmented response from a real ECU - so it is exercised directly here.
+ * ------------------------------------------------------------------ */
+
+TEST(a_response_too_long_to_hold_is_pushed_out_as_it_is_composed) {
+    uint8_t chunk[200];
+
+    elm_echo_off();
+    fake_port_reset();
+
+    memset(chunk, 'A', sizeof(chunk));
+
+    /* Two fit; nothing has been said yet. */
+    TEST_ASSERT_EQUAL_INT(sizeof(chunk),
+                          elm327_uart_send_bytes(g_elm, chunk, sizeof(chunk)));
+    TEST_ASSERT_EQUAL_INT(sizeof(chunk),
+                          elm327_uart_send_bytes(g_elm, chunk, sizeof(chunk)));
+    TEST_ASSERT_EQUAL_INT(0, (int)fake_port_len(0));
+
+    /* The third does not, so the first two go out to make room for it. */
+    TEST_ASSERT_EQUAL_INT(sizeof(chunk),
+                          elm327_uart_send_bytes(g_elm, chunk, sizeof(chunk)));
+    TEST_ASSERT_EQUAL_INT(400, (int)fake_port_len(0));
+
+    elm327_uart_flush(g_elm);
+    TEST_ASSERT_EQUAL_INT(600, (int)fake_port_len(0));
+
+    /* Every byte arrived, and only those bytes. */
+    for (size_t i = 0; i < 600; i++) {
+        TEST_ASSERT_MSG(fake_port_text(0)[i] == 'A', "byte %zu is not ours", i);
+    }
+}
+
+TEST(a_single_write_larger_than_the_whole_buffer_is_refused) {
+    static uint8_t huge[ELM327_TX_BUF + 1];
+
+    elm_echo_off();
+    fake_port_reset();
+
+    memset(huge, 'B', sizeof(huge));
+
+    /* Refused rather than written past the end, and the caller is told. */
+    TEST_ASSERT_EQUAL_INT(0, elm327_uart_send_bytes(g_elm, huge, sizeof(huge)));
+
+    elm327_uart_flush(g_elm);
+    TEST_ASSERT_EQUAL_INT(0, (int)fake_port_len(0));
 }
 
 TEST(at_sp_rejects_a_protocol_above_the_range) {
@@ -957,7 +1015,7 @@ TEST(a_half_sent_line_is_not_glued_to_the_next_clients_first_command) {
     /* Mid-line when the connection dropped. */
     elm_send("01");
 
-    vif_session_link_down(g_elm_session);
+    elm_link_down();
 
     /*
      * "ATZ" and nothing else. This used to come out as "010ATZ", one line the
@@ -981,7 +1039,7 @@ TEST(a_command_nobody_read_is_not_run_for_the_next_client) {
      * read, when the client went away. */
     elm_deliver_unread("ATI\r010");
 
-    vif_session_link_down(g_elm_session);
+    elm_link_down();
 
     fake_port_reset();
     elm_pump();
@@ -1002,7 +1060,7 @@ TEST(the_settings_a_client_chose_leave_with_it) {
     /* Its own reply already carries the linefeeds it just asked for. */
     TEST_ASSERT_EQUAL_STRING("OK\r\n\r\n>", elm_ask("ATL1\r"));
 
-    vif_session_link_down(g_elm_session);
+    elm_link_down();
 
     /* Echo on, headers off, no linefeeds: what a client that sends nothing
      * but "0100" is entitled to find. */
@@ -1015,7 +1073,7 @@ TEST(a_kwp_session_ends_when_the_client_that_opened_it_leaves) {
     elm_echo_off();
     elm_kline_select("ATSP5\r");
 
-    vif_session_link_down(g_elm_session);
+    elm_link_down();
 
     /*
      * ISO 14230-2 clause 5.2. The ECU was put into a diagnostic session on
@@ -1037,7 +1095,7 @@ TEST(a_client_leaving_a_protocol_with_no_session_says_nothing) {
     elm_echo_off();
     elm_ok("ATSP6\r");
 
-    vif_session_link_down(g_elm_session);
+    elm_link_down();
 
     /* CAN has no session to end, and neither has a K-Line protocol that was
      * selected but never initialised. */
@@ -1048,7 +1106,7 @@ TEST(a_client_leaving_ends_the_session_and_lets_the_bus_go) {
     elm_echo_off();
     elm_kline_select("ATSP5\r");
 
-    vif_session_link_down(g_elm_session);
+    elm_link_down();
 
     /* Two things have to happen, and they are separate. The ECU is told the
      * session is over rather than left mid-session with no tester - that is
@@ -1057,7 +1115,7 @@ TEST(a_client_leaving_ends_the_session_and_lets_the_bus_go) {
     TEST_ASSERT_EQUAL_INT(1, fake_bus_stop_comm_count());
     TEST_ASSERT_FALSE(fake_bus_is_up(FAKE_BUS_KLINE));
     TEST_ASSERT_EQUAL_INT(VIF_BUS_NONE,
-                          vif_bus_current(g_elm_session, VIF_BUS_KLINE));
+                          vif_bus_current(VIF_OWNER_LINK, VIF_BUS_KLINE));
 }
 
 /* ------------------------------------------------------------------ *

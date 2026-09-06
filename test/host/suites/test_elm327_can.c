@@ -933,7 +933,7 @@ TEST(
     fake_can_abort_confirmed_send();
     fake_can_stage_response(CAN_EFF_FLAG | 0x18DAF110, 8, vin_ff, 1);
     TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("0902\r"));
-    TEST_ASSERT_FALSE(vif_bus_is_open(g_elm_session, VIF_BUS_CAN));
+    TEST_ASSERT_FALSE(vif_bus_is_open(VIF_OWNER_LINK, VIF_BUS_CAN));
     TEST_ASSERT_FALSE(fake_can_is_up());
     int setups = fake_can_setup_count();
     fake_can_stage_response(CAN_EFF_FLAG | 0x18DAF110, 8, supported_pids, 1);
@@ -953,7 +953,7 @@ TEST(failed_flow_control_keeps_can_open_for_the_next_request) {
     fake_can_fail_confirmed_send();
     fake_can_stage_response(CAN_EFF_FLAG | 0x18DAF110, 8, vin_ff, 1);
     TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("0902\r"));
-    TEST_ASSERT_TRUE(vif_bus_is_open(g_elm_session, VIF_BUS_CAN));
+    TEST_ASSERT_TRUE(vif_bus_is_open(VIF_OWNER_LINK, VIF_BUS_CAN));
     TEST_ASSERT_TRUE(fake_can_is_up());
     fake_can_stage_response(CAN_EFF_FLAG | 0x18DAF110, 8, supported_pids, 1);
     TEST_ASSERT_EQUAL_STRING("18DAF110 06 41 00 BE 3F B8 13 00 \r" ELM_PROMPT,

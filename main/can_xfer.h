@@ -3,7 +3,7 @@
 
 /**
  * @file can_xfer.h
- * @brief CAN frames over a vif session.
+ * @brief CAN frames over the link's vif claim.
  *
  * vif carries messages, not frames: one set of calls over four buses, with
  * the arbitration id riding in bus_msg_t like any other field. A CAN client
@@ -26,7 +26,7 @@
 #include "vif.h"
 
 /** @brief Send one frame. 0, BUS_ERR_BAD_ARG, or a BUS_ERR_* code. */
-static inline int can_frame_send(vif_session_t *s, const struct can_frame *f) {
+static inline int can_frame_send(const struct can_frame *f) {
     bus_msg_t msg;
 
     if (!f) {
@@ -35,25 +35,23 @@ static inline int can_frame_send(vif_session_t *s, const struct can_frame *f) {
 
     bus_msg_tx(&msg, f->data, f->dlc, f->id);
 
-    return vif_bus_send(s, VIF_BUS_CAN, &msg, 0);
+    return vif_bus_send(VIF_OWNER_LINK, VIF_BUS_CAN, &msg, 0);
 }
 
 /* Only BUS_ERR_TX_ABORTED closes the claim and requires reopening. */
-static inline int can_frame_send_confirmed(vif_session_t *s,
-                                           const struct can_frame *f) {
+static inline int can_frame_send_confirmed(const struct can_frame *f) {
     if (!f)
         return BUS_ERR_BAD_ARG;
     bus_msg_t msg;
     bus_msg_tx(&msg, f->data, f->dlc, f->id);
-    int ret = vif_bus_send(s, VIF_BUS_CAN, &msg, BUS_TX_WAIT_DONE);
+    int ret = vif_bus_send(VIF_OWNER_LINK, VIF_BUS_CAN, &msg, BUS_TX_WAIT_DONE);
     if (ret == BUS_ERR_TX_ABORTED)
-        vif_bus_close(s, VIF_BUS_CAN);
+        vif_bus_close(VIF_OWNER_LINK, VIF_BUS_CAN);
     return ret;
 }
 
 /** @brief Receive one frame. 0 when one arrived, negative otherwise. */
-static inline int can_frame_recv(vif_session_t *s, struct can_frame *f,
-                                 TickType_t wait) {
+static inline int can_frame_recv(struct can_frame *f, TickType_t wait) {
     bus_msg_t msg;
     int rc;
 
@@ -65,7 +63,7 @@ static inline int can_frame_recv(vif_session_t *s, struct can_frame *f,
     memset(f, 0, sizeof(*f));
     bus_msg_init(&msg, f->data, sizeof(f->data));
 
-    rc = vif_bus_recv(s, VIF_BUS_CAN, &msg, wait);
+    rc = vif_bus_recv(VIF_OWNER_LINK, VIF_BUS_CAN, &msg, wait);
     if (rc < 0) {
         return rc;
     }

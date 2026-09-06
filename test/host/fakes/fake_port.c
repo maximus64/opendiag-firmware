@@ -14,6 +14,7 @@ typedef struct {
     char tx[FAKE_PORT_CAP + 1];
     size_t tx_len;
     int flushes;
+    int writes;
     bool connected;
     size_t write_limit; /* 0 means accept everything */
     comm_port_id_t id;
@@ -24,6 +25,8 @@ static fake_port_t g_port[FAKE_PORT_COUNT];
 static int port_write(int idx, const void *buf, uint32_t length) {
     fake_port_t *p = &g_port[idx];
     size_t n = length;
+
+    p->writes++;
 
     if (p->write_limit && n > p->write_limit) {
         n = p->write_limit;
@@ -99,6 +102,13 @@ size_t fake_port_len(int idx) {
         return 0;
     }
     return g_port[idx].tx_len;
+}
+
+int fake_port_write_count(int idx) {
+    if (idx < 0 || idx >= FAKE_PORT_COUNT) {
+        return 0;
+    }
+    return g_port[idx].writes;
 }
 
 int fake_port_flush_count(int idx) {

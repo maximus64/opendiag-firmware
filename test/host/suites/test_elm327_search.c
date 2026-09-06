@@ -527,7 +527,7 @@ TEST(protocol_switch_stops_when_old_bus_cannot_close) {
     TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATSP6\r"));
     TEST_ASSERT_EQUAL_INT(0, fake_can_setup_count());
     TEST_ASSERT_EQUAL_INT(VIF_BUS_J1850_PWM,
-                          vif_bus_current(g_elm_session, VIF_BUS_J1850_PWM));
+                          vif_bus_current(VIF_OWNER_LINK, VIF_BUS_J1850_PWM));
     fake_bus_close_result(FAKE_BUS_J1850_PWM, ESP_OK);
     elm_ok("ATSP6\r");
     TEST_ASSERT_EQUAL_INT(1, fake_can_setup_count());
@@ -539,12 +539,12 @@ TEST(protocol_close_reports_failure_and_allows_retry) {
     fake_bus_close_result(FAKE_BUS_J1850_VPW, ESP_ERR_TIMEOUT);
     TEST_ASSERT_EQUAL_STRING("ERROR\r" ELM_PROMPT, elm_ask("ATPC\r"));
     TEST_ASSERT_EQUAL_INT(VIF_BUS_J1850_VPW,
-                          vif_bus_current(g_elm_session, VIF_BUS_J1850_VPW));
+                          vif_bus_current(VIF_OWNER_LINK, VIF_BUS_J1850_VPW));
     TEST_ASSERT_EQUAL_STRING("N\r" ELM_PROMPT, elm_ask("ATIA\r"));
     fake_bus_close_result(FAKE_BUS_J1850_VPW, ESP_OK);
     elm_ok("ATPC\r");
     TEST_ASSERT_EQUAL_INT(VIF_BUS_NONE,
-                          vif_bus_current(g_elm_session, VIF_BUS_J1850_VPW));
+                          vif_bus_current(VIF_OWNER_LINK, VIF_BUS_J1850_VPW));
 }
 
 TEST(retained_failed_open_is_not_reused_as_a_working_bus) {
@@ -568,11 +568,11 @@ TEST(reset_commands_report_failed_close_and_can_be_retried) {
         TEST_ASSERT_EQUAL_STRING("ERROR\r" ELM_PROMPT, elm_ask(commands[i]));
         TEST_ASSERT_EQUAL_INT(
             VIF_BUS_J1850_PWM,
-            vif_bus_current(g_elm_session, VIF_BUS_J1850_PWM));
+            vif_bus_current(VIF_OWNER_LINK, VIF_BUS_J1850_PWM));
         fake_bus_close_result(FAKE_BUS_J1850_PWM, ESP_OK);
         elm_ask(commands[i]);
         TEST_ASSERT_EQUAL_INT(
-            VIF_BUS_NONE, vif_bus_current(g_elm_session, VIF_BUS_J1850_PWM));
+            VIF_BUS_NONE, vif_bus_current(VIF_OWNER_LINK, VIF_BUS_J1850_PWM));
     }
 }
 

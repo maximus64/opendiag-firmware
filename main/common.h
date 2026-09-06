@@ -7,7 +7,3 @@
 #define OPENDIAG_MANUFACTURE "Dalalogic"
 #define OPENDIAG_PRODUCT "OpenDiag"
 #define OPENDIAG_HARDWARE "rev1"
-
-/* Session names. One data link, whichever transport is carrying it. */
-#define LINK_NAME_DATA "link"
-#define LINK_NAME_SHELL "shell"

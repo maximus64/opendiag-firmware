@@ -52,13 +52,8 @@
 /* Not every suite reaches for every helper below. */
 #define TD_MAYBE_UNUSED __attribute__((unused))
 
-/*
- * The instance the fixture's session is running. The pool hands out the first
- * free slot and this fixture only ever opens one session, so it is slot zero.
- */
-static elm327_ctx_t *const g_elm = &g_elm327[0];
-
-static vif_session_t *g_elm_session;
+/** The interpreter. One instance, so this is just a shorter name for it. */
+static elm327_ctx_t *const g_elm = &g_elm327;
 
 /* ------------------------------------------------------------------ *
  * Driving the adapter
@@ -67,8 +62,8 @@ static vif_session_t *g_elm_session;
 /**
  * @brief Runs the task body over whatever the transport has delivered.
  *
- * In chunks of the size vif's session task reads, and through the front-end's
- * own feed(), rather than a byte at a time into elm327_feed_byte(). Where the
+ * In chunks of the size the link task reads, and through the front-end's own
+ * feed(), rather than a byte at a time into elm327_feed_byte(). Where the
  * chunk boundaries fall is not a detail: a reset discards the rest of the
  * chunk it arrived in, so a harness that fed one byte per call would have
  * nothing left to discard and would quietly pass a test about it.
@@ -77,9 +72,8 @@ static TD_MAYBE_UNUSED void elm_pump(void) {
     uint8_t buf[64];
     size_t n;
 
-    while ((n = comm_port_read(vif_session_port(g_elm->session), buf,
-                               sizeof(buf), 0)) > 0) {
-        elm327_fe_feed(g_elm, buf, n);
+    while ((n = vif_link_read(buf, sizeof(buf), 0)) > 0) {
+        elm327_fe_feed(buf, n);
     }
 }
 
@@ -93,6 +87,13 @@ static TD_MAYBE_UNUSED void elm_send_on(int idx, const char *s) {
 
 /** Delivers @p s on the first fake port, standing in for USB CDC 0. */
 static TD_MAYBE_UNUSED void elm_send(const char *s) { elm_send_on(0, s); }
+
+/** The client went away: what main.c asks for, plus the link task's next pass.
+ */
+static TD_MAYBE_UNUSED void elm_link_down(void) {
+    vif_link_down();
+    vif_link_service();
+}
 
 /**
  * @brief Sends one command line and returns everything said back.
@@ -155,22 +156,23 @@ static void elm_harness_init_once(void) {
 
     fake_port_register_all();
 
-    /* The same wiring main.c does for a data link: a session over one port,
-     * with ELM327 as the grammar it starts on and reverts to. The session task
-     * is recorded by the stub and never started; elm_pump() below is its body.
+    /* The same wiring main.c does: the link over one port, with ELM327 as the
+     * grammar it starts on and reverts to. The link task is recorded by the
+     * stub and never started, and this thread stands in for it - so it is this
+     * thread the stub hands back as the created one. elm_pump() is its body.
      */
     elm327_register();
 
-    g_elm_session = vif_session_open("elm", VIF_SESSION_LINK);
-    TEST_ASSERT_MSG(g_elm_session != NULL, "failed to open the vif session");
-    vif_session_set_port(g_elm_session, fake_port_id(0));
+    idf_stub_set_created_task(xTaskGetCurrentTaskHandle());
+    TEST_ASSERT_EQUAL_INT(ESP_OK, vif_link_start(&elm327_frontend));
 
-    TEST_ASSERT_EQUAL_INT(ESP_OK, vif_session_set_default_frontend(
-                                      g_elm_session, &elm327_frontend));
-    TEST_ASSERT_EQUAL_INT(
-        ESP_OK, vif_session_set_frontend(g_elm_session, &elm327_frontend));
+    vif_link_set_port(fake_port_id(0));
 
-    TEST_ASSERT_MSG(g_elm->live, "the ELM327 front-end did not start");
+    /* The default is queued for the link task, and this thread is that task. */
+    vif_link_service();
+
+    TEST_ASSERT_MSG(vif_link_frontend_name() != NULL,
+                    "the ELM327 front-end did not start");
 }
 
 void td_setup(void) {
@@ -190,8 +192,7 @@ void td_setup(void) {
     fake_port_reset();
 
     /* Discard anything a previous test left in flight. */
-    while (comm_port_read(vif_session_port(g_elm->session), drain,
-                          sizeof(drain), 0) > 0) {
+    while (vif_link_read(drain, sizeof(drain), 0) > 0) {
         ;
     }
     elm327_uart_flush(g_elm);

@@ -4,7 +4,6 @@
 #include <stdio.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
-#include "freertos/ringbuf.h"
 #include "freertos/task.h"
 #include "esp_app_desc.h"
 #include "esp_flash.h"
@@ -12,7 +11,6 @@
 #include "esp_system.h"
 #include "ble_uart.h"
 #include "can_xfer.h"
-#include "comm_iface.h"
 #include "common.h"
 #include "isotp.h"
 #include "j1850_pwm.h"
@@ -22,6 +20,10 @@
 #include "timer.h"
 #include "utility.h"
 #include "vif.h"
+
+/** Response bytes held between flushes. Sized for the longest single reply a
+ *  command composes before it has to push anything out. */
+#define ELM327_TX_BUF 512
 
 #define DEFAULT_TIMEOUT_MS 200
 
@@ -188,20 +190,18 @@ typedef struct {
 } elm327_settings_t;
 
 /**
- * @brief One ELM327 instance: a grammar, and the client it speaks to.
+ * @brief The interpreter's state: a grammar, and the client it speaks to.
  *
- * There is one of these per data link, not one per firmware. USB CDC 0 and
- * BLE each get their own, because two clients sharing a single set of echo,
- * header and protocol settings - and racing over which of them a reply is
- * addressed to - is a bug rather than a feature.
- *
- * @p session is the hardware half. Every bus, pin and analog reading goes
- * through it, so a claim is attributed to this client.
+ * One of these, because there is one data link and it runs one grammar at a
+ * time. Hardware goes through VIF_OWNER_LINK and the transport through
+ * vif_link_read() and friends, so a claim is attributed to this client
+ * without the interpreter having to hold a handle to it.
  */
 typedef struct {
-    bool live;
-    vif_session_t *session;
-    RingbufHandle_t tx_ringbuf;
+    /* Response bytes on their way out. Filled and drained by the link task
+     * alone, so it is a plain buffer rather than anything synchronised. */
+    uint8_t tx_buf[ELM327_TX_BUF];
+    size_t tx_len;
     elm327_settings_t settings;
     elm327_line_t line;
 
@@ -210,7 +210,7 @@ typedef struct {
      *
      * Zero until a reply has been timed, and returned to zero whenever an
      * exchange draws nothing at all - see elm327_note_latency(). It lives on
-     * the instance rather than in the settings because it is an observation
+     * here rather than in the settings because it is an observation
      * rather than a setting: AT Z clears it, but so does changing protocol,
      * and no client can set it directly.
      */
@@ -268,16 +268,7 @@ typedef struct {
     bool in_search;
 } elm327_ctx_t;
 
-/**
- * @brief The instance pool.
- *
- * Static, because nothing here is allocated at run time and a session lives
- * for the lifetime of the firmware. Two links carry ELM327 today; a third
- * would need only a bigger pool.
- */
-#define ELM327_MAX_INSTANCES 2
-
-static elm327_ctx_t g_elm327[ELM327_MAX_INSTANCES];
+static elm327_ctx_t g_elm327;
 
 enum elm327_protocol {
     ELM327_PROTO_AUTO = 0,      // Automatic
@@ -311,57 +302,44 @@ static void elm327_kline_apply_wakeup(elm327_ctx_t *e);
 
 static size_t elm327_uart_read_bytes(elm327_ctx_t *e, uint8_t *buffer,
                                      size_t len, TickType_t ticks_to_wait) {
-    return comm_port_read(vif_session_port(e->session), buffer, len,
-                          ticks_to_wait);
+    return vif_link_read(buffer, len, ticks_to_wait);
 }
 
 static size_t elm327_uart_send_bytes(elm327_ctx_t *e, const uint8_t *buffer,
                                      size_t size) {
+    if (size > sizeof(e->tx_buf)) {
+        /* Only reachable if one write is larger than the whole buffer */
+        ESP_LOGE(TAG, "tx buffer cannot take %u bytes", (unsigned)size);
+        return 0;
+    }
+
     /*
-     * Never wait for room. The only thing that drains e->tx_ringbuf is
-     * elm327_uart_flush(e), which runs in this same task, so blocking here
-     * would be waiting on ourselves.
-     *
      * A long multi frame response is formatted one frame at a time and can
      * easily exceed the buffer, so when it fills, push what has accumulated
      * out to the client and carry on. Short responses still go out in a
      * single flush at the end of the command.
      */
-    if (xRingbufferSend(e->tx_ringbuf, buffer, size, 0) == pdTRUE) {
-        return size;
+    if (size > sizeof(e->tx_buf) - e->tx_len) {
+        elm327_uart_flush(e);
     }
 
-    elm327_uart_flush(e);
+    memcpy(&e->tx_buf[e->tx_len], buffer, size);
+    e->tx_len += size;
 
-    if (xRingbufferSend(e->tx_ringbuf, buffer, size, 0) == pdTRUE) {
-        return size;
-    }
-
-    /* Only reachable if one write is larger than the whole buffer */
-    ESP_LOGE(TAG, "tx buffer cannot take %u bytes", (unsigned)size);
-    return 0;
+    return size;
 }
 
 static void elm327_uart_flush(elm327_ctx_t *e) {
-    size_t size = 0;
-    uint8_t *data;
-
-    while (1) {
-        data = (uint8_t *)xRingbufferReceiveUpTo(e->tx_ringbuf, &size, 0, 64);
-        if (!data) {
-            break;
-        }
-
+    if (e->tx_len) {
         /* Answer whoever sent the request, not every attached client */
-        comm_port_write(vif_session_port(e->session), data, size);
-
-        vRingbufferReturnItem(e->tx_ringbuf, data);
+        vif_link_write(e->tx_buf, e->tx_len);
+        e->tx_len = 0;
     }
 
-    /* One push per flush, rather than per 64 byte chunk. A short response is
-     * flushed once, at the end of the command; a long one is flushed again
-     * each time it fills the buffer. */
-    comm_port_flush(vif_session_port(e->session));
+    /* One write and one push per flush. A short response is flushed once, at
+     * the end of the command; a long one is flushed again each time it fills
+     * the buffer. */
+    vif_link_flush();
 }
 
 /**
@@ -457,8 +435,8 @@ static void elm327_load_defaults(elm327_ctx_t *e) {
 static esp_err_t elm327_reset(elm327_ctx_t *e) {
     ESP_LOGI(TAG, "Reset setting to defaults");
 
-    esp_err_t err = vif_bus_release_all(e->session);
-    vif_pin_release_all(e->session);
+    esp_err_t err = vif_bus_release_all(VIF_OWNER_LINK);
+    vif_pin_release_all(VIF_OWNER_LINK);
     if (err != ESP_OK)
         return err;
 
@@ -503,7 +481,7 @@ static int at_set_programing_voltage(elm327_ctx_t *e, const char *arg) {
         mode = VIF_PIN_VOLTAGE;
     }
 
-    if (vif_pin_set(e->session, pin, mode, voltage) != ESP_OK) {
+    if (vif_pin_set(VIF_OWNER_LINK, pin, mode, voltage) != ESP_OK) {
         return -3;
     }
 
@@ -568,10 +546,10 @@ static void elm327_apply_bus_policy(elm327_ctx_t *e, vif_bus_t bus,
     /* ISO 14230-2 clause 6.6 and SAE J1850 both have the sender retry a
      * corrupted transmission. J2534 forbids it; an ELM327 client is used to
      * the standards' own behaviour and has no other recovery. */
-    vif_bus_param_set(e->session, bus, BUS_P_TX_RETRIES, 1);
+    vif_bus_param_set(VIF_OWNER_LINK, bus, BUS_P_TX_RETRIES, 1);
 
     /* "You will never see the responses to these." */
-    vif_bus_param_set(e->session, bus, BUS_P_PERIODIC_QUIET, 1);
+    vif_bus_param_set(VIF_OWNER_LINK, bus, BUS_P_PERIODIC_QUIET, 1);
 
     /* One reply per request. A J1850 module retransmits an unacknowledged
      * answer two or three times over, and no OBD-II client expects to be
@@ -584,16 +562,16 @@ static void elm327_apply_bus_policy(elm327_ctx_t *e, vif_bus_t bus,
      * conservative, it is inert - no VPW repeat can arrive inside five
      * milliseconds, because the frame itself takes longer than that to send.
      * Buses with no retransmission of their own are left at zero. */
-    vif_bus_param_set(e->session, bus, BUS_P_DUPLICATE_MS,
+    vif_bus_param_set(VIF_OWNER_LINK, bus, BUS_P_DUPLICATE_MS,
                       proto == ELM327_PROTO_J1850_VPW   ? J1850_VPW_DUPLICATE_MS
                       : proto == ELM327_PROTO_J1850_PWM ? J1850_PWM_DUPLICATE_MS
                                                         : 0);
 
     /* A client that did not ask to see its own requests should not have to
      * filter them out of the replies. */
-    vif_bus_param_set(e->session, bus, BUS_P_LOOPBACK, 0);
+    vif_bus_param_set(VIF_OWNER_LINK, bus, BUS_P_LOOPBACK, 0);
     if (proto == ELM327_PROTO_J1850_PWM)
-        vif_bus_param_set(e->session, bus, BUS_P_IFR_ENABLED,
+        vif_bus_param_set(VIF_OWNER_LINK, bus, BUS_P_IFR_ENABLED,
                           e->settings.ifr_mode != ELM327_IFR_OFF);
 }
 
@@ -707,7 +685,7 @@ static int elm327_set_protocol(elm327_ctx_t *e, int proto) {
 
     bus = elm327_bus_for_protocol(proto, &cfg, &header_id);
     if (e->settings.current_protocol == proto &&
-        (bus == VIF_BUS_NONE || vif_bus_is_open(e->session, bus))) {
+        (bus == VIF_BUS_NONE || vif_bus_is_open(VIF_OWNER_LINK, bus))) {
         ESP_LOGW(TAG, "Already using protocol: %d", proto);
         return 0;
     }
@@ -736,7 +714,7 @@ static int elm327_set_protocol(elm327_ctx_t *e, int proto) {
              * "Protocol Close" is for. */
             e->search_first = e->settings.current_protocol;
         } else {
-            if (vif_bus_release_all(e->session) != ESP_OK)
+            if (vif_bus_release_all(VIF_OWNER_LINK) != ESP_OK)
                 return -1;
             e->search_first = 0;
         }
@@ -750,7 +728,7 @@ static int elm327_set_protocol(elm327_ctx_t *e, int proto) {
      * between them would throw away the session that was just established on
      * it. Only the numbering and the header change. CAN is excluded because
      * two CAN protocols on the same wire can still want different bit rates. */
-    if (bus != VIF_BUS_CAN && vif_bus_is_open(e->session, bus)) {
+    if (bus != VIF_BUS_CAN && vif_bus_is_open(VIF_OWNER_LINK, bus)) {
         e->settings.header_id = header_id;
         e->settings.current_protocol = proto;
         return 0;
@@ -759,10 +737,10 @@ static int elm327_set_protocol(elm327_ctx_t *e, int proto) {
     e->adaptive_ms = 0;
     e->adaptive_floor_ms = 0;
 
-    if (vif_bus_release_all(e->session) != ESP_OK)
+    if (vif_bus_release_all(VIF_OWNER_LINK) != ESP_OK)
         return -1;
 
-    if (vif_bus_open(e->session, bus, &cfg) != ESP_OK) {
+    if (vif_bus_open(VIF_OWNER_LINK, bus, &cfg) != ESP_OK) {
         /* Startup failed; VIF may retain a claim until cleanup succeeds. */
         ESP_LOGE(TAG, "Protocol %d unavailable", proto);
         e->settings.current_protocol = ELM327_PROTO_AUTO;
@@ -824,8 +802,9 @@ static void elm327_apply_pwm_ifr(elm327_ctx_t *e, uint8_t header_source) {
         return;
     uint8_t source = e->settings.ifr_from_source ? e->settings.tester_address
                                                  : header_source;
-    vif_bus_param_set(e->session, VIF_BUS_J1850_PWM, BUS_P_IFR_BYTE, source);
-    vif_bus_param_set(e->session, VIF_BUS_J1850_PWM, BUS_P_IFR_ENABLED,
+    vif_bus_param_set(VIF_OWNER_LINK, VIF_BUS_J1850_PWM, BUS_P_IFR_BYTE,
+                      source);
+    vif_bus_param_set(VIF_OWNER_LINK, VIF_BUS_J1850_PWM, BUS_P_IFR_ENABLED,
                       e->settings.ifr_mode != ELM327_IFR_OFF);
 }
 
@@ -1228,13 +1207,13 @@ static void elm327_at_command_handler(elm327_ctx_t *e, const char *cmd) {
          * rather than left to time out at P3max, and the only moment this
          * layer knows that is here, before the driver goes down. */
         if (elm327_is_kline(e)) {
-            vif_bus_ioctl(e->session, VIF_BUS_KLINE, BUS_IOCTL_STOP_COMM, NULL,
-                          NULL);
+            vif_bus_ioctl(VIF_OWNER_LINK, VIF_BUS_KLINE, BUS_IOCTL_STOP_COMM,
+                          NULL, NULL);
         }
         /* Explicitly, because selecting automatic no longer does it: AT SP 0
          * keeps a working bus so the search can confirm it in one attempt,
          * where AT PC is the command whose entire job is to let go. */
-        if (vif_bus_release_all(e->session) != ESP_OK) {
+        if (vif_bus_release_all(VIF_OWNER_LINK) != ESP_OK) {
             elm327_send_string(e, "ERROR\r");
             return;
         }
@@ -1295,8 +1274,8 @@ static void elm327_at_command_handler(elm327_ctx_t *e, const char *cmd) {
             ESP_LOGI(TAG, "ISO baud rate %" PRIu32, baud);
             e->settings.iso_baud = baud;
             if (elm327_is_kline(e)) {
-                vif_bus_param_set(e->session, VIF_BUS_KLINE, BUS_P_DATA_RATE,
-                                  baud);
+                vif_bus_param_set(VIF_OWNER_LINK, VIF_BUS_KLINE,
+                                  BUS_P_DATA_RATE, baud);
             }
             elm327_send_string(e, "OK\r");
         }
@@ -1314,8 +1293,8 @@ static void elm327_at_command_handler(elm327_ctx_t *e, const char *cmd) {
             } else {
                 /* "will stop the periodic (wakeup) messages... will not change
                  * a prior setting for the time between wakeup messages". */
-                vif_bus_param_set(e->session, elm327_bus(e), BUS_P_PERIODIC_MS,
-                                  0);
+                vif_bus_param_set(VIF_OWNER_LINK, elm327_bus(e),
+                                  BUS_P_PERIODIC_MS, 0);
             }
             ESP_LOGI(TAG, "Wakeup interval %" PRIu32 " ms",
                      val ? e->settings.wakeup_ms : 0);
@@ -1367,8 +1346,8 @@ static void elm327_at_command_handler(elm327_ctx_t *e, const char *cmd) {
             kline_variant_t v =
                 elm327_is_kwp(e) ? KLINE_VARIANT_KWP : KLINE_VARIANT_ISO9141;
 
-            vif_bus_ioctl(e->session, VIF_BUS_KLINE, BUS_IOCTL_ASSUME_LINK, &v,
-                          NULL);
+            vif_bus_ioctl(VIF_OWNER_LINK, VIF_BUS_KLINE, BUS_IOCTL_ASSUME_LINK,
+                          &v, NULL);
             elm327_kline_apply_wakeup(e);
             elm327_send_string(e, "OK\r");
         }
@@ -1378,7 +1357,7 @@ static void elm327_at_command_handler(elm327_ctx_t *e, const char *cmd) {
          * what "active" can mean. */
         bool active = elm327_is_kline(e)
                           ? elm327_kline_link(e, NULL)
-                          : vif_bus_is_open(e->session, elm327_bus(e));
+                          : vif_bus_is_open(VIF_OWNER_LINK, elm327_bus(e));
 
         elm327_send_string(e, active ? "Y\r" : "N\r");
     } else if (strcmp(cmd, "AL") == 0 || strcmp(cmd, "NL") == 0) {
@@ -1396,7 +1375,7 @@ static void read_all_can(elm327_ctx_t *e) {
     struct can_frame frame;
 
     while (1) {
-        int ret = can_frame_recv(e->session, &frame, 0);
+        int ret = can_frame_recv(&frame, 0);
         if (ret != 0)
             return;
     }
@@ -1756,10 +1735,10 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
     int ret;
     struct can_frame tx_frame = {0};
 
-    if (!vif_bus_is_open(e->session, VIF_BUS_CAN)) {
+    if (!vif_bus_is_open(VIF_OWNER_LINK, VIF_BUS_CAN)) {
         vif_bus_cfg_t cfg = {0};
         elm327_bus_for_protocol(e->settings.current_protocol, &cfg, NULL);
-        if (vif_bus_open(e->session, VIF_BUS_CAN, &cfg) != ESP_OK)
+        if (vif_bus_open(VIF_OWNER_LINK, VIF_BUS_CAN, &cfg) != ESP_OK)
             return -2;
         elm327_apply_bus_policy(e, VIF_BUS_CAN, e->settings.current_protocol);
     }
@@ -1817,7 +1796,7 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
 
     read_all_can(e);
 
-    ret = can_frame_send(e->session, &tx_frame);
+    ret = can_frame_send(&tx_frame);
     if (ret != 0) {
         ESP_LOGE(TAG, "Fail to send CAN frame ret=%d\n", ret);
         goto fail;
@@ -1864,7 +1843,7 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
             break;
         struct can_frame rx;
         TickType_t ticks = pdMS_TO_TICKS((wait_us + 999u) / 1000u);
-        ret = can_frame_recv(e->session, &rx, ticks ? ticks : 1);
+        ret = can_frame_recv(&rx, ticks ? ticks : 1);
         if (ret || !rx.dlc || rx.dlc > 8 || !elm327_can_reply_id_ok(e, rx.id))
             continue;
         now = (uint32_t)Timer_elapsed_ms(&since_request) * 1000u;
@@ -1912,7 +1891,7 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
         if (fc_result < 0)
             goto fail;
         if (fc_result == ISOTP_FRAME) {
-            int sent = can_frame_send_confirmed(e->session, &fc);
+            int sent = can_frame_send_confirmed(&fc);
             now = (uint32_t)Timer_elapsed_ms(&since_request) * 1000u;
             if (isotp_rx_confirm(stream, sent == 0, now) < 0)
                 goto fail;
@@ -2175,7 +2154,7 @@ static void elm327_bus_settle(elm327_ctx_t *e, size_t cap, uint32_t settle_ms,
     Timer_start(&limit, J1850_SETTLE_CAP_MS);
 
     while (!Timer_is_expired(&limit)) {
-        if (vif_bus_recv(e->session, elm327_bus(e), &msg,
+        if (vif_bus_recv(VIF_OWNER_LINK, elm327_bus(e), &msg,
                          pdMS_TO_TICKS(settle_ms)) <= 0) {
             /* Nothing for a whole settling period: the burst is over. */
             return;
@@ -2263,7 +2242,7 @@ static kline_init_mode_t elm327_kline_init_mode(const elm327_ctx_t *e) {
 static bool elm327_kline_link(elm327_ctx_t *e, bus_link_t *out) {
     bus_link_t link;
 
-    if (vif_bus_ioctl(e->session, VIF_BUS_KLINE, BUS_IOCTL_GET_LINK, NULL,
+    if (vif_bus_ioctl(VIF_OWNER_LINK, VIF_BUS_KLINE, BUS_IOCTL_GET_LINK, NULL,
                       &link) != 0) {
         return false;
     }
@@ -2303,11 +2282,11 @@ static void elm327_kline_apply_wakeup(elm327_ctx_t *e) {
     if (e->settings.wakeup_len) {
         bus_msg_init(&msg, e->settings.wakeup_msg, e->settings.wakeup_len);
         msg.len = e->settings.wakeup_len;
-        vif_bus_ioctl(e->session, VIF_BUS_KLINE, BUS_IOCTL_SET_PERIODIC, &msg,
-                      NULL);
+        vif_bus_ioctl(VIF_OWNER_LINK, VIF_BUS_KLINE, BUS_IOCTL_SET_PERIODIC,
+                      &msg, NULL);
     }
 
-    vif_bus_param_set(e->session, VIF_BUS_KLINE, BUS_P_PERIODIC_MS,
+    vif_bus_param_set(VIF_OWNER_LINK, VIF_BUS_KLINE, BUS_P_PERIODIC_MS,
                       e->settings.wakeup_ms);
 }
 
@@ -2328,7 +2307,7 @@ static int elm327_kline_init(elm327_ctx_t *e, kline_init_mode_t mode) {
     elm327_kline_init_args(e, mode, &io);
 
     /* Fast initialisation is defined at one rate and one only. */
-    vif_bus_param_set(e->session, VIF_BUS_KLINE, BUS_P_DATA_RATE,
+    vif_bus_param_set(VIF_OWNER_LINK, VIF_BUS_KLINE, BUS_P_DATA_RATE,
                       mode == KLINE_INIT_FAST ? KLINE_BAUD_DEFAULT
                                               : e->settings.iso_baud);
 
@@ -2340,7 +2319,7 @@ static int elm327_kline_init(elm327_ctx_t *e, kline_init_mode_t mode) {
         elm327_uart_flush(e);
     }
 
-    rc = vif_bus_ioctl(e->session, VIF_BUS_KLINE,
+    rc = vif_bus_ioctl(VIF_OWNER_LINK, VIF_BUS_KLINE,
                        mode == KLINE_INIT_FAST ? BUS_IOCTL_FAST_INIT
                                                : BUS_IOCTL_FIVE_BAUD_INIT,
                        &io, &io);
@@ -2483,7 +2462,7 @@ static int elm327_bus_xfer(elm327_ctx_t *e, const uint8_t *frame, size_t len,
     bus_msg_init(&rx, rx_frame, cap);
 
     if (drain_first) {
-        while (vif_bus_recv(e->session, elm327_bus(e), &rx, 0) > 0) {
+        while (vif_bus_recv(VIF_OWNER_LINK, elm327_bus(e), &rx, 0) > 0) {
             ;
         }
     }
@@ -2496,7 +2475,7 @@ static int elm327_bus_xfer(elm327_ctx_t *e, const uint8_t *frame, size_t len,
 
     elm327_apply_pwm_ifr(e, tx_frame[2]);
     bus_msg_tx(&tx_msg, tx_frame, tx_len, 0);
-    ret = vif_bus_send(e->session, elm327_bus(e), &tx_msg, 0);
+    ret = vif_bus_send(VIF_OWNER_LINK, elm327_bus(e), &tx_msg, 0);
     if (ret != 0) {
         ESP_LOGE(TAG, "Fail to send frame ret=%d", ret);
         return -2;
@@ -2525,8 +2504,8 @@ static int elm327_bus_xfer(elm327_ctx_t *e, const uint8_t *frame, size_t len,
     Timer_start(&timer, window);
     while (!Timer_is_expired(&timer)) {
 
-        ret =
-            vif_bus_recv(e->session, elm327_bus(e), &rx, pdMS_TO_TICKS(window));
+        ret = vif_bus_recv(VIF_OWNER_LINK, elm327_bus(e), &rx,
+                           pdMS_TO_TICKS(window));
 
         if (ret <= 0) {
             continue;
@@ -2758,7 +2737,7 @@ static int elm327_search_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
      * resembled the one written down. */
     e->search_first = 0;
 
-    vif_bus_release_all(e->session);
+    vif_bus_release_all(VIF_OWNER_LINK);
     e->settings.auto_search = false;
     return ret;
 
@@ -2960,53 +2939,13 @@ static void elm327_feed_byte(elm327_ctx_t *e, char val) {
  * Front-end
  * ------------------------------------------------------------------ */
 
-/**
- * @brief Claim a free instance from the pool.
- *
- * A session that is already running ELM327 keeps the instance it has, so a
- * redundant switch to the front-end already installed is not an error.
- */
-static elm327_ctx_t *elm327_instance_claim(vif_session_t *s) {
-    for (int i = 0; i < ELM327_MAX_INSTANCES; i++) {
-        if (g_elm327[i].live && g_elm327[i].session == s) {
-            return &g_elm327[i];
-        }
-    }
+static bool elm327_fe_start(void) {
+    elm327_ctx_t *e = &g_elm327;
 
-    for (int i = 0; i < ELM327_MAX_INSTANCES; i++) {
-        if (!g_elm327[i].live) {
-            return &g_elm327[i];
-        }
-    }
-
-    return NULL;
-}
-
-static void *elm327_fe_create(vif_session_t *s) {
-    elm327_ctx_t *e = elm327_instance_claim(s);
-
-    if (!e) {
-        ESP_LOGE(TAG, "no free ELM327 instance");
-        return NULL;
-    }
-
-    /* destroy() normally releases this first; a reclaimed instance that still
-     * holds one would otherwise leak it under the memset. */
-    if (e->tx_ringbuf) {
-        vRingbufferDeleteWithCaps(e->tx_ringbuf);
-    }
-
+    /* Anything stop() could not push out belongs to the last client and goes
+     * with the memset, which is also why starting cannot fail: the
+     * interpreter owns its buffer rather than acquiring one. */
     memset(e, 0, sizeof(*e));
-
-    e->tx_ringbuf = xRingbufferCreateWithCaps(512, RINGBUF_TYPE_BYTEBUF,
-                                              MALLOC_CAP_DEFAULT);
-    if (!e->tx_ringbuf) {
-        ESP_LOGE(TAG, "Failed to allocate tx ring buffer");
-        return NULL;
-    }
-
-    e->live = true;
-    e->session = s;
 
     /*
      * Settings only, and the protocol starts back at automatic. vif released
@@ -3016,11 +2955,11 @@ static void *elm327_fe_create(vif_session_t *s) {
      */
     elm327_load_defaults(e);
 
-    return e;
+    return true;
 }
 
-static void elm327_fe_feed(void *ctx, const uint8_t *data, size_t len) {
-    elm327_ctx_t *e = ctx;
+static void elm327_fe_feed(const uint8_t *data, size_t len) {
+    elm327_ctx_t *e = &g_elm327;
 
     for (size_t i = 0; i < len; i++) {
         elm327_feed_byte(e, (char)data[i]);
@@ -3037,8 +2976,8 @@ static void elm327_fe_feed(void *ctx, const uint8_t *data, size_t len) {
     }
 }
 
-static void elm327_fe_destroy(void *ctx) {
-    elm327_ctx_t *e = ctx;
+static void elm327_fe_stop(void) {
+    elm327_ctx_t *e = &g_elm327;
 
     /* Whatever the last command answered is still in the tx buffer; the client
      * should see it before the grammar changes underneath it. */
@@ -3056,25 +2995,17 @@ static void elm327_fe_destroy(void *ctx) {
      * answer the next client's initialisation. Closing an app and reopening
      * it was enough to reproduce that.
      */
-    if (e->session && elm327_is_kline(e)) {
-        vif_bus_ioctl(e->session, VIF_BUS_KLINE, BUS_IOCTL_STOP_COMM, NULL,
+    if (elm327_is_kline(e)) {
+        vif_bus_ioctl(VIF_OWNER_LINK, VIF_BUS_KLINE, BUS_IOCTL_STOP_COMM, NULL,
                       NULL);
     }
-
-    if (e->tx_ringbuf) {
-        vRingbufferDeleteWithCaps(e->tx_ringbuf);
-        e->tx_ringbuf = NULL;
-    }
-
-    e->live = false;
-    e->session = NULL;
 }
 
 const vif_frontend_t elm327_frontend = {
     .name = "elm327",
-    .create = elm327_fe_create,
+    .start = elm327_fe_start,
     .feed = elm327_fe_feed,
-    .destroy = elm327_fe_destroy,
+    .stop = elm327_fe_stop,
 };
 
 void elm327_register(void) {

@@ -134,15 +134,14 @@ static void reboot_command(int argc, char **argv) {
     esp_restart();
 }
 
-/**
- * @brief The shell's own vif session.
+/*
+ * Hardware commands, from here down.
  *
  * The console is not a comm_iface service - it talks to UART0 directly - but
  * it drives the same hardware as the protocol front-ends, so it holds its
- * claims the same way. A pin raised here is refused to ELM327, and vice versa,
- * instead of the two silently overwriting each other.
+ * claims the same way, as VIF_OWNER_SHELL. A pin raised here is refused to
+ * ELM327, and vice versa, instead of the two silently overwriting each other.
  */
-static vif_session_t *shell_session;
 
 /**
  * @brief Command handler for 'hsset'
@@ -165,9 +164,9 @@ static void hsset_command(int argc, char **argv) {
     esp_err_t err;
 
     if (millivolt) {
-        err = vif_pin_set(shell_session, pin, VIF_PIN_VOLTAGE, millivolt);
+        err = vif_pin_set(VIF_OWNER_SHELL, pin, VIF_PIN_VOLTAGE, millivolt);
     } else {
-        err = vif_pin_set(shell_session, pin, VIF_PIN_OFF, 0);
+        err = vif_pin_set(VIF_OWNER_SHELL, pin, VIF_PIN_OFF, 0);
     }
 
     if (err != ESP_OK) {
@@ -196,8 +195,8 @@ static void lsset_command(int argc, char **argv) {
     int state = atoi(argv[2]);
     esp_err_t err;
 
-    err = vif_pin_set(shell_session, pin, state ? VIF_PIN_GROUND : VIF_PIN_OFF,
-                      0);
+    err = vif_pin_set(VIF_OWNER_SHELL, pin,
+                      state ? VIF_PIN_GROUND : VIF_PIN_OFF, 0);
     if (err != ESP_OK) {
         printf("ERROR: %s\n", esp_err_to_name(err));
         return;
@@ -212,7 +211,7 @@ static void lsset_command(int argc, char **argv) {
  * Releases every pin this session holds, in one go.
  */
 static void pinoff_command(int argc, char **argv) {
-    vif_pin_release_all(shell_session);
+    vif_pin_release_all(VIF_OWNER_SHELL);
     printf("OK\n");
 }
 
@@ -255,7 +254,7 @@ static void hsvsense_command(int argc, char **argv) {
 }
 
 static void hscal_command(int argc, char **argv) {
-    esp_err_t err = vif_calibrate_hs(shell_session);
+    esp_err_t err = vif_calibrate_hs(VIF_OWNER_SHELL);
 
     if (err != ESP_OK) {
         printf("ERROR: %s\n", esp_err_to_name(err));
@@ -263,7 +262,7 @@ static void hscal_command(int argc, char **argv) {
 }
 
 static void vbattcal_command(int argc, char **argv) {
-    esp_err_t err = vif_calibrate_vbatt(shell_session);
+    esp_err_t err = vif_calibrate_vbatt();
 
     if (err != ESP_OK) {
         printf("ERROR: %s\n", esp_err_to_name(err));
@@ -327,7 +326,7 @@ static void calset_command(int argc, char **argv) {
 
         for (i = 0; i < nfields; i++) {
             name = board_calibration_field(i);
-            err = vif_calibration_set(shell_session, name, values[i]);
+            err = vif_calibration_set(name, values[i]);
             if (err != ESP_OK) {
                 printf("ERROR: %s: %s\n", name, esp_err_to_name(err));
                 return;
@@ -343,7 +342,7 @@ static void calset_command(int argc, char **argv) {
             return;
         }
 
-        err = vif_calibration_set(shell_session, argv[1], values[0]);
+        err = vif_calibration_set(argv[1], values[0]);
         if (err != ESP_OK) {
             printf("ERROR: %s\n", esp_err_to_name(err));
             return;
@@ -368,11 +367,11 @@ static void calset_command(int argc, char **argv) {
 static bool shell_bus_ready(vif_bus_t bus, const vif_bus_cfg_t *cfg) {
     esp_err_t err;
 
-    if (vif_bus_is_open(shell_session, bus)) {
+    if (vif_bus_is_open(VIF_OWNER_SHELL, bus)) {
         return true;
     }
 
-    err = vif_bus_open(shell_session, bus, cfg);
+    err = vif_bus_open(VIF_OWNER_SHELL, bus, cfg);
     if (err != ESP_OK) {
         printf("ERROR: cannot open the bus: %s\n", esp_err_to_name(err));
         return false;
@@ -491,7 +490,7 @@ static void shell_bus_command(vif_bus_t bus, const char *name, int argc,
     }
 
     if (strcmp(argv[1], "stop") == 0) {
-        esp_err_t err = vif_bus_close(shell_session, bus);
+        esp_err_t err = vif_bus_close(VIF_OWNER_SHELL, bus);
         if (err != ESP_OK) {
             printf("ERROR: %s\n", esp_err_to_name(err));
         } else {
@@ -524,7 +523,7 @@ static void shell_bus_command(vif_bus_t bus, const char *name, int argc,
      * how long the whole request took, from asking to holding the answer. */
     sent_us = esp_timer_get_time();
     bus_msg_tx(&msg, data, (size_t)rc, 0);
-    rc = vif_bus_send(shell_session, bus, &msg, 0);
+    rc = vif_bus_send(VIF_OWNER_SHELL, bus, &msg, 0);
     if (rc != 0) {
         printf("send failed: %d\n", rc);
         return;
@@ -534,7 +533,7 @@ static void shell_bus_command(vif_bus_t bus, const char *name, int argc,
 
     for (int i = 0; i < SHELL_BUS_MAX_REPLIES; i++) {
         uint32_t wait = replies ? SHELL_BUS_NEXT_MS : SHELL_BUS_FIRST_MS;
-        int ret = vif_bus_recv(shell_session, bus, &msg, pdMS_TO_TICKS(wait));
+        int ret = vif_bus_recv(VIF_OWNER_SHELL, bus, &msg, pdMS_TO_TICKS(wait));
 
         if (ret > 0) {
             shell_bus_print_msg(&msg, sent_us);
@@ -605,14 +604,14 @@ static void shell_bus_bench(vif_bus_t bus, int rounds, const uint8_t *req,
         fflush(stdout);
 
         bus_msg_tx(&tx, req, req_len, 0);
-        if (vif_bus_send(shell_session, bus, &tx, 0) != 0) {
+        if (vif_bus_send(VIF_OWNER_SHELL, bus, &tx, 0) != 0) {
             printf("send failed at round %d\n", i);
             break;
         }
 
         /* Long enough for any legal P2max and then some, short enough that a
          * module that has stopped answering does not dominate the average. */
-        if (vif_bus_recv(shell_session, bus, &msg, pdMS_TO_TICKS(250)) <= 0) {
+        if (vif_bus_recv(VIF_OWNER_SHELL, bus, &msg, pdMS_TO_TICKS(250)) <= 0) {
             continue;
         }
 
@@ -719,7 +718,7 @@ static void bus_print_params(vif_bus_t bus) {
     while ((name = bus_param_at(i++, &p)) != NULL) {
         uint32_t value;
 
-        if (vif_bus_param_get(shell_session, bus, p, &value) == 0) {
+        if (vif_bus_param_get(VIF_OWNER_SHELL, bus, p, &value) == 0) {
             printf("  %-22s %" PRIu32 "\n", name, value);
         }
     }
@@ -741,7 +740,7 @@ static void bus_set_param(vif_bus_t bus, const char *name, const char *value) {
         return;
     }
 
-    rc = vif_bus_param_set(shell_session, bus, p,
+    rc = vif_bus_param_set(VIF_OWNER_SHELL, bus, p,
                            (uint32_t)strtoul(value, NULL, 0));
     if (rc == BUS_ERR_UNSUPPORTED) {
         printf("this bus has no %s\n", name);
@@ -757,7 +756,7 @@ static void kline_print_link(void) {
     bus_link_t l;
     kline_keybytes_t k;
 
-    if (vif_bus_ioctl(shell_session, VIF_BUS_KLINE, BUS_IOCTL_GET_LINK, NULL,
+    if (vif_bus_ioctl(VIF_OWNER_SHELL, VIF_BUS_KLINE, BUS_IOCTL_GET_LINK, NULL,
                       &l) != 0) {
         printf("no K-Line bus\n");
         return;
@@ -839,7 +838,7 @@ static void kline_init_command(const char *mode, const char *addr) {
         return;
     }
 
-    rc = vif_bus_ioctl(shell_session, VIF_BUS_KLINE, which, &io, &io);
+    rc = vif_bus_ioctl(VIF_OWNER_SHELL, VIF_BUS_KLINE, which, &io, &io);
     if (rc != 0) {
         printf("init failed: %d\n", rc);
         return;
@@ -890,7 +889,7 @@ static void kline_command(int argc, char **argv) {
         return;
     }
     if (argc == 2 && strcmp(argv[1], "close") == 0) {
-        printf("%s\n", vif_bus_ioctl(shell_session, VIF_BUS_KLINE,
+        printf("%s\n", vif_bus_ioctl(VIF_OWNER_SHELL, VIF_BUS_KLINE,
                                      BUS_IOCTL_STOP_COMM, NULL, NULL) == 0
                            ? "OK"
                            : "ERROR");
@@ -922,7 +921,7 @@ static void kline_command(int argc, char **argv) {
         }
         bus_msg_init(&msg, buf, (size_t)n);
         msg.len = (uint16_t)n;
-        printf("%s\n", vif_bus_ioctl(shell_session, VIF_BUS_KLINE,
+        printf("%s\n", vif_bus_ioctl(VIF_OWNER_SHELL, VIF_BUS_KLINE,
                                      BUS_IOCTL_SET_PERIODIC, &msg, NULL) == 0
                            ? "OK"
                            : "ERROR");
@@ -1241,12 +1240,12 @@ static void can_command(int argc, char **argv) {
 
     for (int i = 0; i < cycles; i++) {
         printf("Starting CAN bus test... (%d/%d)\n", i + 1, cycles);
-        if (vif_bus_open(shell_session, VIF_BUS_CAN, &cfg) != ESP_OK) {
+        if (vif_bus_open(VIF_OWNER_SHELL, VIF_BUS_CAN, &cfg) != ESP_OK) {
             printf("ERROR: cannot open the CAN bus\n");
             return;
         }
         printf("Tearing down CAN bus...\n");
-        vif_bus_close(shell_session, VIF_BUS_CAN);
+        vif_bus_close(VIF_OWNER_SHELL, VIF_BUS_CAN);
     }
 }
 
@@ -1339,12 +1338,11 @@ static void link_command(int argc, char **argv) {
 /**
  * @brief Command handler for 'mode'
  *
- * The USB half of the control plane. The shell has no data link of its own, so
- * unlike the BLE control characteristic it has to be told which link it means:
+ * The USB half of the control plane. There is one data link, so this needs no
+ * argument beyond the grammar to put on it:
  *
- *   mode                  every link and the grammar it is running
- *   mode <link>           that link's grammar
- *   mode <link> <name>    switch it, releasing every claim it held
+ *   mode          what it is running, what it falls back to, what it could run
+ *   mode <name>   switch it, releasing every claim it held
  *
  * The switch itself is vif_ctrl_exec(), so the shell and a BLE client cannot
  * disagree about what a mode change does.
@@ -1352,28 +1350,12 @@ static void link_command(int argc, char **argv) {
 static void mode_command(int argc, char **argv) {
     char out[VIF_CTRL_REPLY_MAX];
     char cmd[VIF_CTRL_REPLY_MAX];
-    vif_session_t *target;
 
     if (argc == 1) {
-        const vif_frontend_t *fe;
+        const vif_frontend_t *fe = vif_link_default_frontend();
+        const char *now = vif_link_frontend_name();
 
-        printf("Links:\n");
-        for (int i = 0; i < VIF_MAX_SESSIONS; i++) {
-            vif_session_t *s = vif_session_at(i);
-            const char *name = vif_session_name(s);
-
-            /* Sessions that carry no protocol are not links and cannot be
-             * switched. The shell holds one for its claims; "vif" shows it. */
-            if (!name || !vif_session_is_link(s)) {
-                continue;
-            }
-
-            fe = vif_session_default_frontend(s);
-            printf("  %-8s %-8s (default %s)\n", name,
-                   vif_session_frontend_name(s) ? vif_session_frontend_name(s)
-                                                : "-",
-                   fe ? fe->name : "-");
-        }
+        printf("Link: %s (default %s)\n", now ? now : "-", fe ? fe->name : "-");
 
         printf("Modes:");
         for (size_t i = 0; (fe = vif_frontend_at(i)) != NULL; i++) {
@@ -1383,49 +1365,31 @@ static void mode_command(int argc, char **argv) {
         return;
     }
 
-    if (argc > 3) {
-        printf("Usage: mode [<link> [<name>]]\n");
+    if (argc != 2) {
+        printf("Usage: mode [<name>]\n");
         return;
     }
 
-    target = vif_session_find(argv[1]);
-    if (!target) {
-        printf("ERROR: no link named '%s'\n", argv[1]);
-        return;
-    }
-
-    if (argc == 2) {
-        snprintf(cmd, sizeof(cmd), "MODE");
-    } else {
-        snprintf(cmd, sizeof(cmd), "MODE=%s", argv[2]);
-    }
-
-    vif_ctrl_exec(target, cmd, strlen(cmd), out, sizeof(out));
+    snprintf(cmd, sizeof(cmd), "MODE=%s", argv[1]);
+    vif_ctrl_exec(cmd, strlen(cmd), out, sizeof(out));
     printf("%s\n", out);
 }
 
 /**
  * @brief Command handler for 'ctrl'
  *
- * Runs a raw control command against a link - the same text a BLE client
+ * Runs a raw control command against the link - the same text a BLE client
  * writes to the control characteristic. Useful for trying one without a phone.
  */
 static void ctrl_command(int argc, char **argv) {
     char out[VIF_CTRL_REPLY_MAX];
-    vif_session_t *target;
 
-    if (argc != 3) {
-        printf("Usage: ctrl <link> <ID|MODE|MODE=name|BUS|RESET>\n");
+    if (argc != 2) {
+        printf("Usage: ctrl <ID|MODE|MODE=name|BUS|RESET>\n");
         return;
     }
 
-    target = vif_session_find(argv[1]);
-    if (!target) {
-        printf("ERROR: no link named '%s'\n", argv[1]);
-        return;
-    }
-
-    vif_ctrl_exec(target, argv[2], strlen(argv[2]), out, sizeof(out));
+    vif_ctrl_exec(argv[1], strlen(argv[1]), out, sizeof(out));
     printf("%s\n", out);
 }
 
@@ -1483,13 +1447,12 @@ const shell_command_t commands[] = {
     {"ble", ble_command,
      "BLE link security. Usage: ble | ble pair | ble forget"},
     {"comm", comm_command, "comm_iface ports. Usage: comm [trace|clear]"},
-    {"vif", vif_command, "Show vehicle interface sessions and claims"},
+    {"vif", vif_command, "Show vehicle interface owners and claims"},
     {"link", link_command,
      "Which transport carries the data link. Usage: link [drop|usb|ble]"},
     {"mode", mode_command,
-     "Show or switch a link's grammar. Usage: mode [<link> [<name>]]"},
-    {"ctrl", ctrl_command,
-     "Run a control command. Usage: ctrl <link> <command>"},
+     "Show or switch the link's grammar. Usage: mode [<name>]"},
+    {"ctrl", ctrl_command, "Run a control command. Usage: ctrl <command>"},
     {NULL, NULL, NULL} // End of list marker
 };
 
@@ -1569,7 +1532,7 @@ int shell_getline(char *line, size_t len) {
 
             /* The console has no session task, so its idle poll is where its
              * own claims get released when recovery is asked for. */
-            vif_session_service(shell_session);
+            vif_shell_service();
 
             vTaskDelay(pdMS_TO_TICKS(SHELL_POLL_MS));
             continue;
@@ -1613,11 +1576,8 @@ int shell_getline(char *line, size_t len) {
 void shell_loop(void) {
     char cmd_line[MAX_COMMAND_LEN];
 
-    shell_session = vif_session_open(LINK_NAME_SHELL, VIF_SESSION_LOCAL);
-    if (!shell_session) {
-        printf("WARNING: no vif session for the console; hardware commands "
-               "will be refused\n");
-    }
+    /* This task is the one allowed inside the drivers the shell brings up. */
+    vif_shell_bind();
 
     printf("\n==================================\n");
     printf(" OpenDiag Command Shell\n");

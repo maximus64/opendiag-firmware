@@ -7,8 +7,8 @@
  * control characteristic. Neither owns the command set, so the two cannot
  * drift apart.
  *
- * Nothing here touches hardware directly - it goes through the session like
- * every other client of vif, which is what keeps the claim rules in one place.
+ * Nothing here touches hardware directly - it goes through vif as the link,
+ * like every other client, which is what keeps the claim rules in one place.
  */
 
 #include <ctype.h>
@@ -21,6 +21,7 @@
 #include "esp_log.h"
 
 #include "common.h"
+#include "vif.h"
 #include "vif_ctrl.h"
 
 #define TAG "vif_ctrl"
@@ -98,22 +99,20 @@ static void mode_list(char *dst, size_t cap) {
     }
 }
 
-static bool cmd_id(vif_session_t *s, char *out, size_t cap) {
+static bool cmd_id(char *out, size_t cap) {
     char modes[64];
-    const char *fe = vif_session_frontend_name(s);
+    const char *fe = vif_link_frontend_name();
 
     mode_list(modes, sizeof(modes));
 
     reply(out, cap, "%s %s fw=%s link=%s mode=%s modes=%s", OPENDIAG_PRODUCT,
           OPENDIAG_HARDWARE, esp_app_get_description()->version,
-          vif_session_name(s) ? vif_session_name(s) : "-", fe ? fe : "-",
-          modes);
+          vif_owner_name(VIF_OWNER_LINK), fe ? fe : "-", modes);
 
     return true;
 }
 
-static bool cmd_mode_set(vif_session_t *s, const char *name, char *out,
-                         size_t cap) {
+static bool cmd_mode_set(const char *name, char *out, size_t cap) {
     const vif_frontend_t *fe = vif_frontend_find(name);
     char modes[64];
 
@@ -123,13 +122,12 @@ static bool cmd_mode_set(vif_session_t *s, const char *name, char *out,
         return false;
     }
 
-    /* Every claim goes with the old grammar; vif drops them on the way. */
-    if (vif_session_set_frontend(s, fe) != ESP_OK) {
-        reply(out, cap, "ERR cannot switch to %s", fe->name);
-        return false;
-    }
+    /* Every claim goes with the old grammar; vif drops them on the way. The
+     * swap itself lands on the link's task, so this cannot report a grammar
+     * that refuses to start; the log is where that shows up. */
+    vif_link_set_frontend(fe);
 
-    ESP_LOGI(TAG, "%s: mode %s", vif_session_name(s), fe->name);
+    ESP_LOGI(TAG, "link: mode %s", fe->name);
 
     reply(out, cap, "MODE %s", fe->name);
     return true;
@@ -139,8 +137,8 @@ static bool cmd_mode_set(vif_session_t *s, const char *name, char *out,
  * @brief What is live on the wire, and who holds it.
  *
  * Several buses can be up at once, so this is a list. A client refused a
- * claim has no other way to find out who has it; the shell is not reachable
- * from a phone.
+ * claim has no other way to find out whether the shell has it; the shell is
+ * not reachable from a phone.
  */
 static bool cmd_bus(char *out, size_t cap) {
     vif_bus_claim_t claim[VIF_BUS_GROUPS];
@@ -171,7 +169,8 @@ static bool cmd_bus(char *out, size_t cap) {
             pos += (size_t)n;
         }
 
-        n = snprintf(out + pos, cap - pos, "/%s", claim[i].owner);
+        n = snprintf(out + pos, cap - pos, "/%s",
+                     vif_owner_name(claim[i].owner));
         if (n < 0 || (size_t)n >= cap - pos) {
             break;
         }
@@ -181,41 +180,33 @@ static bool cmd_bus(char *out, size_t cap) {
     return true;
 }
 
-static bool cmd_reset(vif_session_t *s, char *out, size_t cap) {
-    const vif_frontend_t *fe = vif_session_default_frontend(s);
+static bool cmd_reset(char *out, size_t cap) {
+    const vif_frontend_t *fe = vif_link_default_frontend();
 
     /*
      * Unlike a client simply going away, this is an explicit request to let
      * go: every bus and any energised pin are released as well as the
-     * grammar. Done here rather than left to the switch below, because a
-     * session with no default has no switch to make.
+     * grammar, and a bus that refuses to close is reported rather than left
+     * for the switch to discover.
      */
-    esp_err_t err = vif_bus_release_all(s);
-    vif_pin_release_all(s);
+    esp_err_t err = vif_bus_release_all(VIF_OWNER_LINK);
+    vif_pin_release_all(VIF_OWNER_LINK);
 
     if (err != ESP_OK) {
         reply(out, cap, "ERR bus close failed: %s", esp_err_to_name(err));
         return false;
     }
-    if (fe && vif_session_set_frontend(s, fe) != ESP_OK) {
-        reply(out, cap, "ERR cannot reset %s", fe->name);
-        return false;
-    }
 
-    reply(out, cap, "RESET %s", fe ? fe->name : "-");
+    vif_link_set_frontend(fe);
+
+    reply(out, cap, "RESET %s", fe->name);
     return true;
 }
 
-bool vif_ctrl_exec(vif_session_t *s, const char *cmd, size_t len, char *out,
-                   size_t cap) {
+bool vif_ctrl_exec(const char *cmd, size_t len, char *out, size_t cap) {
     char buf[CTRL_CMD_MAX];
 
     if (!out || !cap) {
-        return false;
-    }
-
-    if (!s) {
-        reply(out, cap, "ERR no link");
         return false;
     }
 
@@ -225,23 +216,18 @@ bool vif_ctrl_exec(vif_session_t *s, const char *cmd, size_t len, char *out,
     }
 
     if (strcmp(buf, "ID") == 0) {
-        return cmd_id(s, out, cap);
+        return cmd_id(out, cap);
     }
 
     if (strcmp(buf, "MODE") == 0 || strncmp(buf, "MODE=", 5) == 0) {
-        /* Both forms are about a link's grammar, and the shell is not a link.
-         */
-        if (!vif_session_is_link(s)) {
-            reply(out, cap, "ERR '%s' carries no protocol",
-                  vif_session_name(s));
-            return false;
-        }
+        const char *fe;
 
         if (buf[4] == '=') {
-            return cmd_mode_set(s, &buf[5], out, cap);
+            return cmd_mode_set(&buf[5], out, cap);
         }
 
-        reply(out, cap, "MODE %s", vif_session_frontend_name(s));
+        fe = vif_link_frontend_name();
+        reply(out, cap, "MODE %s", fe ? fe : "-");
         return true;
     }
 
@@ -250,7 +236,7 @@ bool vif_ctrl_exec(vif_session_t *s, const char *cmd, size_t len, char *out,
     }
 
     if (strcmp(buf, "RESET") == 0) {
-        return cmd_reset(s, out, cap);
+        return cmd_reset(out, cap);
     }
 
     reply(out, cap, "ERR unknown '%s'", buf);

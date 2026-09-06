@@ -6,7 +6,6 @@
 #include "freertos/FreeRTOS.h"
 #include "esp_log.h"
 #include "can_xfer.h"
-#include "comm_iface.h"
 #include "utility.h"
 #include "vif.h"
 
@@ -19,35 +18,71 @@
  *  one pass, bounded so that input still gets a look in. */
 #define SLCAN_RX_BURST 32
 
+/** Longest line out: 'T' + 8 id + 1 dlc + 16 data + CR. */
+#define SLCAN_LINE_MAX 27
+
+/**
+ * @brief Bytes held back so a burst costs one transport write, not thirty two.
+ *
+ * A saturated 500 kbit/s bus delivers about twenty frames per poll, and every
+ * comm_port_write() is a lock, a connection check and a USB FIFO queue call.
+ * Composing the whole burst first turns that into one of each per 18 frames.
+ *
+ * 512 because that is the CDC TX FIFO (CONFIG_TINYUSB_CDC_TX_BUFSIZE): one
+ * write of this size fits, and comm_iface's flush-and-retry covers the rest.
+ * A larger batch could outrun the FIFO and lose its tail.
+ */
+#define SLCAN_TX_BUF 512
+
 static const char hexval[] = "0123456789ABCDEF";
 
+/** One instance: the link runs one grammar at a time and there is one link. */
 typedef struct {
-    bool live;
-    vif_session_t *session;
-
     uint32_t bitrate;
 
     char cmdbuf[SLCAN_CMD_MAX];
     int cmdidx;
     bool discard; /* dropping the tail of an over-long command */
+
+    /* Composed here and sent in one go. Written and drained by the link task
+     * alone, so it needs no locking of its own. */
+    char txbuf[SLCAN_TX_BUF];
+    size_t txlen;
 } slcan_ctx_t;
 
-/**
- * @brief The instance pool.
- *
- * One per data link, like the ELM327 interpreter: a client that switches its
- * own link to SLCAN must not disturb another client already speaking it.
- */
-#define SLCAN_MAX_INSTANCES 2
-
-static slcan_ctx_t g_slcan[SLCAN_MAX_INSTANCES];
+static slcan_ctx_t g_slcan;
 
 /* ------------------------------------------------------------------ *
  * Output
  * ------------------------------------------------------------------ */
 
+/** @brief Send what has been composed, and push it out to the wire. */
+static void slcan_flush(slcan_ctx_t *c) {
+    if (c->txlen) {
+        vif_link_write(c->txbuf, c->txlen);
+        c->txlen = 0;
+    }
+
+    vif_link_flush();
+}
+
+/**
+ * @brief Queue @p len bytes for the client.
+ *
+ * Everything the front-end says goes through here, replies included, so an
+ * acknowledgement cannot overtake the frames composed before it.
+ */
 static void slcan_write(slcan_ctx_t *c, const char *s, size_t len) {
-    comm_port_write(vif_session_port(c->session), s, len);
+    if (len > sizeof(c->txbuf)) {
+        return; /* unreachable: nothing here composes more than one line */
+    }
+
+    if (len > sizeof(c->txbuf) - c->txlen) {
+        slcan_flush(c);
+    }
+
+    memcpy(&c->txbuf[c->txlen], s, len);
+    c->txlen += len;
 }
 
 static void slcan_ack(slcan_ctx_t *c) { slcan_write(c, "\r", 1); }
@@ -65,13 +100,14 @@ static void slcan_reply_str(slcan_ctx_t *c, const char *s) {
 /**
  * @brief Is the channel open?
  *
- * Asked of the session rather than tracked here. The claim is the truth: it
- * outlives this front-end, so a channel opened before a protocol switch is
- * still open after it, and a cached flag would only be a second answer waiting
- * to disagree with the first.
+ * Asked of vif rather than tracked here. The claim is the truth: it outlives
+ * this front-end, so a channel opened before a protocol switch is still open
+ * after it, and a cached flag would only be a second answer waiting to
+ * disagree with the first.
  */
 static bool slcan_is_open(const slcan_ctx_t *c) {
-    return vif_bus_is_open(c->session, VIF_BUS_CAN);
+    (void)c;
+    return vif_bus_is_open(VIF_OWNER_LINK, VIF_BUS_CAN);
 }
 
 /**
@@ -155,7 +191,7 @@ static void slcan_send_frame(slcan_ctx_t *c, const char *buf, bool rtr,
         return;
     }
 
-    if (can_frame_send(c->session, &frame) != 0) {
+    if (can_frame_send(&frame) != 0) {
         ESP_LOGE(TAG, "transmit failed");
         slcan_nack(c);
         return;
@@ -172,8 +208,8 @@ static void slcan_open_bus(slcan_ctx_t *c) {
         return;
     }
 
-    if (vif_bus_open(c->session, VIF_BUS_CAN, &cfg) != ESP_OK) {
-        /* Either the bit rate is unusable or another session holds the bus. */
+    if (vif_bus_open(VIF_OWNER_LINK, VIF_BUS_CAN, &cfg) != ESP_OK) {
+        /* Either the bit rate is unusable or the shell holds the bus. */
         slcan_nack(c);
         return;
     }
@@ -182,8 +218,8 @@ static void slcan_open_bus(slcan_ctx_t *c) {
 }
 
 static void slcan_close_bus(slcan_ctx_t *c) {
-    if (vif_bus_current(c->session, VIF_BUS_CAN) == VIF_BUS_CAN &&
-        vif_bus_close(c->session, VIF_BUS_CAN) != ESP_OK) {
+    if (vif_bus_current(VIF_OWNER_LINK, VIF_BUS_CAN) == VIF_BUS_CAN &&
+        vif_bus_close(VIF_OWNER_LINK, VIF_BUS_CAN) != ESP_OK) {
         slcan_nack(c);
         return;
     }
@@ -223,17 +259,17 @@ static void slcan_parse_command(slcan_ctx_t *c, const char *buf) {
         c->bitrate = rate;
 
         /*
-         * A channel this session already holds is reconfigured rather than
+         * A channel the link already holds is reconfigured rather than
          * refused. That case is normal now: switching to this front-end from
          * ELM327 inherits a CAN claim opened at whatever protocol number the
          * previous grammar selected, and slcand's opening S<n> has to be able
          * to correct it. vif_bus_open() takes the old driver down and brings
-         * the new one up, and the claim never leaves this session.
+         * the new one up, and the claim never leaves the link.
          */
         if (slcan_is_open(c)) {
             vif_bus_cfg_t cfg = {.bitrate = rate};
 
-            if (vif_bus_open(c->session, VIF_BUS_CAN, &cfg) != ESP_OK) {
+            if (vif_bus_open(VIF_OWNER_LINK, VIF_BUS_CAN, &cfg) != ESP_OK) {
                 slcan_nack(c);
                 break;
             }
@@ -270,7 +306,7 @@ static void slcan_parse_command(slcan_ctx_t *c, const char *buf) {
  * ------------------------------------------------------------------ */
 
 static void slcan_print_frame(slcan_ctx_t *c, const struct can_frame *f) {
-    char buf[28];
+    char buf[SLCAN_LINE_MAX];
     int pos = 0;
 
     if (f->id & CAN_EFF_FLAG) {
@@ -300,53 +336,24 @@ static void slcan_print_frame(slcan_ctx_t *c, const struct can_frame *f) {
 
     buf[pos++] = '\r';
 
-    comm_port_write(vif_session_port(c->session), buf, pos);
+    slcan_write(c, buf, (size_t)pos);
 }
 
 /* ------------------------------------------------------------------ *
  * Front-end
  * ------------------------------------------------------------------ */
 
-/**
- * @brief Claim a free instance from the pool.
- *
- * A session already speaking SLCAN keeps the instance it has, so re-installing
- * the front-end that is already running is not an error.
- */
-static slcan_ctx_t *slcan_instance_claim(vif_session_t *s) {
-    for (int i = 0; i < SLCAN_MAX_INSTANCES; i++) {
-        if (g_slcan[i].live && g_slcan[i].session == s) {
-            return &g_slcan[i];
-        }
-    }
-
-    for (int i = 0; i < SLCAN_MAX_INSTANCES; i++) {
-        if (!g_slcan[i].live) {
-            return &g_slcan[i];
-        }
-    }
-
-    return NULL;
-}
-
-static void *slcan_fe_create(vif_session_t *s) {
-    slcan_ctx_t *c = slcan_instance_claim(s);
-
-    if (!c) {
-        ESP_LOGE(TAG, "no free SLCAN instance");
-        return NULL;
-    }
+static bool slcan_fe_start(void) {
+    slcan_ctx_t *c = &g_slcan;
 
     memset(c, 0, sizeof(*c));
-    c->live = true;
-    c->session = s;
     c->bitrate = 500000;
 
-    return c;
+    return true;
 }
 
-static void slcan_fe_feed(void *ctx, const uint8_t *data, size_t len) {
-    slcan_ctx_t *c = ctx;
+static void slcan_fe_feed(const uint8_t *data, size_t len) {
+    slcan_ctx_t *c = &g_slcan;
 
     for (size_t i = 0; i < len; i++) {
         char val = (char)data[i];
@@ -360,7 +367,7 @@ static void slcan_fe_feed(void *ctx, const uint8_t *data, size_t len) {
                 slcan_parse_command(c, c->cmdbuf);
             }
             c->cmdidx = 0;
-            comm_port_flush(vif_session_port(c->session));
+            slcan_flush(c);
             continue;
         }
 
@@ -377,8 +384,8 @@ static void slcan_fe_feed(void *ctx, const uint8_t *data, size_t len) {
     }
 }
 
-static void slcan_fe_poll(void *ctx) {
-    slcan_ctx_t *c = ctx;
+static void slcan_fe_poll(void) {
+    slcan_ctx_t *c = &g_slcan;
     struct can_frame frame;
     int forwarded = 0;
 
@@ -386,32 +393,25 @@ static void slcan_fe_poll(void *ctx) {
         return;
     }
 
-    while (forwarded < SLCAN_RX_BURST &&
-           can_frame_recv(c->session, &frame, 0) == 0) {
+    while (forwarded < SLCAN_RX_BURST && can_frame_recv(&frame, 0) == 0) {
         slcan_print_frame(c, &frame);
         forwarded++;
     }
 
     if (forwarded) {
-        comm_port_flush(vif_session_port(c->session));
+        slcan_flush(c);
     }
 }
 
-static void slcan_fe_destroy(void *ctx) {
-    slcan_ctx_t *c = ctx;
-
-    /* vif releases the CAN claim as it swaps the grammar, so there is nothing
-     * to hand back here beyond the instance itself. */
-    c->live = false;
-    c->session = NULL;
-}
+/** Say what was composed before the grammar changes underneath the client. */
+static void slcan_fe_stop(void) { slcan_flush(&g_slcan); }
 
 const vif_frontend_t slcan_frontend = {
     .name = "slcan",
-    .create = slcan_fe_create,
+    .start = slcan_fe_start,
     .feed = slcan_fe_feed,
     .poll = slcan_fe_poll,
-    .destroy = slcan_fe_destroy,
+    .stop = slcan_fe_stop,
 };
 
 void slcan_register(void) {

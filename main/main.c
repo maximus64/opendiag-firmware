@@ -102,14 +102,10 @@ static void comm_ports_setup(void) {
     ble_uart_rx_set_callback(ble_rx_callback);
 }
 
-/**
- * @brief The one data link, and the transport currently carrying it.
- *
- * A user talks to this adapter over USB or over BLE, never both at once, so
- * there is one session and it follows whichever transport has a client. That
- * is what keeps the grammar, the settings and the claims in one place: two
- * standing sessions would arbitrate against each other over hardware only one
- * of them was ever going to use.
+/*
+ * The one data link follows whichever transport has a client: a user talks to
+ * this adapter over USB or over BLE, never both at once. That is what keeps
+ * the grammar, the settings and the claims in one place.
  *
  * First connected wins. The loser is still connected as far as its transport
  * is concerned - refusing that is not vif's business - it simply does not get
@@ -118,16 +114,15 @@ static void comm_ports_setup(void) {
  * The link starts on ELM327 and returns to it when its client goes away, so
  * an off-the-shelf OBD-II app finds what it expects however it was last used.
  */
-static vif_session_t *g_link;
 
 static void link_try_bind(comm_port_id_t port) {
-    comm_port_id_t held = vif_session_port(g_link);
+    comm_port_id_t held = vif_link_port();
 
     if (held == port || held != COMM_INVALID_PORT_ID) {
         return; /* already ours, or the other transport got here first */
     }
 
-    vif_session_set_port(g_link, port);
+    vif_link_set_port(port);
 }
 
 /**
@@ -147,13 +142,13 @@ static void link_offer_elsewhere(comm_port_id_t just_freed) {
 /** Take the link off @p port and pass it on. The client is treated as gone:
  *  its grammar and its claims must not reach whoever comes next. */
 static void link_hand_back(comm_port_id_t port) {
-    vif_session_link_down(g_link);
-    vif_session_set_port(g_link, COMM_INVALID_PORT_ID);
+    vif_link_down();
+    vif_link_set_port(COMM_INVALID_PORT_ID);
     link_offer_elsewhere(port);
 }
 
 static void link_release(comm_port_id_t port) {
-    if (vif_session_port(g_link) != port) {
+    if (vif_link_port() != port) {
         return; /* never held the link */
     }
 
@@ -176,7 +171,7 @@ static comm_port_id_t transport_port(link_transport_t t) {
 }
 
 link_transport_t link_holder(void) {
-    comm_port_id_t held = vif_session_port(g_link);
+    comm_port_id_t held = vif_link_port();
 
     if (held == COMM_INVALID_PORT_ID) {
         return LINK_NONE;
@@ -209,20 +204,20 @@ bool link_transport_connected(link_transport_t t) {
 
 void link_set(link_transport_t t) {
     comm_port_id_t want = transport_port(t);
-    comm_port_id_t held = vif_session_port(g_link);
+    comm_port_id_t held = vif_link_port();
 
     if (held == want) {
         return;
     }
 
     if (held != COMM_INVALID_PORT_ID) {
-        vif_session_link_down(g_link);
-        vif_session_set_port(g_link, COMM_INVALID_PORT_ID);
+        vif_link_down();
+        vif_link_set_port(COMM_INVALID_PORT_ID);
     }
 
     if (want != COMM_INVALID_PORT_ID) {
         /* Named outright, so it wins over first-connected. */
-        vif_session_set_port(g_link, want);
+        vif_link_set_port(want);
         ESP_LOGI(TAG, "link: %s by request", link_transport_name(t));
         return;
     }
@@ -293,7 +288,7 @@ static void ble_conn_changed(bool connected) {
 static void ble_ctrl_command(const char *cmd, size_t len) {
     char out[VIF_CTRL_REPLY_MAX];
 
-    vif_ctrl_exec(g_link, cmd, len, out, sizeof(out));
+    vif_ctrl_exec(cmd, len, out, sizeof(out));
     ble_uart_ctrl_reply(out);
 }
 
@@ -301,16 +296,9 @@ static void links_setup(void) {
     elm327_register();
     slcan_register();
 
-    g_link = vif_session_open(LINK_NAME_DATA, VIF_SESSION_LINK);
-    if (!g_link) {
-        ESP_LOGE(TAG, "failed to open the data link session");
+    if (vif_link_start(&elm327_frontend) != ESP_OK) {
+        ESP_LOGE(TAG, "failed to start the data link");
         return;
-    }
-
-    vif_session_set_default_frontend(g_link, &elm327_frontend);
-
-    if (vif_session_set_frontend(g_link, &elm327_frontend) != ESP_OK) {
-        ESP_LOGE(TAG, "failed to start the default front-end");
     }
 
     /*

@@ -8,8 +8,8 @@
  * - the bare CR acknowledgement, the BELL refusal, a channel that is really
  * open on the CAN driver - are pinned here byte for byte.
  *
- * The front-end is driven through its own vtable, the same calls the vif
- * session task makes, because the host stub never starts that task.
+ * The front-end is driven through its own vtable, the same calls the link
+ * task makes, because the host stub never starts that task.
  */
 
 #include <string.h>
@@ -17,6 +17,7 @@
 #include "td_test.h"
 
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 
 #include "fake_can_bus.h"
 #include "fake_clock.h"
@@ -30,8 +31,6 @@
 #define SLCAN_NACK "\a"
 
 static comm_port_id_t g_port = COMM_INVALID_PORT_ID;
-static vif_session_t *g_session;
-static void *g_ctx;
 
 /* ------------------------------------------------------------------ *
  * Driving the front-end
@@ -48,12 +47,12 @@ static const char *slcan_ask(const char *cmd) {
         ESP_OK,
         comm_port_rx(fake_port_id(0), (const uint8_t *)cmd, strlen(cmd)));
 
-    /* The session task's loop body: hand over what arrived, then let the
+    /* The link task's loop body: hand over what arrived, then let the
      * front-end push whatever the bus gave it. */
     while ((n = comm_port_read(g_port, buf, sizeof(buf), 0)) > 0) {
-        slcan_frontend.feed(g_ctx, buf, n);
+        slcan_frontend.feed(buf, n);
     }
-    slcan_frontend.poll(g_ctx);
+    slcan_frontend.poll();
 
     return fake_port_text(0);
 }
@@ -61,7 +60,7 @@ static const char *slcan_ask(const char *cmd) {
 /** Runs poll() alone, for traffic that arrives with no command to prompt it. */
 static const char *slcan_listen(void) {
     fake_port_reset();
-    slcan_frontend.poll(g_ctx);
+    slcan_frontend.poll();
 
     return fake_port_text(0);
 }
@@ -108,18 +107,20 @@ void td_setup(void) {
     }
     fake_port_reset();
 
-    g_session = vif_session_open("slcan", VIF_SESSION_LINK);
-    TEST_ASSERT_NOT_NULL(g_session);
-    vif_session_set_port(g_session, g_port);
+    /* This thread is the link task, and the shell's too, so both owners can
+     * reach the driver from here. */
+    idf_stub_set_created_task(xTaskGetCurrentTaskHandle());
+    TEST_ASSERT_EQUAL_INT(ESP_OK, vif_link_start(&slcan_frontend));
+    vif_shell_bind();
 
-    g_ctx = slcan_frontend.create(g_session);
-    TEST_ASSERT_NOT_NULL(g_ctx);
+    vif_link_set_port(g_port);
+
+    /* The queued default is left queued: these tests drive the front-end's
+     * own vtable rather than the task that would install it. */
+    TEST_ASSERT_TRUE(slcan_frontend.start());
 }
 
 void td_teardown(void) {
-    slcan_frontend.destroy(g_ctx);
-    g_ctx = NULL;
-
     TEST_ASSERT_MSG(idf_stub_lock_balance() == 0, "vif left %d locks held",
                     idf_stub_lock_balance());
 }
@@ -185,18 +186,17 @@ TEST(close_stops_the_driver) {
     TEST_ASSERT_FALSE(fake_can_is_up());
 }
 
-TEST(open_is_refused_while_another_session_holds_the_bus) {
-    vif_session_t *other = vif_session_open("elm", VIF_SESSION_LOCAL);
+TEST(open_is_refused_while_the_shell_holds_the_bus) {
     const vif_bus_cfg_t cfg = {.bitrate = 500000};
 
-    TEST_ASSERT_NOT_NULL(other);
-    TEST_ASSERT_EQUAL_INT(ESP_OK, vif_bus_open(other, VIF_BUS_CAN, &cfg));
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+                          vif_bus_open(VIF_OWNER_SHELL, VIF_BUS_CAN, &cfg));
 
     TEST_ASSERT_EQUAL_STRING(SLCAN_NACK, slcan_ask("O\r"));
     TEST_ASSERT_EQUAL_INT(1, fake_can_setup_count());
 
-    /* And it works as soon as the other client lets go. */
-    vif_bus_close(other, VIF_BUS_CAN);
+    /* And it works as soon as the shell lets go. */
+    vif_bus_close(VIF_OWNER_SHELL, VIF_BUS_CAN);
     slcan_open();
 }
 
@@ -294,6 +294,85 @@ TEST(several_frames_are_forwarded_in_one_pass) {
     TEST_ASSERT_EQUAL_STRING("t100101\rt101101\r", slcan_listen());
 }
 
+TEST(a_whole_burst_costs_one_transport_write) {
+    const uint8_t data[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    const char *out;
+    int lines = 0;
+
+    slcan_open();
+    fake_port_reset();
+
+    /* Twelve extended frames: 27 bytes each, 324 in all, inside the one
+     * batch. A saturated bus delivers about this many per poll. */
+    for (int i = 0; i < 12; i++) {
+        fake_can_stage_stale((uint32_t)(0x18DA0000 + i) | CAN_EFF_FLAG,
+                             sizeof(data), data);
+    }
+
+    out = slcan_listen();
+
+    for (const char *p = out; *p; p++) {
+        lines += (*p == '\r');
+    }
+    TEST_ASSERT_EQUAL_INT(12, lines);
+    TEST_ASSERT_EQUAL_INT(12 * 27, (int)fake_port_len(0));
+
+    /* The point of the change: one write and one flush for the burst, not one
+     * of each per frame. Every comm_port_write() is a lock, a connection
+     * check and a USB FIFO queue call. */
+    TEST_ASSERT_EQUAL_INT(1, fake_port_write_count(0));
+    TEST_ASSERT_EQUAL_INT(1, fake_port_flush_count(0));
+}
+
+TEST(a_burst_too_big_for_one_batch_is_split_rather_than_dropped) {
+    const uint8_t data[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    /* 648 bytes of longest-line frames against a 512 byte batch: enough to
+     * spill, and comfortably inside one poll's forwarding limit. */
+    const int frames = 24;
+    int lines = 0;
+
+    slcan_open();
+    fake_port_reset();
+
+    for (int i = 0; i < frames; i++) {
+        fake_can_stage_stale((uint32_t)(0x18DA0000 + i) | CAN_EFF_FLAG,
+                             sizeof(data), data);
+    }
+
+    for (const char *p = slcan_listen(); *p; p++) {
+        lines += (*p == '\r');
+    }
+
+    /* Split across two writes, and not one frame short. */
+    TEST_ASSERT_EQUAL_INT(frames, lines);
+    TEST_ASSERT_EQUAL_INT(frames * 27, (int)fake_port_len(0));
+    TEST_ASSERT_EQUAL_INT(2, fake_port_write_count(0));
+}
+
+TEST(a_reply_lands_behind_the_frames_that_came_before_it) {
+    const uint8_t data[1] = {0x01};
+    uint8_t buf[64];
+    size_t n;
+
+    slcan_open();
+    fake_port_reset();
+    fake_can_stage_stale(0x100, sizeof(data), data);
+
+    /* Forward what the bus had, then answer the command that arrived after
+     * it - not through slcan_ask(), which clears the capture first. Frames and
+     * replies share the one buffer, so the order they were composed in is the
+     * order the client sees. */
+    slcan_frontend.poll();
+
+    TEST_ASSERT_EQUAL_INT(
+        ESP_OK, comm_port_rx(fake_port_id(0), (const uint8_t *)"V\r", 2));
+    while ((n = comm_port_read(g_port, buf, sizeof(buf), 0)) > 0) {
+        slcan_frontend.feed(buf, n);
+    }
+
+    TEST_ASSERT_EQUAL_STRING("t100101\rV-082021\r", fake_port_text(0));
+}
+
 TEST(nothing_is_forwarded_while_the_channel_is_closed) {
     const uint8_t data[1] = {0x01};
 
@@ -349,9 +428,9 @@ TEST(a_command_split_across_two_reads_is_still_understood) {
 TEST(the_channel_follows_the_claim_rather_than_a_cached_flag) {
     slcan_open();
 
-    /* Whatever closes the session's bus - another front-end, a shell command -
+    /* Whatever closes the link's bus - another front-end, a shell command -
      * closes the channel, and SLCAN has to notice. */
-    vif_bus_close(g_session, VIF_BUS_CAN);
+    vif_bus_close(VIF_OWNER_LINK, VIF_BUS_CAN);
 
     TEST_ASSERT_EQUAL_STRING(SLCAN_NACK, slcan_ask("t7DF1AA\r"));
     TEST_ASSERT_EQUAL_INT(0, fake_can_sent_count());
@@ -360,21 +439,21 @@ TEST(the_channel_follows_the_claim_rather_than_a_cached_flag) {
 TEST(the_channel_survives_a_front_end_switch) {
     slcan_open();
 
-    /* Reinstalling the front-end is what a protocol switch does to it. The
-     * session keeps the CAN claim, so the channel comes back up open. */
-    slcan_frontend.destroy(g_ctx);
-    g_ctx = slcan_frontend.create(g_session);
+    /* Restarting the front-end is what a protocol switch does to it. The
+     * claim outlives the grammar, so the channel comes back up open. */
+    slcan_frontend.stop();
+    TEST_ASSERT_TRUE(slcan_frontend.start());
 
-    TEST_ASSERT_NOT_NULL(g_ctx);
     TEST_ASSERT_EQUAL_INT(0, fake_can_teardown_count());
     TEST_ASSERT_EQUAL_STRING(SLCAN_ACK, slcan_ask("t7DF1AA\r"));
 }
 
-TEST(close_without_a_claim_leaves_another_owners_bus_running) {
-    vif_session_t *other = vif_session_open("elm", VIF_SESSION_LOCAL);
+TEST(close_without_a_claim_leaves_the_other_owners_bus_running) {
     vif_bus_cfg_t cfg = {.bitrate = 500000};
-    TEST_ASSERT_EQUAL_INT(ESP_OK, vif_bus_open(other, VIF_BUS_CAN, &cfg));
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+                          vif_bus_open(VIF_OWNER_SHELL, VIF_BUS_CAN, &cfg));
     TEST_ASSERT_EQUAL_STRING(SLCAN_ACK, slcan_ask("C\r"));
-    TEST_ASSERT_TRUE(vif_bus_is_open(other, VIF_BUS_CAN));
-    TEST_ASSERT_EQUAL_INT(ESP_OK, vif_bus_close(other, VIF_BUS_CAN));
+    TEST_ASSERT_TRUE(vif_bus_is_open(VIF_OWNER_SHELL, VIF_BUS_CAN));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, vif_bus_close(VIF_OWNER_SHELL, VIF_BUS_CAN));
 }

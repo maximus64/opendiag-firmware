@@ -8,17 +8,11 @@
 #include "bus.h"
 #include "comm_iface.h"
 
-/** Sessions live for the lifetime of the firmware, so the pool is small. */
-#define VIF_MAX_SESSIONS 4
-#define VIF_NAME_LEN 8
-
 /** Protocol grammars the firmware carries. Registered once, never removed. */
 #define VIF_MAX_FRONTENDS 4
 
-/** Returned without an open bus claim or from the wrong session task. */
+/** Returned without an open bus claim or from the wrong owner's task. */
 #define VIF_ERR_NO_CLAIM (-3)
-
-typedef struct vif_session vif_session_t;
 
 typedef enum {
     VIF_BUS_NONE = 0,
@@ -39,6 +33,22 @@ typedef enum {
  */
 #define VIF_BUS_GROUPS 3
 
+/**
+ * @brief Who a claim belongs to.
+ *
+ * Two, fixed. The link is the one data link, on whichever of USB and BLE has
+ * a client; the shell is the debug console on the other USB interface. They
+ * are separate owners because they are separate threads that both drive
+ * hardware: arbitration keeps the shell from tearing down a bus a client is
+ * mid-exchange on, and a driver is only ever torn down by the thread that
+ * could be blocked inside it.
+ */
+typedef enum {
+    VIF_OWNER_LINK = 0, /**< The one data link. */
+    VIF_OWNER_SHELL,    /**< The debug console. */
+    VIF_OWNER_COUNT,
+} vif_owner_t;
+
 /** @brief Bus parameters. Only CAN has any; pass NULL for the byte buses. */
 typedef bus_cfg_t vif_bus_cfg_t;
 
@@ -49,41 +59,26 @@ typedef enum {
 } vif_pin_mode_t;
 
 /**
- * @brief What a session is for.
+ * @brief A protocol front-end: the grammar the link speaks.
  *
- * A link speaks a protocol to a client over a transport. The shell holds
- * claims so its hardware commands are arbitrated like any client's, but it
- * has no grammar and no client to answer, so the control plane refuses to
- * put one on it.
+ * One instance, no context handle. The link is singular and runs one grammar
+ * at a time, so a front-end is a module with state rather than an object with
+ * copies, and there is nothing to hand out twice.
  *
- * This is fixed when the session opens rather than read off its transport: a
- * link with nothing connected is still a link, and the shell can set its
- * grammar before the tool that needs it attaches.
- */
-typedef enum {
-    VIF_SESSION_LOCAL = 0, /**< The debug shell. */
-    VIF_SESSION_LINK,      /**< A data link. */
-} vif_session_kind_t;
-
-/**
- * @brief A protocol front-end: the grammar half of a session.
+ * Hardware goes through VIF_OWNER_LINK; the transport goes through
+ * vif_link_read() and friends, which follow the link as its client moves
+ * between USB and BLE.
  *
- * Hardware access goes through the session handle, and so does the transport:
- * a front-end asks vif_session_port() when it needs one rather than keeping
- * the answer, because the link's transport changes underneath it when a
- * client arrives on the other one.
- *
- * Switching front-ends releases every claim the session holds. @p poll is
+ * Switching front-ends releases every claim the link holds. @p poll is
  * optional; NULL means sleep until bytes arrive.
  */
 typedef struct {
     const char *name;
-    /** Instantiate. Returns the context handed back to the other three
-     *  calls, or NULL. */
-    void *(*create)(vif_session_t *s);
-    void (*feed)(void *ctx, const uint8_t *data, size_t len);
-    void (*poll)(void *ctx);
-    void (*destroy)(void *ctx);
+    /** Bring the grammar up. False when it refused. */
+    bool (*start)(void);
+    void (*feed)(const uint8_t *data, size_t len);
+    void (*poll)(void);
+    void (*stop)(void);
 } vif_frontend_t;
 
 /**
@@ -113,91 +108,102 @@ const vif_frontend_t *vif_frontend_at(size_t idx);
 esp_err_t vif_init(void);
 
 /* ------------------------------------------------------------------ *
- * Sessions
+ * Owners
+ * ------------------------------------------------------------------ */
+
+/** @brief Name for the shell, the control plane and the logs. */
+const char *vif_owner_name(vif_owner_t owner);
+
+/**
+ * @brief Claim the calling task as the shell's thread.
+ *
+ * The shell has no task of vif's making, so it says which one it is. Until it
+ * does, its hardware commands are refused rather than run from an unknown
+ * thread. The link's task is recorded by vif_link_start().
+ */
+void vif_shell_bind(void);
+
+/**
+ * @brief Carry out a pending recovery or release on the shell's thread.
+ *
+ * See vif_recover_all() for why the work happens here rather than where it
+ * was asked for.
+ *
+ * @return true when there was something to do.
+ */
+bool vif_shell_service(void);
+
+/* ------------------------------------------------------------------ *
+ * The link
  * ------------------------------------------------------------------ */
 
 /**
- * @brief Open a session, from a static pool. No allocation.
+ * @brief Start the link on @p default_fe. Call once, after vif_init().
  *
- * Opens without a transport; a link gets one from vif_session_set_port() when
- * a client connects.
+ * The task runs whether or not a client is attached, so that everything below
+ * can assume it exists: it is the one thread allowed inside the link's
+ * drivers. @p default_fe is installed on its first pass.
  *
- * @param name Short name for logs and the shell, truncated to VIF_NAME_LEN-1.
- * @param kind Link or shell. See vif_session_kind_t.
- * @return The session, or NULL when the pool is full.
+ * The default is what the link falls back to whenever its client detaches, so
+ * an off-the-shelf OBD-II app finds what it expects however the link was last
+ * used. It is required rather than optional: a link with nothing to fall back
+ * to would hand the next client the last one's half-finished conversation.
  */
-vif_session_t *vif_session_open(const char *name, vif_session_kind_t kind);
+esp_err_t vif_link_start(const vif_frontend_t *default_fe);
 
-/** Free after claims close; failures keep the slot. Taskless: creator only. */
-void vif_session_close(vif_session_t *s);
+/**
+ * @brief Carry out pending link work: a recovery, a release, a grammar swap.
+ *
+ * The link task's own first step, so nothing else in the firmware calls it. It
+ * is public so that a host test can stand in for that task.
+ *
+ * @return true when there was something to do.
+ */
+bool vif_link_service(void);
 
 /**
  * @brief Install a front-end, replacing whatever is running.
  *
- * The swap itself happens in the session's own task, so destroy() and
- * create() never run while feed() is mid-command. Passing NULL leaves the
- * session with no grammar.
+ * The swap happens in the link's own task, so stop() and start() never run
+ * while feed() is mid-command.
  *
- * Every claim the session holds - buses and pins - is released on the way
+ * Every claim the link holds - buses and pins - is released on the way
  * through: a grammar change is a fresh start, and the settings the last one
- * left on a bus mean nothing to the next.
- *
- * A link starts its task on the first front-end installed, transport or not.
- * Before that, only its creator may install a front-end.
- * A failed bus close delays the replacement until teardown can complete.
+ * left on a bus mean nothing to the next. A failed bus close delays the
+ * replacement until teardown can complete.
  */
-esp_err_t vif_session_set_frontend(vif_session_t *s, const vif_frontend_t *fe);
-
-/** @brief The session's name, which is also the link's name. NULL if closed. */
-const char *vif_session_name(const vif_session_t *s);
-
-/** @brief True when this session carries a protocol. See vif_session_kind_t. */
-bool vif_session_is_link(const vif_session_t *s);
-
-/** @brief The transport this session speaks on, or COMM_INVALID_PORT_ID. */
-comm_port_id_t vif_session_port(const vif_session_t *s);
-
-/**
- * @brief Point the session at a transport, or at none.
- *
- * The one link follows whichever of USB and BLE has a client on it, so its
- * transport is not fixed when it opens. Front-ends read it through
- * vif_session_port() on every use, so a rebind needs nothing of them.
- *
- * Pass COMM_INVALID_PORT_ID when the client leaves. Starts the session's task
- * if a grammar is already installed and it has none yet.
- */
-esp_err_t vif_session_set_port(vif_session_t *s, comm_port_id_t port);
+void vif_link_set_frontend(const vif_frontend_t *fe);
 
 /** @brief Name of the front-end currently installed, or NULL. */
-const char *vif_session_frontend_name(const vif_session_t *s);
+const char *vif_link_frontend_name(void);
+
+/** @brief The front-end the link reverts to. Set by vif_link_start(). */
+const vif_frontend_t *vif_link_default_frontend(void);
+
+/** @brief The transport the link speaks on, or COMM_INVALID_PORT_ID. */
+comm_port_id_t vif_link_port(void);
 
 /**
- * @brief Set the grammar this link falls back to when its client detaches.
+ * @brief Point the link at a transport, or at none.
  *
- * Every data link defaults to ELM327, so an off-the-shelf OBD-II app finds
- * what it expects however the link was last used. Setting a default does not
- * install it; main.c does both when it brings the link up.
+ * The link follows whichever of USB and BLE has a client on it. Front-ends
+ * reach the transport through the calls below on every use, so a rebind needs
+ * nothing of them. Pass COMM_INVALID_PORT_ID when the client leaves.
  */
-esp_err_t vif_session_set_default_frontend(vif_session_t *s,
-                                           const vif_frontend_t *fe);
-
-/** @brief The front-end this session reverts to, or NULL if it has none. */
-const vif_frontend_t *vif_session_default_frontend(const vif_session_t *s);
+void vif_link_set_port(comm_port_id_t port);
 
 /**
  * @brief Client disconnected. Reverts grammar, releases pins and buses.
  *
  * Called on port close / BLE drop. Never on connect.
  */
-void vif_session_link_down(vif_session_t *s);
+void vif_link_down(void);
 
-/** @brief Find an open session by name, for the shell. NULL if there is none.
- */
-vif_session_t *vif_session_find(const char *name);
-
-/** @brief Walk the session pool. NULL for a slot that is not in use. */
-vif_session_t *vif_session_at(size_t idx);
+/* Transport, for front-ends. Each follows the link's current port, so none of
+ * them may cache it. */
+size_t vif_link_read(uint8_t *buf, size_t len, TickType_t wait);
+void vif_link_write(const void *data, size_t len);
+void vif_link_flush(void);
 
 /* ------------------------------------------------------------------ *
  * Buses
@@ -210,10 +216,10 @@ vif_session_t *vif_session_at(size_t idx);
  * identifiers unchanged, and the AT commands that mean the same thing land on
  * the same two calls.
  *
- * Driver operations require the session task, or its creator before task
- * startup. Cross-task release is deferred until the owner services it.
+ * Driver operations require the owner's own task. Cross-task release is
+ * deferred until that task services it.
  *
- * A session may hold several buses at once, one per group of shared wiring -
+ * An owner may hold several buses at once, one per group of shared wiring -
  * see VIF_BUS_GROUPS. Every call below therefore names the bus it means,
  * rather than "the" bus, which no longer says enough.
  */
@@ -221,34 +227,34 @@ vif_session_t *vif_session_at(size_t idx);
 /**
  * @brief Claim a bus and bring its driver up.
  *
- * Fails with ESP_ERR_INVALID_STATE when another session holds this bus or one
+ * Fails with ESP_ERR_INVALID_STATE when the other owner holds this bus or one
  * wired to the same pins, and with whatever the driver reported if it refused
  * to start. Calls from another task also return ESP_ERR_INVALID_STATE.
  *
- * Asking again for a bus in a group this session already holds swaps them:
- * the old one goes down first, because the two cannot be live together. The
- * session's other groups are left alone.
+ * Asking again for a bus in a group this owner already holds swaps them: the
+ * old one goes down first, because the two cannot be live together. The
+ * owner's other groups are left alone.
  */
-esp_err_t vif_bus_open(vif_session_t *s, vif_bus_t bus,
+esp_err_t vif_bus_open(vif_owner_t owner, vif_bus_t bus,
                        const vif_bus_cfg_t *cfg);
 
 /** Close the driver; retain the claim if it fails. Retry after failure. */
-esp_err_t vif_bus_close(vif_session_t *s, vif_bus_t bus);
+esp_err_t vif_bus_close(vif_owner_t owner, vif_bus_t bus);
 
 /** Release buses, retaining failed claims; foreign tasks queue a request. */
-esp_err_t vif_bus_release_all(vif_session_t *s);
+esp_err_t vif_bus_release_all(vif_owner_t owner);
 
 /**
- * @brief What this session holds in @p bus 's group.
+ * @brief What this owner holds in @p bus 's group.
  *
- * Answers with the bus itself when the session holds exactly that one, with
- * the other member of the group when it holds that instead - PWM against a
- * VPW claim - and VIF_BUS_NONE when it holds neither.
+ * Answers with the bus itself when the owner holds exactly that one, with the
+ * other member of the group when it holds that instead - PWM against a VPW
+ * claim - and VIF_BUS_NONE when it holds neither.
  */
-vif_bus_t vif_bus_current(const vif_session_t *s, vif_bus_t bus);
+vif_bus_t vif_bus_current(vif_owner_t owner, vif_bus_t bus);
 
 /** Successful open with no teardown pending; retained claims return false. */
-bool vif_bus_is_open(const vif_session_t *s, vif_bus_t bus);
+bool vif_bus_is_open(vif_owner_t owner, vif_bus_t bus);
 
 /** @brief Human readable bus name, for logs and control answers. */
 const char *vif_bus_name(vif_bus_t bus);
@@ -260,33 +266,33 @@ const char *vif_bus_name(vif_bus_t bus);
  * cannot open a bus only learns that it cannot, not who has it.
  */
 typedef struct {
-    vif_bus_t bus;            /**< VIF_BUS_NONE when the group is idle. */
-    uint32_t bitrate;         /**< CAN bit rate; 0 for the byte buses. */
-    char owner[VIF_NAME_LEN]; /**< Session name, empty when unheld. */
+    vif_bus_t bus;     /**< VIF_BUS_NONE when the group is idle. */
+    uint32_t bitrate;  /**< CAN bit rate; 0 for the byte buses. */
+    vif_owner_t owner; /**< Only meaningful when the group is held. */
 } vif_bus_claim_t;
 
 /** @brief Snapshot every group's claim. Idle groups come back VIF_BUS_NONE. */
 void vif_bus_info(vif_bus_claim_t out[VIF_BUS_GROUPS]);
 
 /**
- * @brief Send on a bus the session holds.
+ * @brief Send on a bus the owner holds.
  *
  * @param msg   Prepared with bus_msg_tx(), which takes the CAN id a frame
  *              needs and leaves it zero for the byte buses.
  * @param flags Per-message BUS_TX_* bits, or 0.
  * @return 0 on success, VIF_ERR_NO_CLAIM without the claim, else BUS_ERR_*.
  */
-int vif_bus_send(vif_session_t *s, vif_bus_t bus, const bus_msg_t *msg,
+int vif_bus_send(vif_owner_t owner, vif_bus_t bus, const bus_msg_t *msg,
                  uint32_t flags);
 
 /**
- * @brief Receive from a bus the session holds.
+ * @brief Receive from a bus the owner holds.
  *
  * @param msg Prepared with bus_msg_init(). Filled with the message, its
  *            timestamp and its status flags.
  * @return Bytes received, or negative.
  */
-int vif_bus_recv(vif_session_t *s, vif_bus_t bus, bus_msg_t *msg,
+int vif_bus_recv(vif_owner_t owner, vif_bus_t bus, bus_msg_t *msg,
                  TickType_t wait);
 
 /**
@@ -297,11 +303,11 @@ int vif_bus_recv(vif_session_t *s, vif_bus_t bus, bus_msg_t *msg,
  *         has no such parameter - which is how one front-end can offer the
  *         whole set without knowing which bus it is talking to.
  */
-int vif_bus_param_set(vif_session_t *s, vif_bus_t bus, bus_param_t p,
+int vif_bus_param_set(vif_owner_t owner, vif_bus_t bus, bus_param_t p,
                       uint32_t value);
 
 /** @brief Read one bus parameter back. */
-int vif_bus_param_get(vif_session_t *s, vif_bus_t bus, bus_param_t p,
+int vif_bus_param_get(vif_owner_t owner, vif_bus_t bus, bus_param_t p,
                       uint32_t *out);
 
 /**
@@ -311,7 +317,7 @@ int vif_bus_param_get(vif_session_t *s, vif_bus_t bus, bus_param_t p,
  * types @p in and @p out point at are named against each value in
  * bus_ioctl_t.
  */
-int vif_bus_ioctl(vif_session_t *s, vif_bus_t bus, bus_ioctl_t id,
+int vif_bus_ioctl(vif_owner_t owner, vif_bus_t bus, bus_ioctl_t id,
                   const void *in, void *out);
 
 /**
@@ -337,14 +343,14 @@ int vif_bus_reset_stats(vif_bus_t bus);
  * @param mv      Millivolts, for VIF_PIN_VOLTAGE.
  *
  * Releasing a pin nobody drives succeeds and does nothing. Anything that would
- * break the one-high-one-low rule, or touch a pin another session claimed,
+ * break the one-high-one-low rule, or touch a pin the other owner claimed,
  * fails with ESP_ERR_INVALID_STATE.
  */
-esp_err_t vif_pin_set(vif_session_t *s, int obd_pin, vif_pin_mode_t m,
+esp_err_t vif_pin_set(vif_owner_t owner, int obd_pin, vif_pin_mode_t m,
                       uint32_t mv);
 
-/** @brief Release both pin claims held by @p s. */
-esp_err_t vif_pin_release_all(vif_session_t *s);
+/** @brief Release both pin claims held by @p owner. */
+esp_err_t vif_pin_release_all(vif_owner_t owner);
 
 /** @brief True while any connector pin is energised, whoever holds it. */
 bool vif_any_pin_active(void);
@@ -356,10 +362,10 @@ int32_t vif_hs_vsense_mv(void);
  * @brief Run a factory calibration procedure. Prompts on the UART0 console.
  *
  * Drives the high side hardware, so it takes the pin claim for the duration
- * and is refused while another session holds one.
+ * and is refused while the other owner holds one.
  */
-esp_err_t vif_calibrate_hs(vif_session_t *s);
-esp_err_t vif_calibrate_vbatt(vif_session_t *s);
+esp_err_t vif_calibrate_hs(vif_owner_t owner);
+esp_err_t vif_calibrate_vbatt(void);
 
 /**
  * @brief Write one calibration constant by hand, skipping the procedure above.
@@ -371,45 +377,31 @@ esp_err_t vif_calibrate_vbatt(vif_session_t *s);
  * @param name  Field name, as printed by board_print_info().
  * @param value Raw value, scaled by 10000.
  */
-esp_err_t vif_calibration_set(vif_session_t *s, const char *name,
-                              int32_t value);
+esp_err_t vif_calibration_set(const char *name, int32_t value);
 
 /**
- * @brief Ask every session to let go of the hardware and start over.
+ * @brief Ask both owners to let go of the hardware and start over.
  *
  * This only raises the request; it touches no driver and takes no time, so it
  * is safe to call from a thread with a small stack - the front panel button's
  * watcher, which is what does call it.
  *
- * The work happens in vif_session_service(), on the thread that owns each
- * session. That is not tidiness: the transfer calls validate
- * the claim, drop the lock and then block inside the driver, so tearing that
- * driver down from another thread would free a queue somebody is waiting on.
+ * The work happens on the thread that owns each side: the link's own task,
+ * and vif_shell_service() for the console. That is not tidiness - the
+ * transfer calls validate the claim, drop the lock and then block inside the
+ * driver, so tearing that driver down from another thread would free a queue
+ * somebody is waiting on.
  *
- * Recovery is therefore prompt rather than instant - a session parked on a
- * receive acts when that receive times out. A session whose task never comes
- * back is beyond this, and beyond any safe alternative; that is what the
- * reset line is for.
+ * Recovery is therefore prompt rather than instant - an owner parked on a
+ * receive acts when that receive times out. A thread that never comes back is
+ * beyond this, and beyond any safe alternative; that is what the reset line is
+ * for.
  */
 void vif_recover_all(void);
-
-/**
- * @brief Carry out a pending recovery on a session this thread owns.
- *
- * Releases the session's bus and pin claims and puts its default grammar back.
- * Sessions with a task of their own call this at the top of their loop; the
- * debug shell has no session task, so its own idle poll calls it instead.
- *
- * The rule, and it is the whole point: a session's claims are released by
- * whoever owns its thread, never by whoever asked.
- *
- * @return true when there was something to do.
- */
-bool vif_session_service(vif_session_t *s);
 
 /* ------------------------------------------------------------------ *
  * Diagnostics
  * ------------------------------------------------------------------ */
 
-/** @brief Print sessions, claims and the live buses to the console. */
+/** @brief Print the owners, their claims and the live buses to the console. */
 void vif_print_debug_info(void);

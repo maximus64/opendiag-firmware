@@ -42,7 +42,7 @@ TEST(j1850_pwm_prepends_its_default_header) {
 static uint32_t pwm_param(bus_param_t param) {
     uint32_t value = 0;
     TEST_ASSERT_EQUAL_INT(
-        0, vif_bus_param_get(g_elm->session, VIF_BUS_J1850_PWM, param, &value));
+        0, vif_bus_param_get(VIF_OWNER_LINK, VIF_BUS_J1850_PWM, param, &value));
     return value;
 }
 
@@ -917,10 +917,10 @@ TEST(at_pc_ends_the_session_before_the_driver_goes_down) {
      * about - which is the point: AT PC closes the protocol, not just the
      * link on it. */
     TEST_ASSERT_EQUAL_INT(VIF_ERR_NO_CLAIM,
-                          vif_bus_ioctl(g_elm_session, VIF_BUS_KLINE,
+                          vif_bus_ioctl(VIF_OWNER_LINK, VIF_BUS_KLINE,
                                         BUS_IOCTL_GET_LINK, NULL, NULL));
     TEST_ASSERT_EQUAL_INT(VIF_BUS_NONE,
-                          vif_bus_current(g_elm_session, VIF_BUS_KLINE));
+                          vif_bus_current(VIF_OWNER_LINK, VIF_BUS_KLINE));
     TEST_ASSERT_EQUAL_INT(1, fake_bus_teardown_count(FAKE_BUS_KLINE));
 }
 
