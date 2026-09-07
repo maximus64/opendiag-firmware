@@ -559,3 +559,33 @@ TEST(
     for (unsigned i = 0; i < 10; i++)
         TEST_ASSERT_EQUAL_INT(i + 11, res.message.data.bytes[i + 4]);
 }
+
+TEST(k_line_and_l_line_require_matching_resources_and_preserve_flags) {
+    const uint32_t protocols[] = {J2534_ISO9141, J2534_ISO14230};
+    for (unsigned index = 0; index < 2; index++) {
+        for (unsigned k_only = 0; k_only < 2; k_only++) {
+            command(opendiag_Request_connect_tag);
+            req.command.connect = (opendiag_Connect){
+                .device = dev,
+                .protocol = protocols[index],
+                .flags = J2534_CHECKSUM_DISABLED | (k_only ? J2534_K_ONLY : 0),
+                .baudrate = 10400,
+                .connector = 1,
+                .pins_count = k_only ? 2 : 1,
+                .pins = {7, 15},
+            };
+            TEST_ASSERT_EQUAL_INT(J2534_PIN, call());
+            req.command.connect.pins_count = k_only ? 1 : 2;
+            TEST_ASSERT_EQUAL_INT(0, call());
+            uint32_t channel = res.id;
+            uint32_t value = 99;
+            TEST_ASSERT_EQUAL_INT(
+                0, vif_bus_param_get(VIF_OWNER_LINK, VIF_BUS_KLINE,
+                                     BUS_P_K_LINE_ONLY, &value));
+            TEST_ASSERT_EQUAL_INT(k_only, value);
+            command(opendiag_Request_disconnect_tag);
+            req.command.disconnect.id = channel;
+            TEST_ASSERT_EQUAL_INT(0, call());
+        }
+    }
+}

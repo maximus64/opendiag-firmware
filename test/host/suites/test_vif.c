@@ -1294,3 +1294,130 @@ TEST(retained_close_failure_rejects_io_until_reopened) {
     TEST_ASSERT_EQUAL_INT(
         0, vif_bus_send(VIF_OWNER_LINK, VIF_BUS_J1850_PWM, &msg, 0));
 }
+
+TEST(k_only_leaves_pin_15_available) {
+    TEST_ASSERT_EQUAL_INT(
+        ESP_OK, vif_pin_set(VIF_OWNER_SHELL, OBD_PIN_LS, VIF_PIN_GROUND, 0));
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+                          vif_bus_open(VIF_OWNER_LINK, VIF_BUS_KLINE, NULL));
+    TEST_ASSERT_EQUAL_INT(0, vif_bus_param_set(VIF_OWNER_LINK, VIF_BUS_KLINE,
+                                               BUS_P_K_LINE_ONLY, 1));
+    TEST_ASSERT_EQUAL_INT(
+        BUS_ERR_BUS_BUSY,
+        vif_bus_param_set(VIF_OWNER_LINK, VIF_BUS_KLINE, BUS_P_K_LINE_ONLY, 0));
+    TEST_ASSERT_EQUAL_INT(1, fake_board_ls_state(OBD_PIN_LS));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, vif_pin_release_all(VIF_OWNER_SHELL));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, vif_calibrate_hs(VIF_OWNER_SHELL));
+    TEST_ASSERT_EQUAL_INT(0, vif_bus_param_set(VIF_OWNER_LINK, VIF_BUS_KLINE,
+                                               BUS_P_K_LINE_ONLY, 0));
+    TEST_ASSERT_EQUAL_INT(0, vif_bus_param_set(VIF_OWNER_LINK, VIF_BUS_KLINE,
+                                               BUS_P_K_LINE_ONLY, 1));
+    TEST_ASSERT_EQUAL_INT(
+        ESP_OK, vif_pin_set(VIF_OWNER_SHELL, OBD_PIN_LS, VIF_PIN_GROUND, 0));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, vif_bus_close(VIF_OWNER_LINK, VIF_BUS_KLINE));
+    TEST_ASSERT_EQUAL_INT(1, fake_board_ls_state(OBD_PIN_LS));
+}
+
+TEST(l_line_reservation_survives_failed_teardown) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+                          vif_bus_open(VIF_OWNER_LINK, VIF_BUS_KLINE, NULL));
+    TEST_ASSERT_EQUAL_INT(0, vif_bus_param_set(VIF_OWNER_LINK, VIF_BUS_KLINE,
+                                               BUS_P_K_LINE_ONLY, 0));
+    for (unsigned owner = 0; owner < VIF_OWNER_COUNT; owner++) {
+        TEST_ASSERT_EQUAL_INT(
+            ESP_ERR_INVALID_STATE,
+            vif_pin_set(owner, OBD_PIN_LS, VIF_PIN_GROUND, 0));
+        TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_STATE, vif_calibrate_hs(owner));
+    }
+    fake_bus_close_result(FAKE_BUS_KLINE, ESP_ERR_TIMEOUT);
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_TIMEOUT,
+                          vif_bus_close(VIF_OWNER_LINK, VIF_BUS_KLINE));
+    TEST_ASSERT_EQUAL_INT(
+        ESP_ERR_INVALID_STATE,
+        vif_pin_set(VIF_OWNER_SHELL, OBD_PIN_LS, VIF_PIN_GROUND, 0));
+    fake_bus_close_result(FAKE_BUS_KLINE, ESP_OK);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, vif_bus_close(VIF_OWNER_LINK, VIF_BUS_KLINE));
+    TEST_ASSERT_EQUAL_INT(
+        ESP_OK, vif_pin_set(VIF_OWNER_SHELL, OBD_PIN_LS, VIF_PIN_GROUND, 0));
+}
+
+static void probe_l_line_reservation(void *arg) {
+    (void)arg;
+    TEST_ASSERT_EQUAL_INT(0, idf_stub_lock_balance());
+    TEST_ASSERT_EQUAL_INT(
+        ESP_ERR_INVALID_STATE,
+        vif_pin_set(VIF_OWNER_SHELL, OBD_PIN_LS, VIF_PIN_GROUND, 0));
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_STATE,
+                          vif_calibrate_hs(VIF_OWNER_SHELL));
+}
+
+TEST(l_line_reservation_covers_driver_teardown) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+                          vif_bus_open(VIF_OWNER_LINK, VIF_BUS_KLINE, NULL));
+    TEST_ASSERT_EQUAL_INT(0, vif_bus_param_set(VIF_OWNER_LINK, VIF_BUS_KLINE,
+                                               BUS_P_K_LINE_ONLY, 0));
+    fake_bus_on_lifecycle(FAKE_BUS_KLINE, probe_l_line_reservation, NULL);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, vif_bus_close(VIF_OWNER_LINK, VIF_BUS_KLINE));
+    fake_bus_on_lifecycle(FAKE_BUS_KLINE, NULL, NULL);
+    TEST_ASSERT_EQUAL_INT(
+        ESP_OK, vif_pin_set(VIF_OWNER_SHELL, OBD_PIN_LS, VIF_PIN_GROUND, 0));
+}
+
+TEST(reopening_kline_returns_to_k_only_and_releases_pin_15) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+                          vif_bus_open(VIF_OWNER_LINK, VIF_BUS_KLINE, NULL));
+    TEST_ASSERT_EQUAL_INT(0, vif_bus_param_set(VIF_OWNER_LINK, VIF_BUS_KLINE,
+                                               BUS_P_K_LINE_ONLY, 0));
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+                          vif_bus_open(VIF_OWNER_LINK, VIF_BUS_KLINE, NULL));
+    TEST_ASSERT_EQUAL_INT(
+        ESP_OK, vif_pin_set(VIF_OWNER_SHELL, OBD_PIN_LS, VIF_PIN_GROUND, 0));
+}
+
+static void probe_l_line_mode_change(void) { probe_l_line_reservation(NULL); }
+
+TEST(l_line_mode_changes_hold_reservation_and_roll_back_on_failure) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+                          vif_bus_open(VIF_OWNER_LINK, VIF_BUS_KLINE, NULL));
+    fake_bus_on_kline_only(probe_l_line_mode_change, BUS_ERR_NOT_READY);
+    TEST_ASSERT_EQUAL_INT(
+        BUS_ERR_NOT_READY,
+        vif_bus_param_set(VIF_OWNER_LINK, VIF_BUS_KLINE, BUS_P_K_LINE_ONLY, 0));
+    TEST_ASSERT_EQUAL_INT(
+        ESP_OK, vif_pin_set(VIF_OWNER_SHELL, OBD_PIN_LS, VIF_PIN_GROUND, 0));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, vif_pin_release_all(VIF_OWNER_SHELL));
+
+    fake_bus_on_kline_only(probe_l_line_mode_change, 0);
+    TEST_ASSERT_EQUAL_INT(0, vif_bus_param_set(VIF_OWNER_LINK, VIF_BUS_KLINE,
+                                               BUS_P_K_LINE_ONLY, 0));
+    fake_bus_on_kline_only(probe_l_line_mode_change, BUS_ERR_NOT_READY);
+    TEST_ASSERT_EQUAL_INT(
+        BUS_ERR_NOT_READY,
+        vif_bus_param_set(VIF_OWNER_LINK, VIF_BUS_KLINE, BUS_P_K_LINE_ONLY, 1));
+    TEST_ASSERT_EQUAL_INT(
+        ESP_ERR_INVALID_STATE,
+        vif_pin_set(VIF_OWNER_SHELL, OBD_PIN_LS, VIF_PIN_GROUND, 0));
+
+    fake_bus_on_kline_only(probe_l_line_mode_change, 0);
+    TEST_ASSERT_EQUAL_INT(0, vif_bus_param_set(VIF_OWNER_LINK, VIF_BUS_KLINE,
+                                               BUS_P_K_LINE_ONLY, 1));
+    TEST_ASSERT_EQUAL_INT(
+        ESP_OK, vif_pin_set(VIF_OWNER_SHELL, OBD_PIN_LS, VIF_PIN_GROUND, 0));
+    fake_bus_on_kline_only(NULL, 0);
+}
+
+static void probe_l_line_during_calibration(void) {
+    TEST_ASSERT_EQUAL_INT(
+        BUS_ERR_BUS_BUSY,
+        vif_bus_param_set(VIF_OWNER_LINK, VIF_BUS_KLINE, BUS_P_K_LINE_ONLY, 0));
+}
+
+TEST(calibration_blocks_enabling_l_line_until_it_finishes) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+                          vif_bus_open(VIF_OWNER_LINK, VIF_BUS_KLINE, NULL));
+    fake_board_on_calibration(probe_l_line_during_calibration);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, vif_calibrate_hs(VIF_OWNER_SHELL));
+    fake_board_on_calibration(NULL);
+    TEST_ASSERT_EQUAL_INT(0, vif_bus_param_set(VIF_OWNER_LINK, VIF_BUS_KLINE,
+                                               BUS_P_K_LINE_ONLY, 0));
+}

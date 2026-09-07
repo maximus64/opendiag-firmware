@@ -22,6 +22,7 @@ void fake_board_reset(void);
  * layer reads, via AT RV. The rest of board.h is implemented below but has no
  * caller under test, so it has no knob. */
 void fake_board_set_vbatt_mv(int32_t mv);
+void fake_board_on_calibration(void (*hook)(void));
 
 /* --- Outputs the test inspects --- */
 

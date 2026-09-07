@@ -18,6 +18,7 @@ static struct {
     int hs_state[MAX_OBD_PIN + 1];
     int ls_state[MAX_OBD_PIN + 1];
     int reset_count;
+    void (*calibration_hook)(void);
 } g;
 
 void fake_board_reset(void) {
@@ -38,6 +39,10 @@ void fake_board_reset(void) {
  * ------------------------------------------------------------------ */
 
 void fake_board_set_vbatt_mv(int32_t mv) { g.vbatt_mv = mv; }
+
+void fake_board_on_calibration(void (*hook)(void)) {
+    g.calibration_hook = hook;
+}
 
 uint32_t fake_board_hs_voltage_mv(void) { return g.hs_voltage_mv; }
 int fake_board_hs_boost_en(void) { return g.hs_boost_en; }
@@ -100,7 +105,11 @@ void board_set_ls_state(enum ls_pin pin, int state) {
     }
 }
 
-void board_calibrate_hs(void) {}
+void board_calibrate_hs(void) {
+    if (g.calibration_hook) {
+        g.calibration_hook();
+    }
+}
 
 void board_calibrate_vbatt(void) {}
 

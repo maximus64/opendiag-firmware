@@ -59,6 +59,7 @@ int fake_bus_stop_comm_count(void);
 
 /** What the next and every later initialisation IOCTL returns. K-Line only. */
 void fake_bus_kline_connect_result(int rc);
+void fake_bus_on_kline_only(void (*hook)(void), int result);
 
 /** The variant a successful kline_connect() reports having negotiated. */
 void fake_bus_kline_set_variant(kline_variant_t v);

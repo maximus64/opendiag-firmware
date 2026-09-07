@@ -53,6 +53,9 @@ static int g_connect_result;
 static bus_link_t g_link;
 static bus_stats_t g_stats[FAKE_BUS_COUNT];
 static uint32_t g_kline_baud;
+static uint32_t g_kline_only;
+static void (*g_kline_only_hook)(void);
+static int g_kline_only_result;
 static uint32_t g_wakeup_ms;
 static uint32_t g_ifr_enabled;
 static uint32_t g_ifr_byte;
@@ -66,6 +69,9 @@ void fake_bus_reset_all(void) {
     g_stop_comm_count = 0;
     g_connect_result = 0;
     g_kline_baud = KLINE_BAUD_DEFAULT;
+    g_kline_only = 1;
+    g_kline_only_hook = NULL;
+    g_kline_only_result = 0;
     g_wakeup_ms = 0;
     g_ifr_enabled = 0;
     g_ifr_byte = 0xF1;
@@ -338,6 +344,11 @@ static int fake_recv(fake_bus_id_t id, bus_msg_t *msg, TickType_t wait) {
  * because a fake that refuses a parameter the real driver accepts would make
  * the ELM327 layer's policy calls look like failures.
  */
+void fake_bus_on_kline_only(void (*hook)(void), int result) {
+    g_kline_only_hook = hook;
+    g_kline_only_result = result;
+}
+
 static int fake_set_param(bus_param_t p, uint32_t value) {
     switch (p) {
     case BUS_P_IFR_ENABLED:
@@ -345,6 +356,15 @@ static int fake_set_param(bus_param_t p, uint32_t value) {
         return 0;
     case BUS_P_IFR_BYTE:
         g_ifr_byte = value;
+        return 0;
+    case BUS_P_K_LINE_ONLY:
+        if (g_kline_only_hook) {
+            g_kline_only_hook();
+        }
+        if (g_kline_only_result != 0) {
+            return g_kline_only_result;
+        }
+        g_kline_only = value;
         return 0;
     case BUS_P_DATA_RATE:
         g_kline_baud = value;
@@ -368,6 +388,9 @@ static int fake_get_param(bus_param_t p, uint32_t *out) {
         return 0;
     case BUS_P_IFR_BYTE:
         *out = g_ifr_byte;
+        return 0;
+    case BUS_P_K_LINE_ONLY:
+        *out = g_kline_only;
         return 0;
     case BUS_P_DATA_RATE:
         *out = g_kline_baud;

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #include "driver_rtos.h"
+#include "fake_clock.h"
 #include "kline.c"
 #include "td_test.h"
 
@@ -7,10 +8,28 @@ static bool uart_live;
 static QueueHandle_t uart_queue;
 static esp_err_t install_result, config_result, delete_result;
 static int uart_deletes, silent;
+static int l_line_level;
+static struct {
+    int pin;
+    uint32_t level;
+    int64_t time;
+} edges[64];
+static unsigned edge_count;
+static bool capture_edges;
 
 esp_err_t gpio_set_level(gpio_num_t pin, uint32_t value) {
     if (pin == PIN_KLINE_nSILENT)
         silent = value;
+    if (pin == PIN_LS_OBD_15) {
+        l_line_level = value;
+    }
+    if (capture_edges && (pin == PIN_KLINE_TX || pin == PIN_LS_OBD_15)) {
+        TEST_ASSERT_TRUE(edge_count < sizeof(edges) / sizeof(edges[0]));
+        edges[edge_count].pin = pin;
+        edges[edge_count].level = value;
+        edges[edge_count].time = esp_timer_get_time();
+        edge_count++;
+    }
     return ESP_OK;
 }
 esp_err_t uart_driver_install(uart_port_t port, int rx, int tx, int queue_size,
@@ -66,6 +85,10 @@ esp_err_t uart_wait_tx_done(uart_port_t port, TickType_t wait) {
 
 void td_setup(void) {
     driver_rtos_reset();
+    fake_clock_reset();
+    edge_count = 0;
+    capture_edges = false;
+    l_line_level = 0;
     memset(&g, 0, sizeof(g));
     install_result = config_result = delete_result = ESP_OK;
     uart_deletes = 0;
@@ -98,6 +121,7 @@ static void assert_released(void) {
     TEST_ASSERT_EQUAL_INT(2,
                           driver_live_objects); /* Process-lifetime mutexes. */
     TEST_ASSERT_EQUAL_INT(0, silent);
+    TEST_ASSERT_EQUAL_INT(0, l_line_level);
 }
 
 TEST(kline_worker_creation_failure_does_not_leak_across_retries) {
@@ -197,4 +221,115 @@ TEST(kline_queue_set_failure_releases_partial_startup) {
     }
     driver_fail_set_join = 0;
     TEST_ASSERT_EQUAL_INT(ESP_OK, kline_open(NULL));
+}
+
+TEST(slow_init_mirrors_address_on_l_line_then_releases_it) {
+    cfg_defaults(&g.cfg);
+    g.cfg.k_line_only = false;
+    capture_edges = true;
+    send_5baud_address(0x33);
+    capture_edges = false;
+    TEST_ASSERT_EQUAL_INT(21, edge_count);
+    const unsigned expected[] = {0, 1, 1, 0, 0, 1, 1, 0, 0, 1};
+    for (unsigned bit = 0; bit < 10; bit++) {
+        unsigned k = 1 + bit * 2;
+        TEST_ASSERT_EQUAL_INT(PIN_KLINE_TX, edges[k].pin);
+        TEST_ASSERT_EQUAL_INT(expected[bit], edges[k].level);
+        TEST_ASSERT_EQUAL_INT(PIN_LS_OBD_15, edges[k + 1].pin);
+        TEST_ASSERT_EQUAL_INT(!expected[bit], edges[k + 1].level);
+        TEST_ASSERT_TRUE(edges[k + 1].time - edges[k].time <= 2);
+        if (bit) {
+            int64_t duration = edges[k].time - edges[k - 2].time;
+            TEST_ASSERT_TRUE(duration >= 200000 && duration <= 200010);
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(0, l_line_level);
+}
+
+TEST(k_only_initialization_never_asserts_l_line) {
+    cfg_defaults(&g.cfg);
+    capture_edges = true;
+    send_5baud_address(0x33);
+    bus_init_t init = {0};
+    TEST_ASSERT_EQUAL_INT(0, init_fast(&init));
+    capture_edges = false;
+    for (unsigned index = 0; index < edge_count; index++) {
+        TEST_ASSERT_EQUAL_INT(PIN_KLINE_TX, edges[index].pin);
+    }
+    TEST_ASSERT_EQUAL_INT(0, l_line_level);
+}
+
+TEST(fast_init_mirrors_only_the_wakeup_pulse_on_l_line) {
+    cfg_defaults(&g.cfg);
+    g.cfg.k_line_only = false;
+    bus_init_t init = {0};
+    capture_edges = true;
+    TEST_ASSERT_EQUAL_INT(0, init_fast(&init));
+    capture_edges = false;
+    TEST_ASSERT_EQUAL_INT(5, edge_count);
+    TEST_ASSERT_EQUAL_INT(PIN_LS_OBD_15, edges[2].pin);
+    TEST_ASSERT_EQUAL_INT(1, edges[2].level);
+    TEST_ASSERT_EQUAL_INT(PIN_LS_OBD_15, edges[4].pin);
+    TEST_ASSERT_EQUAL_INT(0, edges[4].level);
+    int64_t pulse = edges[4].time - edges[2].time;
+    TEST_ASSERT_TRUE(pulse >= 24990 && pulse <= 25010);
+    TEST_ASSERT_EQUAL_INT(0, l_line_level);
+}
+
+TEST(l_line_configuration_resets_and_teardown_releases_driver) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, kline_open(NULL));
+    uint32_t value = 0;
+    TEST_ASSERT_EQUAL_INT(0, kline_get_param(BUS_P_K_LINE_ONLY, &value));
+    TEST_ASSERT_EQUAL_INT(1, value);
+    TEST_ASSERT_EQUAL_INT(0, kline_set_param(BUS_P_K_LINE_ONLY, 0));
+    TEST_ASSERT_EQUAL_INT(0, kline_get_param(BUS_P_K_LINE_ONLY, &value));
+    TEST_ASSERT_EQUAL_INT(0, value);
+    gpio_set_level(PIN_LS_OBD_15, 1);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, kline_close());
+    TEST_ASSERT_EQUAL_INT(0, l_line_level);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, kline_open(NULL));
+    TEST_ASSERT_EQUAL_INT(0, kline_get_param(BUS_P_K_LINE_ONLY, &value));
+    TEST_ASSERT_EQUAL_INT(1, value);
+}
+
+TEST(k_only_open_and_close_do_not_touch_pin_15) {
+    l_line_level = 1;
+    capture_edges = true;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, kline_open(NULL));
+    TEST_ASSERT_EQUAL_INT(0, kline_set_param(BUS_P_K_LINE_ONLY, 1));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, kline_close());
+    capture_edges = false;
+    TEST_ASSERT_EQUAL_INT(1, l_line_level);
+    for (unsigned index = 0; index < edge_count; index++) {
+        TEST_ASSERT_TRUE(edges[index].pin != PIN_LS_OBD_15);
+    }
+}
+
+TEST(disabling_l_line_releases_it_before_k_only_cleanup) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, kline_open(NULL));
+    TEST_ASSERT_EQUAL_INT(0, kline_set_param(BUS_P_K_LINE_ONLY, 0));
+    gpio_set_level(PIN_LS_OBD_15, 1);
+    TEST_ASSERT_EQUAL_INT(0, kline_set_param(BUS_P_K_LINE_ONLY, 1));
+    TEST_ASSERT_EQUAL_INT(0, l_line_level);
+
+    /* Another owner may ground pin 15 after the mode change. */
+    gpio_set_level(PIN_LS_OBD_15, 1);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, kline_close());
+    TEST_ASSERT_EQUAL_INT(1, l_line_level);
+}
+
+TEST(pending_initialization_prevents_releasing_l_line_after_timeout) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, kline_open(NULL));
+    TEST_ASSERT_EQUAL_INT(0, kline_set_param(BUS_P_K_LINE_ONLY, 0));
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_TIMEOUT, run_cmd(CMD_FIVE_BAUD, 0));
+    TEST_ASSERT_EQUAL_INT(1, g.pending_inits);
+    gpio_set_level(PIN_LS_OBD_15, 1);
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_BUS_BUSY,
+                          kline_set_param(BUS_P_K_LINE_ONLY, 1));
+    TEST_ASSERT_FALSE(g.cfg.k_line_only);
+    TEST_ASSERT_EQUAL_INT(1, l_line_level);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, kline_close());
+    TEST_ASSERT_EQUAL_INT(0, l_line_level);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, kline_open(NULL));
+    TEST_ASSERT_EQUAL_INT(0, g.pending_inits);
 }

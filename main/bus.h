@@ -178,6 +178,9 @@ typedef enum {
      * Watch the bus during our own transmission and stop on losing it.
      */
     BUS_P_ARBITRATION,
+
+    /* K-Line initialization uses pin 15 as well when false. Default true. */
+    BUS_P_K_LINE_ONLY,
 } bus_param_t;
 
 /* J2534 Table 86 values for BUS_P_PARITY. */

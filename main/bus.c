@@ -39,6 +39,7 @@ static const struct {
     {BUS_P_IFR_ENABLED, "ifr-enabled"},
     {BUS_P_IFR_BYTE, "ifr-byte"},
     {BUS_P_ARBITRATION, "arbitration"},
+    {BUS_P_K_LINE_ONLY, "k-line-only"},
 };
 
 #define PARAM_COUNT (sizeof(g_params) / sizeof(g_params[0]))

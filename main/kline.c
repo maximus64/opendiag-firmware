@@ -169,6 +169,9 @@ typedef struct {
     /** Append the checksum on transmit. On, for the same reason. */
     bool checksum_tx;
 
+    /* L-Line carries initialization only; UART traffic stays on K-Line. */
+    bool k_line_only;
+
     /**
      * Retransmissions after a corrupted transmission. Zero.
      *
@@ -212,7 +215,8 @@ static struct {
     QueueSetHandle_t set;
     SemaphoreHandle_t cmd_done;
     SemaphoreHandle_t exited;
-    SemaphoreHandle_t api_lock;  /**< One outstanding command at a time. */
+    SemaphoreHandle_t api_lock; /**< One outstanding command at a time. */
+    unsigned pending_inits;
     SemaphoreHandle_t data_lock; /**< Guards the fields below from readers. */
 
     /* Request payload. Written by a caller holding api_lock, read by the
@@ -1041,6 +1045,15 @@ static size_t frame_for_tx(const uint8_t *data, size_t len, uint32_t flags,
  * Initialisation
  * ------------------------------------------------------------------ */
 
+static void init_set_level(bool high) {
+    gpio_set_level(PIN_KLINE_TX, high);
+    if (!g.cfg.k_line_only) {
+        /* The discrete low-side switch asserts with GPIO high, opposite to K
+         * TX. */
+        gpio_set_level(PIN_LS_OBD_15, !high);
+    }
+}
+
 /**
  * @brief The 5 baud address word, clause 5.1.5.2.2.
  *
@@ -1055,15 +1068,15 @@ static void send_5baud_address(uint8_t addr) {
 
     tx_pin_to_gpio();
 
-    gpio_set_level(PIN_KLINE_TX, 0);
+    init_set_level(false);
     vTaskDelay(bit);
 
     for (int i = 0; i < 8; i++) {
-        gpio_set_level(PIN_KLINE_TX, (addr >> i) & 1u);
+        init_set_level(((addr >> i) & 1u) != 0);
         vTaskDelay(bit);
     }
 
-    gpio_set_level(PIN_KLINE_TX, 1);
+    init_set_level(true);
     vTaskDelay(bit);
 
     tx_pin_to_uart();
@@ -1267,9 +1280,9 @@ static int init_fast(bus_init_t *io) {
 
     tx_pin_to_gpio();
     t0 = now_us();
-    gpio_set_level(PIN_KLINE_TX, 0);
+    init_set_level(false);
     delay_until_us(t0 + W_TO_US(g.cfg.tinil));
-    gpio_set_level(PIN_KLINE_TX, 1);
+    init_set_level(true);
     delay_until_us(t0 + W_TO_US(g.cfg.twup));
     tx_pin_to_uart();
 
@@ -1523,6 +1536,7 @@ static void kline_task(void *arg) {
         case CMD_FIVE_BAUD:
         case CMD_FAST_INIT:
             g.result = do_init(g.cmd, &g.req_init);
+            __atomic_fetch_sub(&g.pending_inits, 1, __ATOMIC_RELEASE);
             break;
         case CMD_STOP_COMM:
             g.result = do_stop_comm();
@@ -1535,7 +1549,14 @@ static void kline_task(void *arg) {
 
 /** @brief Hand one command to the task and wait for its answer. */
 static int run_cmd(kline_cmd_t c, TickType_t wait) {
+    bool initializing = c == CMD_FIVE_BAUD || c == CMD_FAST_INIT;
+    if (initializing) {
+        __atomic_fetch_add(&g.pending_inits, 1, __ATOMIC_RELEASE);
+    }
     if (xQueueSend(g.cmd_q, &c, 0) != pdTRUE) {
+        if (initializing) {
+            __atomic_fetch_sub(&g.pending_inits, 1, __ATOMIC_RELEASE);
+        }
         return BUS_ERR_NOT_READY;
     }
 
@@ -1586,6 +1607,7 @@ static void cfg_defaults(kline_cfg_t *c) {
     c->loopback = false;
     c->checksum_rx = true;
     c->checksum_tx = true;
+    c->k_line_only = true;
     c->tx_retries = 0;
     c->periodic_ms = 0;
     c->periodic_quiet = true;
@@ -1598,6 +1620,9 @@ static void cfg_defaults(kline_cfg_t *c) {
 
 /* api_lock held; no worker may still use these resources. */
 static esp_err_t kline_release(void) {
+    if (!g.cfg.k_line_only) {
+        gpio_set_level(PIN_LS_OBD_15, 0);
+    }
     gpio_set_level(PIN_KLINE_nSILENT, 0);
     if (g.uart_installed) {
         /* UART owns its event queue; stop it before deleting the queue set. */
@@ -1664,6 +1689,7 @@ static esp_err_t kline_open(const bus_cfg_t *cfg) {
     __atomic_store_n(&g.stop_requested, false, __ATOMIC_RELEASE);
 
     cfg_defaults(&g.cfg);
+    __atomic_store_n(&g.pending_inits, 0, __ATOMIC_RELEASE);
     g.active_baud = g.cfg.baud;
     g.echo = ECHO_UNKNOWN;
     g.asm_len = 0;
@@ -1921,6 +1947,8 @@ static bool *cfg_flag(bus_param_t p) {
         return &g.cfg.checksum_rx;
     case BUS_P_CHECKSUM_TX:
         return &g.cfg.checksum_tx;
+    case BUS_P_K_LINE_ONLY:
+        return &g.cfg.k_line_only;
     case BUS_P_PERIODIC_QUIET:
         return &g.cfg.periodic_quiet;
     case BUS_P_TIMING_FROM_KEYBYTES:
@@ -1944,6 +1972,16 @@ static int kline_set_param(bus_param_t p, uint32_t value) {
 
     flag = cfg_flag(p);
     if (flag) {
+        if (p == BUS_P_K_LINE_ONLY && *flag != (value != 0)) {
+            /* A caller timeout does not stop an initialization already queued.
+             */
+            if (__atomic_load_n(&g.pending_inits, __ATOMIC_ACQUIRE) != 0) {
+                rc = BUS_ERR_BUS_BUSY;
+                goto done;
+            }
+            /* Release before enabling L-Line or returning its pin to VIF. */
+            gpio_set_level(PIN_LS_OBD_15, 0);
+        }
         *flag = value != 0;
         goto done;
     }

@@ -650,9 +650,9 @@ static uint32_t connect_channel(const opendiag_Connect *req) {
         bus = VIF_BUS_KLINE;
         pin1 = 7;
         allowed = J2534_CHECKSUM_DISABLED | J2534_K_ONLY;
-        /* The board exposes K only; L cannot drive initialization. */
-        if (!(flags & J2534_K_ONLY))
-            return J2534_FLAGS;
+        if (!(flags & J2534_K_ONLY)) {
+            pin2 = 15;
+        }
 
         if (rate < KLINE_BAUD_MIN || rate > KLINE_BAUD_HW_MAX)
             return J2534_BAUD;
@@ -693,7 +693,11 @@ static uint32_t connect_channel(const opendiag_Connect *req) {
     int rc = 0;
 
     if (bus == VIF_BUS_KLINE) {
-        rc = vif_bus_param_set(VIF_OWNER_LINK, bus, BUS_P_DATA_RATE, rate);
+        rc = vif_bus_param_set(VIF_OWNER_LINK, bus, BUS_P_K_LINE_ONLY,
+                               !!(flags & J2534_K_ONLY));
+        if (!rc) {
+            rc = vif_bus_param_set(VIF_OWNER_LINK, bus, BUS_P_DATA_RATE, rate);
+        }
         if (!rc)
             rc = vif_bus_param_set(VIF_OWNER_LINK, bus, BUS_P_CHECKSUM_RX,
                                    !(flags & J2534_CHECKSUM_DISABLED));

@@ -71,6 +71,7 @@ static struct {
     struct {
         vif_bus_t bus;
         bool open;
+        bool l_line_reserved;
         uint32_t bitrate;
         vif_owner_t owner;
     } claim[VIF_RES_COUNT];
@@ -81,6 +82,7 @@ static struct {
     int8_t ls_pin;
     vif_owner_t hs_owner;
     vif_owner_t ls_owner;
+    bool pins_calibrating;
 
     struct {
         /* The transport, which a client brings with it and takes away again.
@@ -687,6 +689,7 @@ esp_err_t vif_bus_open(vif_owner_t owner, vif_bus_t bus,
 
     LOCK();
     g.claim[grp].bus = bus;
+    g.claim[grp].l_line_reserved = false;
     g.claim[grp].bitrate = cfg ? cfg->bitrate : 0;
     g.claim[grp].owner = owner;
     UNLOCK();
@@ -876,6 +879,29 @@ int vif_bus_recv(vif_owner_t owner, vif_bus_t bus, bus_msg_t *msg,
     return ops->recv(msg, wait);
 }
 
+static int kline_set_only_with_pin_claim(const bus_ops_t *ops, uint32_t value) {
+    bool enable_l_line = value == 0;
+
+    LOCK();
+    bool was_reserved = g.claim[VIF_RES_KLINE].l_line_reserved;
+    if (enable_l_line && (g.ls_pin != -1 || g.pins_calibrating)) {
+        UNLOCK();
+        return BUS_ERR_BUS_BUSY;
+    }
+
+    /* Reserve before the driver touches pin 15; retain it while disabling. */
+    g.claim[VIF_RES_KLINE].l_line_reserved = was_reserved || enable_l_line;
+    UNLOCK();
+
+    int rc = ops->set_param(BUS_P_K_LINE_ONLY, value);
+
+    LOCK();
+    g.claim[VIF_RES_KLINE].l_line_reserved =
+        rc == 0 ? enable_l_line : was_reserved;
+    UNLOCK();
+    return rc;
+}
+
 int vif_bus_param_set(vif_owner_t owner, vif_bus_t bus, bus_param_t p,
                       uint32_t value) {
     const bus_ops_t *ops = bus_for(bus);
@@ -885,6 +911,9 @@ int vif_bus_param_set(vif_owner_t owner, vif_bus_t bus, bus_param_t p,
     }
     if (!ops->set_param) {
         return BUS_ERR_UNSUPPORTED;
+    }
+    if (bus == VIF_BUS_KLINE && p == BUS_P_K_LINE_ONLY) {
+        return kline_set_only_with_pin_claim(ops, value);
     }
 
     return ops->set_param(p, value);
@@ -1010,6 +1039,10 @@ esp_err_t vif_pin_set(vif_owner_t owner, int obd_pin, vif_pin_mode_t m,
         break;
 
     case VIF_PIN_GROUND:
+        if (g.claim[VIF_RES_KLINE].l_line_reserved) {
+            UNLOCK();
+            return ESP_ERR_INVALID_STATE;
+        }
         if (g.hs_pin == obd_pin) {
             UNLOCK();
             return ESP_ERR_INVALID_STATE; /* already driven from the boost rail
@@ -1077,6 +1110,11 @@ int32_t vif_hs_vsense_mv(void) { return board_get_hs_vsense(); }
 static esp_err_t pins_claim_for_calibration(vif_owner_t owner) {
     LOCK();
 
+    if (g.claim[VIF_RES_KLINE].l_line_reserved || g.pins_calibrating) {
+        UNLOCK();
+        return ESP_ERR_INVALID_STATE;
+    }
+
     if ((g.hs_pin != -1 && g.hs_owner != owner) ||
         (g.ls_pin != -1 && g.ls_owner != owner)) {
         UNLOCK();
@@ -1088,6 +1126,7 @@ static esp_err_t pins_claim_for_calibration(vif_owner_t owner) {
 
     g.hs_owner = owner;
     g.hs_pin = VIF_CAL_HS_PIN;
+    g.pins_calibrating = true;
     led_refresh_locked();
 
     UNLOCK();
@@ -1096,6 +1135,7 @@ static esp_err_t pins_claim_for_calibration(vif_owner_t owner) {
 
 static void pins_drop_after_calibration(vif_owner_t owner) {
     LOCK();
+    g.pins_calibrating = false;
 
     if (g.hs_pin != -1 && g.hs_owner == owner) {
         /* board_calibrate_hs() puts the drivers back itself, so this is only
@@ -1170,6 +1210,7 @@ esp_err_t vif_init(void) {
     g.link.port = COMM_INVALID_PORT_ID;
     g.hs_pin = -1;
     g.ls_pin = -1;
+    g.pins_calibrating = false;
     g.inited = true;
     UNLOCK();
 
