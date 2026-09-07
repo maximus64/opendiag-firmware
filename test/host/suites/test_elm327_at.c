@@ -9,6 +9,44 @@
 
 #include "elm327_harness.h"
 
+static const vif_frontend_t passthru_test_frontend = {.name = "j2534"};
+static const vif_frontend_t slcan_test_frontend = {.name = "slcan"};
+
+TEST(passthru_command_switches_after_reply_and_discards_pipelined_commands) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+                          vif_frontend_register(&passthru_test_frontend));
+    elm_echo_off();
+    elm_ok("ATSP6\r");
+    TEST_ASSERT_EQUAL_STRING("OK\r" ELM_PROMPT,
+                             elm_ask("at vif passthru\rATSP7\r"));
+    TEST_ASSERT_EQUAL_STRING("elm327", vif_link_frontend_name());
+    TEST_ASSERT_EQUAL_INT(ELM327_PROTO_CAN_11BIT_500K,
+                          g_elm->settings.current_protocol);
+    TEST_ASSERT_TRUE(vif_link_service());
+    TEST_ASSERT_EQUAL_STRING("j2534", vif_link_frontend_name());
+    elm_link_down();
+    TEST_ASSERT_EQUAL_STRING("elm327", vif_link_frontend_name());
+}
+
+TEST(slcan_command_selects_registered_frontend) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, vif_frontend_register(&slcan_test_frontend));
+    elm_echo_off();
+    elm_ok("AT VIF SLCAN\r");
+    TEST_ASSERT_TRUE(vif_link_service());
+    TEST_ASSERT_EQUAL_STRING("slcan", vif_link_frontend_name());
+    elm_link_down();
+}
+
+TEST(frontend_command_requires_an_exact_supported_name) {
+    elm_echo_off();
+    const char *commands[] = {"AT VIF\r", "AT VIF J2534\r",
+                              "AT VIF PASSTHRUX\r", "AT VIF SLCANX\r"};
+    for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++) {
+        TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask(commands[i]));
+        TEST_ASSERT_EQUAL_STRING("elm327", vif_link_frontend_name());
+    }
+}
+
 /* ------------------------------------------------------------------ *
  * Line assembly
  * ------------------------------------------------------------------ */

@@ -463,6 +463,32 @@ static size_t frame(uint8_t *dst, unsigned op, unsigned flags, unsigned offset,
     j2534_put32(dst + 16 + len, crc(dst + 4, 12 + len));
     return 20 + len;
 }
+TEST(passthru_at_command_is_ignored_before_binary_request) {
+    const uint8_t text[] = "AT VIF PASSTHRU\r";
+    fake_port_reset();
+    for (size_t i = 0; i < sizeof(text) - 1; i++) {
+        j2534_frontend.feed(text + i, 1);
+    }
+    TEST_ASSERT_EQUAL_STRING("", fake_port_text(0));
+    command(opendiag_Request_capabilities_tag);
+    TEST_ASSERT_EQUAL_INT(0, wire_call());
+    TEST_ASSERT_TRUE(res.has_capabilities);
+}
+
+TEST(startup_recovers_after_partial_binary_frame_timeout) {
+    uint8_t partial[212];
+    const uint8_t data[192] = {0};
+    frame(partial, 0, 0, 0, data, sizeof(data));
+    j2534_frontend.feed(partial, 17);
+    const uint8_t text[] = "AT VIF PASSTHRU\r";
+    j2534_frontend.feed(text, sizeof(text) - 1);
+    fake_clock_advance_ms(2100);
+    j2534_frontend.feed(text, sizeof(text) - 1);
+    command(opendiag_Request_capabilities_tag);
+    TEST_ASSERT_EQUAL_INT(0, wire_call());
+    TEST_ASSERT_TRUE(res.has_capabilities);
+}
+
 TEST(wire_fragmentation_does_not_execute_until_final_fragment) {
     uint32_t ch = logical(connect_can(0), false);
     uint8_t data[260] = {0, 0, 7, 0xe0};

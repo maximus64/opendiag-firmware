@@ -958,7 +958,22 @@ static void elm327_select_protocol_cmd(elm327_ctx_t *e, const char *arg) {
 static void elm327_at_command_handler(elm327_ctx_t *e, const char *cmd) {
     int rc;
 
-    if (strcmp(cmd, "Z") == 0) {
+    if (strcmp(cmd, "VIFPASSTHRU") == 0 || strcmp(cmd, "VIFSLCAN") == 0) {
+        const char *name = "j2534";
+        if (strcmp(cmd, "VIFSLCAN") == 0) {
+            name = "slcan";
+        }
+        const vif_frontend_t *frontend = vif_frontend_find(name);
+        if (!frontend) {
+            elm327_send_string(e, "?\r");
+            return;
+        }
+
+        elm327_send_string(e, "OK\r");
+        vif_link_set_frontend(frontend);
+        /* The host must wait for the reply before sending the new grammar. */
+        e->line.reset_discard = true;
+    } else if (strcmp(cmd, "Z") == 0) {
         ESP_LOGI(TAG, "Reset all command");
 
         if (elm327_reset(e) != ESP_OK) {
@@ -2964,9 +2979,8 @@ static void elm327_fe_feed(const uint8_t *data, size_t len) {
     for (size_t i = 0; i < len; i++) {
         elm327_feed_byte(e, (char)data[i]);
 
-        /* A reset in the middle of this chunk. The rest of it was sent before
-         * the reset finished, so it goes the same way as everything else that
-         * arrived during one. See the AT Z handler. */
+        /* Reset and frontend selection discard commands pipelined in the
+         * same chunk. The client must wait for the reply before continuing. */
         if (e->line.reset_discard) {
             e->line.reset_discard = false;
             e->line.cmdidx = 0;

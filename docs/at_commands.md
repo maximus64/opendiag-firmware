@@ -168,6 +168,8 @@ Bluetooth.
 
 ### Custom Extensions (Not in ELM327 Spec)
 
-| CMD | Description | Supported |
-| :--- | :--- | :--- |
-| `PROGV p vvvvvvvv` | drive an OBD-II pin `p`, or release it | ✅ |
+| CMD | Description |
+| :--- | :--- |
+| `PROGV p vvvvvvvv` | drive an OBD-II pin `p`, or release it |
+| `VIF PASSTHRU` | Select the J2534 binary frontend on the current data connection. |
+| `VIF SLCAN` | Select the SLCAN frontend on the current data connection. |
