@@ -323,6 +323,18 @@ j1850_pwm_rx_status_t IRAM_ATTR j1850_pwm_decode(const rmt_symbol_word_t *sym,
             return out->status;
         }
 
+        if (in_ifr) {
+            uint16_t *minimum =
+                s == SYM_ONE ? &out->ifr_one_min_us : &out->ifr_zero_min_us;
+            uint16_t *maximum =
+                s == SYM_ONE ? &out->ifr_one_max_us : &out->ifr_zero_max_us;
+
+            if (!*minimum || it.dur < *minimum)
+                *minimum = (uint16_t)it.dur;
+            if (it.dur > *maximum)
+                *maximum = (uint16_t)it.dur;
+        }
+
         if (!push_bit(out, in_ifr, s == SYM_ONE, &nbits)) {
             out->status = J1850_PWM_RX_TOO_LONG;
             return out->status;

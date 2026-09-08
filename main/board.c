@@ -142,7 +142,7 @@ void board_setup(void) {
     gpio_set_direction(PIN_LS_OBD_15, GPIO_MODE_OUTPUT);
 
     esp_err_t gpio_isr_err = ESP_OK;
-    /* Keep PWM edge timing away from the Bluetooth controller on core 0. */
+    /* Keep shared GPIO timing interrupts away from Bluetooth on core 0. */
     ESP_ERROR_CHECK(
         esp_ipc_call_blocking(1, board_gpio_isr_install, &gpio_isr_err));
     ESP_ERROR_CHECK(gpio_isr_err);

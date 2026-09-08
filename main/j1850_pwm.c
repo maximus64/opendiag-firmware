@@ -23,10 +23,14 @@
  * rising edge: 47..49 us to transmit, 42..54 us to receive (Table 3).
  * Tp5 is EOF detection, not an extension of that response window.
  *
- * An IRAM GPIO handler on core 1 validates pulses and CRC as they arrive.
- * At a valid byte boundary it checks for EOD and sends the IFR against the
- * last rising-edge timestamp. RMT independently captures the frame and IFR
- * for delivery and diagnostics; its completion interrupt does not drive ACK.
+ * An IRAM MCPWM capture handler validates pulses and CRC as they arrive. The
+ * capture peripheral timestamps each edge before interrupt dispatch. At a
+ * valid byte boundary the handler checks for EOD and sends the IFR against
+ * that hardware timestamp. RMT independently captures the frame and IFR for
+ * delivery and diagnostics; its completion interrupt does not drive ACK.
+ * A GPIO any-edge interrupt is insufficient here: it retains one pending bit,
+ * so a complete 7 us pulse can collapse into one callback when dispatch is
+ * delayed, losing both the edge identity and its timestamp.
  *
  * Transmitting
  * ------------
@@ -49,12 +53,14 @@
 #include "esp_attr.h"
 #include "esp_cpu.h"
 #include "esp_heap_caps.h"
+#include "esp_ipc.h"
 #include "esp_log.h"
 #include "esp_private/esp_clk.h"
 #include "esp_rom_gpio.h"
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "driver/gpio.h"
+#include "driver/mcpwm_cap.h"
 #include "driver/rmt_rx.h"
 #include "driver/rmt_tx.h"
 #include "soc/gpio_reg.h"
@@ -88,7 +94,7 @@
 #define RMT_CLK_SRC RMT_CLK_SRC_APB
 
 /* Capture the entire IFR: its longest legal passive gap is Tp4(max) minus
- * Tp1(min), 50 us. GPIO edge timing handles acknowledgment independently. */
+ * Tp1(min), 50 us. MCPWM edge timing handles acknowledgment independently. */
 #define J1850_PWM_RX_IDLE_US 55
 
 /**
@@ -98,10 +104,6 @@
  * enough to swallow the ringing a 40 metre network produces on an edge.
  */
 #define J1850_PWM_RX_FILTER_NS 1500
-
-/* Compensate core-1 level-3 dispatch and output delay; center captured EOD
- * at 48 us on this 240 MHz board, including the observed 1 us jitter. */
-#define J1850_PWM_GPIO_LATENCY_US 3
 
 /** Symbols the receive buffer holds. The staging copy has to match it. */
 #define RX_BUFFER_SYMBOLS J1850_PWM_CAPTURE_MAX
@@ -156,6 +158,12 @@
  */
 #define J1850_PWM_INTR_PRIORITY 0
 
+/** USB allocates its interrupt on CPU 0 during app_main(). */
+#define J1850_PWM_CAPTURE_CORE 1
+
+/** The GPIO and transceiver add 1..2 us before RMT sees the driven edge. */
+#define J1850_PWM_IFR_START_US (J1850_PWM_TP4_NOM - 1)
+
 /* ------------------------------------------------------------------ *
  * State
  * ------------------------------------------------------------------ */
@@ -181,10 +189,19 @@ static struct {
     bool rx_enabled;
     j1850_callback_guard_t rx_guard;
     j1850_callback_guard_t edge_guard;
-    bool edge_installed;
+    bool rising_channel_enabled;
+    bool falling_channel_enabled;
+    bool clock_channel_enabled;
+    bool edge_timer_enabled;
+    bool edge_timer_started;
+    mcpwm_cap_timer_handle_t edge_timer;
+    mcpwm_cap_channel_handle_t rising_channel;
+    mcpwm_cap_channel_handle_t falling_channel;
+    mcpwm_cap_channel_handle_t clock_channel;
     j1850_pwm_stream_t stream;
-    uint32_t edge_cycle;
-    uint32_t edge_gap_cycles;
+    uint32_t edge_timestamp_ticks;
+    uint32_t edge_gap_ticks;
+    uint32_t edge_ticks_per_us;
     bool edge_active;
     /* Policy changes invalidate a frame already being decoded. */
     uint32_t ifr_generation;
@@ -278,9 +295,9 @@ static const rmt_receive_config_t g_rx_config = {
 /* ------------------------------------------------------------------ *
  * In-frame response
  *
- * Bit banged, from the GPIO edge ISR, against the CPU cycle counter. Everything
- * it touches is in IRAM. No allocation or blocking calls; the waveform runs
- * inside an ISR critical section on a microsecond deadline.
+ * Bit banged from the MCPWM capture ISR. Hardware latches every bus edge before
+ * interrupt dispatch, so the IFR deadline does not depend on interrupt
+ * latency. No allocation or blocking calls occur on this path.
  * ------------------------------------------------------------------ */
 
 static portMUX_TYPE g_ifr_spinlock = portMUX_INITIALIZER_UNLOCKED;
@@ -312,21 +329,35 @@ static inline void IRAM_ATTR wait_until(uint32_t deadline) {
     }
 }
 
+/** @brief Current bus-edge clock, safe to read from the capture ISR. */
+static bool IRAM_ATTR edge_clock_now(uint32_t *now_ticks) {
+    if (mcpwm_capture_channel_trigger_soft_catch(g.clock_channel) != ESP_OK)
+        return false;
+
+    return mcpwm_capture_get_latched_value(g.clock_channel, now_ticks) ==
+           ESP_OK;
+}
+
+static inline uint32_t IRAM_ATTR edge_ticks_to_us(uint32_t ticks) {
+    return (ticks + g.edge_ticks_per_us / 2) / g.edge_ticks_per_us;
+}
+
 /**
- * @brief Drive one in-frame response byte, starting at @p start_cycle.
+ * @brief Drive one in-frame response byte, starting at @p start_ticks.
  *
  * A type 1 IFR (clause 5.3.7 b): one byte, no SOF, no CRC. Bits are MSB first
  * like any J1850 byte, each one an active phase inside a Tp3 cell, and every
  * edge is placed against an absolute deadline rather than by accumulating
  * delays, so a cell that starts late does not push the ones after it.
  */
-static bool IRAM_ATTR ifr_transmit(uint8_t byte, uint32_t start_cycle,
-                                   uint32_t reference_cycle) {
+static bool IRAM_ATTR ifr_transmit(uint8_t byte, uint32_t start_ticks,
+                                   uint32_t reference_ticks) {
     const uint32_t per_us = g.cpu_ticks_per_us;
     const uint32_t cell = J1850_PWM_TP3_NOM * per_us;
-    uint32_t rise = start_cycle;
+    uint32_t now_ticks;
+    uint32_t rise;
 
-    if ((int32_t)(esp_cpu_get_cycle_count() - start_cycle) > 0) {
+    if (!edge_clock_now(&now_ticks) || (int32_t)(now_ticks - start_ticks) > 0) {
         g.stats.ifr_late++;
         return false;
     }
@@ -339,18 +370,25 @@ static bool IRAM_ATTR ifr_transmit(uint8_t byte, uint32_t start_cycle,
     REG_WRITE(GPIO_FUNC_OUT_SEL(PIN_J1850_TX_N), SIG_GPIO_OUT_IDX);
 
     bool sent = true;
-    if ((int32_t)(esp_cpu_get_cycle_count() - start_cycle) > 0) {
+    if (!edge_clock_now(&now_ticks) || (int32_t)(now_ticks - start_ticks) > 0) {
         g.stats.ifr_late++;
         sent = false;
         goto restore;
     }
-    while ((int32_t)(start_cycle - esp_cpu_get_cycle_count()) > 0) {
+    while ((int32_t)(start_ticks - now_ticks) > 0) {
         if (REG_READ(GPIO_IN_REG) & BIT(PIN_J1850_PWM_RX)) {
             g.stats.ifr_lost++;
             sent = false;
             goto restore;
         }
+        if (!edge_clock_now(&now_ticks)) {
+            g.stats.ifr_late++;
+            sent = false;
+            goto restore;
+        }
     }
+
+    rise = esp_cpu_get_cycle_count();
     for (int bit = 7; bit >= 0; bit--) {
         uint32_t active =
             ((byte >> bit) & 1u) ? J1850_PWM_TP1_NOM : J1850_PWM_TP2_NOM;
@@ -358,11 +396,8 @@ static bool IRAM_ATTR ifr_transmit(uint8_t byte, uint32_t start_cycle,
         wait_until(rise);
         bus_drive(1);
         if (bit == 7) {
-            /* Relative to the GPIO edge ISR timestamp, not RMT completion.
-             * A captured EOD gap also includes GPIO interrupt latency. */
             g.stats.ifr_start_us =
-                (esp_cpu_get_cycle_count() - reference_cycle) /
-                g.cpu_ticks_per_us;
+                edge_ticks_to_us(start_ticks - reference_ticks);
         }
         wait_until(rise + active * per_us);
         bus_drive(0);
@@ -446,12 +481,15 @@ static bool IRAM_ATTR is_own_echo(const uint8_t *data, size_t len) {
     return memcmp(data, g.echo, len) == 0;
 }
 
-static void IRAM_ATTR pwm_edge_isr(void *arg) {
-    uint32_t now = esp_cpu_get_cycle_count();
-    bool active = (REG_READ(GPIO_IN_REG) & BIT(PIN_J1850_PWM_RX)) != 0;
+static bool IRAM_ATTR pwm_edge_isr(mcpwm_cap_channel_handle_t channel,
+                                   const mcpwm_capture_event_data_t *event,
+                                   void *arg) {
+    uint32_t timestamp_ticks = event->cap_value;
+    bool active = event->cap_edge == MCPWM_CAP_EDGE_POS;
+    (void)channel;
     (void)arg;
     if (!j1850_callback_enter(&g.edge_guard))
-        return;
+        return false;
     uint32_t generation = __atomic_load_n(&g.ifr_generation, __ATOMIC_ACQUIRE);
     if (generation != g.stream_generation) {
         g.stream.valid = false;
@@ -460,18 +498,41 @@ static void IRAM_ATTR pwm_edge_isr(void *arg) {
     }
     if (!__atomic_load_n(&g.ifr.enabled, __ATOMIC_ACQUIRE))
         goto out;
+
+    if (!active && !g.edge_active) {
+        uint32_t rising_ticks;
+
+        /* The falling interrupt can run before the pending rising callback.
+         * Recover that edge from the rising channel's hardware latch. */
+        if (mcpwm_capture_get_latched_value(g.rising_channel, &rising_ticks) ==
+                ESP_OK &&
+            rising_ticks != g.edge_timestamp_ticks &&
+            (int32_t)(timestamp_ticks - rising_ticks) > 0) {
+            g.edge_gap_ticks =
+                (uint32_t)(rising_ticks - g.edge_timestamp_ticks);
+            g.edge_timestamp_ticks = rising_ticks;
+            g.edge_active = true;
+            g.stats.ifr_edge_reordered++;
+        }
+    }
     if (active) {
-        g.edge_gap_cycles = now - g.edge_cycle;
-        g.edge_cycle = now;
+        if (timestamp_ticks == g.edge_timestamp_ticks)
+            goto out;
+        g.edge_gap_ticks = (uint32_t)(timestamp_ticks - g.edge_timestamp_ticks);
+        g.edge_timestamp_ticks = timestamp_ticks;
         g.edge_active = true;
         goto out;
     }
-    if (!g.edge_active)
+    if (!g.edge_active) {
+        g.stream.valid = false;
+        g.stats.ifr_capture_lost++;
         goto out;
+    }
     g.edge_active = false;
-    uint32_t per_us = g.cpu_ticks_per_us;
-    uint32_t active_us = (now - g.edge_cycle + per_us / 2) / per_us;
-    uint32_t gap_us = (g.edge_gap_cycles + per_us / 2) / per_us;
+
+    uint32_t active_us =
+        edge_ticks_to_us(timestamp_ticks - g.edge_timestamp_ticks);
+    uint32_t gap_us = edge_ticks_to_us(g.edge_gap_ticks);
     if (active_us >= J1850_PWM_TP7_RX_MIN && active_us <= J1850_PWM_TP7_RX_MAX)
         g.stats.ifr_sof++;
     else if (g.stream.valid) {
@@ -501,22 +562,35 @@ static void IRAM_ATTR pwm_edge_isr(void *arg) {
         goto out;
     }
     g.stats.ifr_candidates++;
-    uint32_t edge = g.edge_cycle - J1850_PWM_GPIO_LATENCY_US * per_us;
-    uint32_t eod = edge + J1850_PWM_TP4_RX_MIN * per_us;
-    uint32_t start = edge + J1850_PWM_TP4_NOM * per_us;
-    while ((int32_t)(eod - esp_cpu_get_cycle_count()) > 0) {
+    uint32_t edge_ticks = g.edge_timestamp_ticks;
+    uint32_t eod_ticks =
+        edge_ticks + J1850_PWM_TP4_RX_MIN * g.edge_ticks_per_us;
+    uint32_t start_ticks =
+        edge_ticks + J1850_PWM_IFR_START_US * g.edge_ticks_per_us;
+    uint32_t now_ticks;
+
+    if (!edge_clock_now(&now_ticks)) {
+        portEXIT_CRITICAL_ISR(&g_ifr_spinlock);
+        goto out;
+    }
+    while ((int32_t)(eod_ticks - now_ticks) > 0) {
         if (REG_READ(GPIO_IN_REG) & BIT(PIN_J1850_PWM_RX)) {
+            portEXIT_CRITICAL_ISR(&g_ifr_spinlock);
+            goto out;
+        }
+        if (!edge_clock_now(&now_ticks)) {
             portEXIT_CRITICAL_ISR(&g_ifr_spinlock);
             goto out;
         }
     }
     g.stream.valid = false;
     if (!(REG_READ(GPIO_IN_REG) & BIT(PIN_J1850_PWM_RX)) &&
-        ifr_transmit(g.ifr.node_address, start, edge))
+        ifr_transmit(g.ifr.node_address, start_ticks, edge_ticks))
         g.stats.ifr_sent++;
     portEXIT_CRITICAL_ISR(&g_ifr_spinlock);
 out:
     j1850_callback_exit(&g.edge_guard);
+    return false;
 }
 
 /**
@@ -605,6 +679,16 @@ static bool IRAM_ATTR receive_done(rmt_channel_handle_t channel,
             g.stats.ifr_gap_min_us = rx.eod_gap_us;
         if (rx.eod_gap_us > g.stats.ifr_gap_max_us)
             g.stats.ifr_gap_max_us = rx.eod_gap_us;
+        if (!g.stats.ifr_one_min_us ||
+            rx.ifr_one_min_us < g.stats.ifr_one_min_us)
+            g.stats.ifr_one_min_us = rx.ifr_one_min_us;
+        if (rx.ifr_one_max_us > g.stats.ifr_one_max_us)
+            g.stats.ifr_one_max_us = rx.ifr_one_max_us;
+        if (!g.stats.ifr_zero_min_us ||
+            rx.ifr_zero_min_us < g.stats.ifr_zero_min_us)
+            g.stats.ifr_zero_min_us = rx.ifr_zero_min_us;
+        if (rx.ifr_zero_max_us > g.stats.ifr_zero_max_us)
+            g.stats.ifr_zero_max_us = rx.ifr_zero_max_us;
     }
 
     if (echo) {
@@ -659,6 +743,206 @@ static bool IRAM_ATTR receive_done(rmt_channel_handle_t channel,
 /* ------------------------------------------------------------------ *
  * Bus access
  * ------------------------------------------------------------------ */
+
+static esp_err_t edge_clock_open_local(void) {
+    const mcpwm_capture_timer_config_t timer_config = {
+        .group_id = 0,
+        .clk_src = MCPWM_CAPTURE_CLK_SRC_APB,
+    };
+    /* Separate latches retain both edges when one callback is briefly late. */
+    const mcpwm_capture_channel_config_t rising_config = {
+        .gpio_num = PIN_J1850_PWM_RX,
+        .intr_priority = 3,
+        .prescale = 1,
+        .flags.pos_edge = true,
+    };
+    const mcpwm_capture_channel_config_t falling_config = {
+        .gpio_num = PIN_J1850_PWM_RX,
+        .intr_priority = 3,
+        .prescale = 1,
+        .flags.neg_edge = true,
+    };
+    const mcpwm_capture_channel_config_t clock_config = {
+        .gpio_num = -1,
+        .prescale = 1,
+    };
+    const mcpwm_capture_event_callbacks_t callbacks = {
+        .on_cap = pwm_edge_isr,
+    };
+    esp_err_t err;
+
+    err = mcpwm_new_capture_timer(&timer_config, &g.edge_timer);
+    if (err != ESP_OK)
+        return err;
+    uint32_t resolution_hz;
+    err = mcpwm_capture_timer_get_resolution(g.edge_timer, &resolution_hz);
+    if (err != ESP_OK)
+        return err;
+    if (resolution_hz < 1000000 || resolution_hz % 1000000)
+        return ESP_ERR_NOT_SUPPORTED;
+    g.edge_ticks_per_us = resolution_hz / 1000000;
+    err = mcpwm_new_capture_channel(g.edge_timer, &rising_config,
+                                    &g.rising_channel);
+    if (err != ESP_OK)
+        return err;
+    err = mcpwm_new_capture_channel(g.edge_timer, &falling_config,
+                                    &g.falling_channel);
+    if (err != ESP_OK)
+        return err;
+    err = mcpwm_new_capture_channel(g.edge_timer, &clock_config,
+                                    &g.clock_channel);
+    if (err != ESP_OK)
+        return err;
+    err = mcpwm_capture_channel_register_event_callbacks(g.rising_channel,
+                                                         &callbacks, NULL);
+    if (err != ESP_OK)
+        return err;
+    err = mcpwm_capture_channel_register_event_callbacks(g.falling_channel,
+                                                         &callbacks, NULL);
+    if (err != ESP_OK)
+        return err;
+    err = mcpwm_capture_channel_enable(g.rising_channel);
+    if (err != ESP_OK)
+        return err;
+    g.rising_channel_enabled = true;
+    err = mcpwm_capture_channel_enable(g.falling_channel);
+    if (err != ESP_OK)
+        return err;
+    g.falling_channel_enabled = true;
+    err = mcpwm_capture_channel_enable(g.clock_channel);
+    if (err != ESP_OK)
+        return err;
+    g.clock_channel_enabled = true;
+
+    err = mcpwm_capture_timer_enable(g.edge_timer);
+    if (err != ESP_OK)
+        return err;
+    g.edge_timer_enabled = true;
+    err = mcpwm_capture_timer_start(g.edge_timer);
+    if (err != ESP_OK)
+        return err;
+    g.edge_timer_started = true;
+    return ESP_OK;
+}
+
+static void keep_first_error(esp_err_t *result, esp_err_t err) {
+    if (*result == ESP_OK && err != ESP_OK)
+        *result = err;
+}
+
+static esp_err_t edge_clock_close_local(void) {
+    esp_err_t result = ESP_OK;
+    esp_err_t err;
+
+    if (g.rising_channel_enabled) {
+        err = mcpwm_capture_channel_disable(g.rising_channel);
+        keep_first_error(&result, err);
+        if (err == ESP_OK)
+            g.rising_channel_enabled = false;
+    }
+    if (g.falling_channel_enabled) {
+        err = mcpwm_capture_channel_disable(g.falling_channel);
+        keep_first_error(&result, err);
+        if (err == ESP_OK)
+            g.falling_channel_enabled = false;
+    }
+    if (g.clock_channel_enabled) {
+        err = mcpwm_capture_channel_disable(g.clock_channel);
+        keep_first_error(&result, err);
+        if (err == ESP_OK)
+            g.clock_channel_enabled = false;
+    }
+    if (g.edge_timer_started) {
+        err = mcpwm_capture_timer_stop(g.edge_timer);
+        keep_first_error(&result, err);
+        if (err == ESP_OK)
+            g.edge_timer_started = false;
+    }
+    if (g.edge_timer_enabled) {
+        err = mcpwm_capture_timer_disable(g.edge_timer);
+        keep_first_error(&result, err);
+        if (err == ESP_OK)
+            g.edge_timer_enabled = false;
+    }
+    if (g.rising_channel && !g.rising_channel_enabled) {
+        err = mcpwm_del_capture_channel(g.rising_channel);
+        keep_first_error(&result, err);
+        if (err == ESP_OK)
+            g.rising_channel = NULL;
+    }
+    if (g.falling_channel && !g.falling_channel_enabled) {
+        err = mcpwm_del_capture_channel(g.falling_channel);
+        keep_first_error(&result, err);
+        if (err == ESP_OK)
+            g.falling_channel = NULL;
+    }
+    if (g.clock_channel && !g.clock_channel_enabled) {
+        err = mcpwm_del_capture_channel(g.clock_channel);
+        keep_first_error(&result, err);
+        if (err == ESP_OK)
+            g.clock_channel = NULL;
+    }
+    if (g.edge_timer && !g.edge_timer_enabled && !g.rising_channel &&
+        !g.falling_channel && !g.clock_channel) {
+        err = mcpwm_del_capture_timer(g.edge_timer);
+        keep_first_error(&result, err);
+        if (err == ESP_OK)
+            g.edge_timer = NULL;
+    }
+
+    return result;
+}
+
+static esp_err_t edge_channels_disable_local(void) {
+    esp_err_t err;
+
+    if (g.rising_channel_enabled) {
+        err = mcpwm_capture_channel_disable(g.rising_channel);
+        if (err != ESP_OK)
+            return err;
+        g.rising_channel_enabled = false;
+    }
+    if (g.falling_channel_enabled) {
+        err = mcpwm_capture_channel_disable(g.falling_channel);
+        if (err != ESP_OK)
+            return err;
+        g.falling_channel_enabled = false;
+    }
+    return ESP_OK;
+}
+
+struct edge_clock_call {
+    esp_err_t (*operation)(void);
+    esp_err_t result;
+};
+
+static void edge_clock_call_ipc(void *arg) {
+    struct edge_clock_call *call = arg;
+
+    call->result = call->operation();
+}
+
+static esp_err_t edge_clock_call_on_capture_core(esp_err_t (*operation)(void)) {
+    struct edge_clock_call call = {
+        .operation = operation,
+        .result = ESP_FAIL,
+    };
+
+    if (xPortGetCoreID() == J1850_PWM_CAPTURE_CORE)
+        return operation();
+
+    esp_err_t err = esp_ipc_call_blocking(J1850_PWM_CAPTURE_CORE,
+                                          edge_clock_call_ipc, &call);
+    return err == ESP_OK ? call.result : err;
+}
+
+static esp_err_t edge_clock_open(void) {
+    return edge_clock_call_on_capture_core(edge_clock_open_local);
+}
+
+static esp_err_t edge_clock_close(void) {
+    return edge_clock_call_on_capture_core(edge_clock_close_local);
+}
 
 /**
  * @brief Wait for the bus to be passive for a whole inter-frame separation.
@@ -1010,12 +1294,10 @@ static esp_err_t j1850_pwm_open(const bus_cfg_t *cfg) {
         goto fail;
     }
 
-    if (gpio_set_intr_type(PIN_J1850_PWM_RX, GPIO_INTR_ANYEDGE) != ESP_OK ||
-        gpio_isr_handler_add(PIN_J1850_PWM_RX, pwm_edge_isr, NULL) != ESP_OK)
+    if (edge_clock_open() != ESP_OK) {
+        ESP_LOGE(TAG, "could not bring the edge clock up");
         goto fail;
-    g.edge_installed = true;
-    if (gpio_intr_enable(PIN_J1850_PWM_RX) != ESP_OK)
-        goto fail;
+    }
 
     g.started = true;
     ESP_LOGI(TAG,
@@ -1039,15 +1321,19 @@ static esp_err_t j1850_pwm_close(void) {
         xSemaphoreTake(g.tx_lock, portMAX_DELAY);
     g.started = false;
 
-    if (g.edge_installed) {
-        gpio_intr_disable(PIN_J1850_PWM_RX);
+    bool edge_callbacks_enabled =
+        g.rising_channel_enabled || g.falling_channel_enabled;
+    if (edge_callbacks_enabled) {
+        err = edge_clock_call_on_capture_core(edge_channels_disable_local);
+        if (err != ESP_OK)
+            goto out;
         err = j1850_callbacks_stop(&g.edge_guard);
         if (err != ESP_OK)
             goto out;
-        gpio_isr_handler_remove(PIN_J1850_PWM_RX);
-        gpio_set_intr_type(PIN_J1850_PWM_RX, GPIO_INTR_DISABLE);
-        g.edge_installed = false;
     }
+    err = edge_clock_close();
+    if (err != ESP_OK)
+        goto out;
     err = j1850_callbacks_stop(&g.rx_guard);
     if (err != ESP_OK)
         goto out;

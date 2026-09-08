@@ -105,14 +105,20 @@ typedef struct {
     uint32_t ifr_candidates;
     uint32_t ifr_bad_pulse;
     uint32_t ifr_bad_gap;
+    uint32_t ifr_edge_reordered;
+    uint32_t ifr_capture_lost;
     uint32_t ifr_late;
     uint32_t ifr_lost;
     uint32_t ifr_observed;
     uint32_t ifr_gap_min_us;
     uint32_t ifr_gap_max_us;
+    uint32_t ifr_one_min_us;
+    uint32_t ifr_one_max_us;
+    uint32_t ifr_zero_min_us;
+    uint32_t ifr_zero_max_us;
 
-    /** Estimated IFR start after the GPIO rising-edge timestamp, excluding ISR
-     * latency. Table 3: TX 47..49 us, RX 42..54 us. Verify on the wire. */
+    /** Scheduled IFR start after the hardware-captured rising edge. Table 3:
+     * TX 47..49 us, RX 42..54 us. */
     uint32_t ifr_start_us;
     uint32_t rx_isr_us_max; /**< Longest receive interrupt, microseconds. */
 } j1850_pwm_stats_t;

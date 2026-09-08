@@ -964,13 +964,18 @@ static void j1850_print_stats(void) {
     printf("  ifr-candidates   %" PRIu32 "\n", s.ifr_candidates);
     printf("  ifr-bad-pulse    %" PRIu32 "\n", s.ifr_bad_pulse);
     printf("  ifr-bad-gap      %" PRIu32 "\n", s.ifr_bad_gap);
+    printf("  ifr-edge-reorder %" PRIu32 "\n", s.ifr_edge_reordered);
+    printf("  ifr-capture-lost %" PRIu32 "\n", s.ifr_capture_lost);
     printf("  ifr-late         %" PRIu32 "\n", s.ifr_late);
     printf("  ifr-lost         %" PRIu32 "\n", s.ifr_lost);
     printf("  ifr-observed     %" PRIu32 "\n", s.ifr_observed);
     printf("  ifr-gap-min-us   %" PRIu32 "\n", s.ifr_gap_min_us);
     printf("  ifr-gap-max-us   %" PRIu32 "\n", s.ifr_gap_max_us);
-    /* Excludes interrupt latency; a value inside Tp4 is not proof that
-     * the waveform meets its 42..54 us receive window. */
+    printf("  ifr-one-min-us   %" PRIu32 "\n", s.ifr_one_min_us);
+    printf("  ifr-one-max-us   %" PRIu32 "\n", s.ifr_one_max_us);
+    printf("  ifr-zero-min-us  %" PRIu32 "\n", s.ifr_zero_min_us);
+    printf("  ifr-zero-max-us  %" PRIu32 "\n", s.ifr_zero_max_us);
+    /* The RMT gap above remains the on-wire check of this scheduled value. */
     printf("  ifr-start-us     %" PRIu32 "\n", s.ifr_start_us);
 }
 

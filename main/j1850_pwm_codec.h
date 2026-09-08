@@ -244,6 +244,10 @@ typedef struct {
     uint8_t len;                       /**< Bytes in @p data. */
     uint8_t ifr[J1850_PWM_MAX_FRAME];  /**< Response bytes after EOD. */
     uint8_t ifr_len;
+    uint16_t ifr_one_min_us;
+    uint16_t ifr_one_max_us;
+    uint16_t ifr_zero_min_us;
+    uint16_t ifr_zero_max_us;
     bool eod;            /**< An EOD gap separated data from IFR. */
     uint16_t eod_gap_us; /**< Captured rising-edge gap before the IFR. */
     /**
