@@ -1,0 +1,22 @@
+# mkdir -p build/docker
+# docker compose run --rm --build firmware
+# Add --verify after firmware to build twice and compare the ZIPs.
+services:
+  firmware:
+    build: .
+    platform: linux/amd64
+    init: true
+    entrypoint: ["/opt/esp/entrypoint.sh", "bash", "tools/docker/build.sh"]
+    command: []
+    environment:
+      IDF_TARGET: esp32s3
+      CCACHE_DISABLE: "1"
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+      TZ: UTC
+    volumes:
+      - type: bind
+        source: ./build/docker
+        target: /output
+        bind:
+          create_host_path: false

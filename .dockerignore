@@ -1,0 +1,16 @@
+# Keep .git for ESP-IDF's embedded version and the nanopb submodule metadata.
+build
+build-*
+**/build
+test/host/build-cov
+sdkconfig
+sdkconfig.old
+managed_components
+**/__pycache__
+**/.venv
+.venv
+private
+.env
+.env.*
+**/*.pcap
+report.json

@@ -16,30 +16,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: Host tests
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-          submodules: recursive
-
-      - name: Configure host tests
-        run: cmake -S test/host -B build/host
-
-      - name: Build host tests
-        run: cmake --build build/host --parallel 2
-
-      - name: Run host tests
-        run: ctest --test-dir build/host --output-on-failure --timeout 30
-
   build:
-    name: ESP32-S3 firmware package
-    needs: test
+    name: Test and build reproducible ESP32-S3 firmware
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
         with:
@@ -47,38 +27,34 @@ jobs:
           persist-credentials: false
           submodules: recursive
 
-      - name: Build firmware package
-        uses: espressif/esp-idf-ci-action@v1
-        with:
-          esp_idf_version: v6.1
-          target: esp32s3
-          command: idf.py firmware-package
-
-      - name: Verify release version
-        if: github.ref_type == 'tag'
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
+      - name: Test, build, and verify reproducibility
         run: |
-          python3 - <<'PY'
+          mkdir -p build/docker
+          docker compose --progress plain run --rm --build -T firmware --verify
+
+      - name: Verify firmware package
+        env:
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          verification_dir=$(mktemp -d)
+          trap 'rm -rf -- "$verification_dir"' EXIT
+          unzip build/docker/opendiag-firmware.zip -d "$verification_dir"
+          (cd "$verification_dir" && sha256sum --check SHA256SUMS)
+          python3 - "$verification_dir/manifest.json" <<'PY'
           import json
           import os
+          import sys
           from pathlib import Path
-          version = json.loads(Path("build/firmware/manifest.json").read_text())["version"]
-          if version != os.environ["RELEASE_TAG"]:
+          version = json.loads(Path(sys.argv[1]).read_text())["version"]
+          release_tag = os.environ["RELEASE_TAG"]
+          if release_tag and version != release_tag:
               raise SystemExit(f"Firmware version {version!r} does not match the release tag")
           PY
-
-      - name: Verify package checksums
-        working-directory: build/firmware
-        run: sha256sum --check SHA256SUMS
-
-      - name: Verify package archive
-        run: unzip -t build/opendiag-firmware.zip
 
       - name: Upload firmware package
         uses: actions/upload-artifact@v7
         with:
-          path: build/opendiag-firmware.zip
+          path: build/docker/opendiag-firmware.zip
           archive: false
           if-no-files-found: error
           retention-days: 30
@@ -99,11 +75,12 @@ jobs:
           path: dist
           skip-decompress: true
 
-      - name: Verify release files
+      - name: Verify release package
         run: |
-          unzip dist/opendiag-firmware.zip -d dist/firmware
-          cd dist/firmware
-          sha256sum --check SHA256SUMS
+          verification_dir=$(mktemp -d)
+          trap 'rm -rf -- "$verification_dir"' EXIT
+          unzip dist/opendiag-firmware.zip -d "$verification_dir"
+          (cd "$verification_dir" && sha256sum --check SHA256SUMS)
 
       - name: Publish release
         env:
@@ -117,9 +94,4 @@ jobs:
           fi
           gh release create "$RELEASE_TAG" \
             dist/opendiag-firmware.zip \
-            dist/firmware/bootloader.bin \
-            dist/firmware/partition-table.bin \
-            dist/firmware/opendiag.bin \
-            dist/firmware/manifest.json \
-            dist/firmware/SHA256SUMS \
             "${release_flags[@]}"
