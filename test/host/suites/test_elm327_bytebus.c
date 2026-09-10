@@ -377,7 +377,7 @@ TEST(j1850_discards_traffic_queued_before_the_request) {
     TEST_ASSERT_EQUAL_STRING(REPLY_WITH_HEADER ELM_PROMPT, elm_ask("0100\r"));
 }
 
-TEST(iso9141_still_reports_traffic_queued_before_the_request) {
+TEST(iso9141_discards_traffic_queued_before_the_request) {
     static const uint8_t leftover[10] = {0x48, 0x6B, 0x10, 0x41, 0x0C,
                                          0x1A, 0xF8, 0x00, 0x00, 0x77};
 
@@ -387,13 +387,77 @@ TEST(iso9141_still_reports_traffic_queued_before_the_request) {
     fake_bus_stage_stale(FAKE_BUS_KLINE, leftover, sizeof(leftover));
     fake_bus_stage_response(FAKE_BUS_KLINE, reply, sizeof(reply), 5);
 
-    /* Unlike the J1850 paths, the K-Line transfer does not drain the driver
-     * first: that loop is commented out in elm327_iso9141_xfer(). A reply to
-     * somebody else's request is therefore attributed to this one. Pinned so
-     * the difference is visible rather than surprising. */
-    TEST_ASSERT_EQUAL_STRING(
-        "48 6B 10 41 0C 1A F8 00 00 77 \r" REPLY_WITH_HEADER ELM_PROMPT,
-        elm_ask("0100\r"));
+    TEST_ASSERT_EQUAL_STRING(REPLY_WITH_HEADER ELM_PROMPT, elm_ask("0100\r"));
+}
+
+static const uint8_t reply_pid01[] = {0x48, 0x6B, 0x10, 0x41, 0x01,
+                                      0x00, 0x00, 0x00, 0x00, 0x05};
+#define PID01_STRIPPED "41 01 00 00 00 00 \r"
+
+static void assert_kline_responses_resume(const char *protocol,
+                                          uint32_t pause_ms) {
+    elm_echo_off();
+    elm_kline_select(protocol);
+    elm_ok("ATR0\r");
+    fake_bus_stage_response(FAKE_BUS_KLINE, reply, sizeof(reply), 5);
+    TEST_ASSERT_EQUAL_STRING(ELM_PROMPT, elm_ask("0100\r"));
+
+    fake_clock_advance_ms(pause_ms);
+    elm_ok("ATR1\r");
+    fake_bus_stage_response(FAKE_BUS_KLINE, reply_pid01, sizeof(reply_pid01),
+                            0);
+    TEST_ASSERT_EQUAL_STRING(PID01_STRIPPED ELM_PROMPT, elm_ask("0101\r"));
+    TEST_ASSERT_EQUAL_INT(2, fake_bus_sent_count(FAKE_BUS_KLINE));
+}
+
+TEST(iso9141_responses_resume_without_the_suppressed_reply) {
+    assert_kline_responses_resume("ATSP3\r", 0);
+}
+
+TEST(iso9141_responses_resume_after_a_250_ms_pause) {
+    assert_kline_responses_resume("ATSP3\r", 250);
+}
+
+TEST(kwp_slow_init_responses_resume_without_the_suppressed_reply) {
+    assert_kline_responses_resume("ATSP4\r", 0);
+}
+
+TEST(kwp_fast_init_responses_resume_without_the_suppressed_reply) {
+    assert_kline_responses_resume("ATSP5\r", 0);
+}
+
+TEST(kline_zero_frame_hint_does_not_leak_a_reply_into_the_next_request) {
+    elm_echo_off();
+    elm_kline_select("ATSP3\r");
+    fake_bus_stage_response(FAKE_BUS_KLINE, reply, sizeof(reply), 5);
+    TEST_ASSERT_EQUAL_STRING(ELM_PROMPT, elm_ask("01000\r"));
+
+    fake_bus_stage_response(FAKE_BUS_KLINE, reply_pid01, sizeof(reply_pid01),
+                            0);
+    TEST_ASSERT_EQUAL_STRING(PID01_STRIPPED ELM_PROMPT, elm_ask("0101\r"));
+}
+
+TEST(kline_frame_count_hint_does_not_leak_remaining_replies) {
+    elm_echo_off();
+    elm_kline_select("ATSP3\r");
+    fake_bus_stage_response(FAKE_BUS_KLINE, reply, sizeof(reply), 5);
+    fake_bus_stage_response(FAKE_BUS_KLINE, reply, sizeof(reply), 5);
+    TEST_ASSERT_EQUAL_STRING(REPLY_STRIPPED ELM_PROMPT, elm_ask("01001\r"));
+
+    fake_bus_stage_response(FAKE_BUS_KLINE, reply_pid01, sizeof(reply_pid01),
+                            0);
+    TEST_ASSERT_EQUAL_STRING(PID01_STRIPPED ELM_PROMPT, elm_ask("0101\r"));
+}
+
+TEST(kline_stale_reply_does_not_hide_no_data_for_the_current_request) {
+    elm_echo_off();
+    elm_kline_select("ATSP3\r");
+    elm_ok("ATR0\r");
+    fake_bus_stage_response(FAKE_BUS_KLINE, reply, sizeof(reply), 5);
+    TEST_ASSERT_EQUAL_STRING(ELM_PROMPT, elm_ask("0100\r"));
+    elm_ok("ATR1\r");
+
+    TEST_ASSERT_EQUAL_STRING("NO DATA\r" ELM_PROMPT, elm_ask("0101\r"));
 }
 
 /* ------------------------------------------------------------------ *

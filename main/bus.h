@@ -62,6 +62,8 @@ typedef struct {
 #define BUS_TX_WAIT_P3_MIN_ONLY (1u << 1)
 /* CAN: wait for completion; unresolved TX returns BUS_ERR_TX_ABORTED. */
 #define BUS_TX_WAIT_DONE (1u << 2)
+/* K-Line: clear queued RX after the quiet wait, immediately before TX. */
+#define BUS_TX_CLEAR_RX_QUEUE (1u << 3)
 
 #define BUS_ERR_TIMEOUT (-1)   /* Timeout error */
 #define BUS_ERR_NO_SPACE (-2)  /* Message is longer than the buffer. */

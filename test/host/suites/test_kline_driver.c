@@ -16,6 +16,9 @@ static struct {
 } edges[64];
 static unsigned edge_count;
 static bool capture_edges;
+static uint8_t uart_rx_data[KLINE_MAX_MSG];
+static size_t uart_rx_len;
+static void (*uart_write_hook)(void);
 
 esp_err_t gpio_set_level(gpio_num_t pin, uint32_t value) {
     if (pin == PIN_KLINE_nSILENT)
@@ -71,12 +74,22 @@ esp_err_t uart_set_word_length(uart_port_t port, uart_word_length_t bits) {
 esp_err_t uart_set_parity(uart_port_t port, uart_parity_t parity) {
     return ESP_OK;
 }
-esp_err_t uart_flush_input(uart_port_t port) { return ESP_OK; }
+esp_err_t uart_flush_input(uart_port_t port) {
+    uart_rx_len = 0;
+    return ESP_OK;
+}
 int uart_read_bytes(uart_port_t port, void *buf, uint32_t length,
                     TickType_t wait) {
-    return 0;
+    size_t n = length < uart_rx_len ? length : uart_rx_len;
+    memcpy(buf, uart_rx_data, n);
+    uart_rx_len -= n;
+    memmove(uart_rx_data, uart_rx_data + n, uart_rx_len);
+    return (int)n;
 }
 int uart_write_bytes(uart_port_t port, const void *buf, size_t length) {
+    if (uart_write_hook) {
+        uart_write_hook();
+    }
     return length;
 }
 esp_err_t uart_wait_tx_done(uart_port_t port, TickType_t wait) {
@@ -88,6 +101,8 @@ void td_setup(void) {
     fake_clock_reset();
     edge_count = 0;
     capture_edges = false;
+    uart_rx_len = 0;
+    uart_write_hook = NULL;
     l_line_level = 0;
     memset(&g, 0, sizeof(g));
     install_result = config_result = delete_result = ESP_OK;
@@ -332,4 +347,110 @@ TEST(pending_initialization_prevents_releasing_l_line_after_timeout) {
     TEST_ASSERT_EQUAL_INT(0, l_line_level);
     TEST_ASSERT_EQUAL_INT(ESP_OK, kline_open(NULL));
     TEST_ASSERT_EQUAL_INT(0, g.pending_inits);
+}
+
+static const uint8_t previous_reply[] = {0x48, 0x6B, 0x10, 0x41, 0x00,
+                                         0xBE, 0x3F, 0xB8, 0x13, 0xCC};
+static const uint8_t current_reply[] = {0x48, 0x6B, 0x10, 0x41, 0x01,
+                                        0x00, 0x00, 0x00, 0x00, 0x05};
+static const uint8_t current_request[] = {0x68, 0x6A, 0xF1, 0x01, 0x01, 0xC5};
+
+static void stage_uart_reply(const uint8_t *data, size_t len) {
+    TEST_ASSERT_EQUAL_INT(0, uart_rx_len);
+    TEST_ASSERT_TRUE(len <= sizeof(uart_rx_data));
+    memcpy(uart_rx_data, data, len);
+    uart_rx_len = len;
+}
+
+static void queue_previous_reply(void) {
+    kline_frame_t f = {.len = sizeof(previous_reply)};
+    memcpy(f.data, previous_reply, sizeof(previous_reply));
+    publish(&f);
+}
+
+TEST(kline_request_boundary_discards_replies_queued_during_the_quiet_wait) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, kline_open(NULL));
+    g.echo = ECHO_ABSENT;
+    queue_previous_reply();
+    stage_uart_reply(previous_reply, sizeof(previous_reply));
+    g.tx_answered = false;
+
+    TEST_ASSERT_EQUAL_INT(0,
+                          tx_message(current_request, sizeof(current_request),
+                                     true, BUS_TX_CLEAR_RX_QUEUE));
+    /* One reply was queued before the call; the UART reply was framed and
+     * published by wait_before_tx(), after the call began. */
+    TEST_ASSERT_EQUAL_INT(2, g.stats.rx_msgs);
+    TEST_ASSERT_TRUE(g.tx_end_us >= P_TO_US(g.cfg.p3_min));
+    kline_frame_t f;
+    TEST_ASSERT_EQUAL_INT(pdFALSE, xQueueReceive(g.rx_q, &f, 0));
+}
+
+TEST(kline_request_boundary_discards_replies_after_an_idle_pause) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, kline_open(NULL));
+    g.echo = ECHO_ABSENT;
+    queue_previous_reply();
+    fake_clock_advance_ms(250);
+
+    TEST_ASSERT_EQUAL_INT(0,
+                          tx_message(current_request, sizeof(current_request),
+                                     true, BUS_TX_CLEAR_RX_QUEUE));
+    kline_frame_t f;
+    TEST_ASSERT_EQUAL_INT(pdFALSE, xQueueReceive(g.rx_q, &f, 0));
+}
+
+TEST(kline_raw_transmit_preserves_queued_and_late_replies) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, kline_open(NULL));
+    g.echo = ECHO_ABSENT;
+    queue_previous_reply();
+    stage_uart_reply(previous_reply, sizeof(previous_reply));
+
+    TEST_ASSERT_EQUAL_INT(
+        0, tx_message(current_request, sizeof(current_request), true, 0));
+    TEST_ASSERT_EQUAL_INT(2, g.stats.rx_msgs);
+    kline_frame_t f;
+    for (int i = 0; i < 2; i++) {
+        TEST_ASSERT_EQUAL_INT(pdTRUE, xQueueReceive(g.rx_q, &f, 0));
+        TEST_ASSERT_EQUAL_INT(sizeof(previous_reply), f.len);
+        TEST_ASSERT_EQUAL_MEM(previous_reply, f.data, f.len);
+    }
+    TEST_ASSERT_EQUAL_INT(pdFALSE, xQueueReceive(g.rx_q, &f, 0));
+}
+
+static unsigned request_bytes_sent;
+
+static void receive_reply_at_tx_completion(void) {
+    request_bytes_sent++;
+    if (request_bytes_sent == sizeof(current_request)) {
+        stage_uart_reply(current_reply, sizeof(current_reply));
+    }
+}
+
+TEST(kline_request_boundary_preserves_the_new_reply_and_tx_loopback) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, kline_open(NULL));
+    g.echo = ECHO_ABSENT;
+    g.cfg.loopback = true;
+    queue_previous_reply();
+    request_bytes_sent = 0;
+    uart_write_hook = receive_reply_at_tx_completion;
+
+    TEST_ASSERT_EQUAL_INT(0,
+                          tx_message(current_request, sizeof(current_request),
+                                     true, BUS_TX_CLEAR_RX_QUEUE));
+    TEST_ASSERT_EQUAL_INT(sizeof(current_request), request_bytes_sent);
+
+    uint8_t data[KLINE_MAX_MSG];
+    bus_msg_t msg;
+    bus_msg_init(&msg, data, sizeof(data));
+    TEST_ASSERT_EQUAL_INT(sizeof(current_request), kline_rx(&msg, 0));
+    TEST_ASSERT_EQUAL_INT(BUS_RX_TX_MSG_TYPE, msg.status);
+    TEST_ASSERT_EQUAL_MEM(current_request, data, msg.len);
+
+    kline_frame_t f;
+    TEST_ASSERT_EQUAL_INT(1, rx_service(now_us() + 100000, &f));
+    publish(&f);
+    TEST_ASSERT_EQUAL_INT(sizeof(current_reply), kline_rx(&msg, 0));
+    TEST_ASSERT_EQUAL_INT(0, msg.status);
+    TEST_ASSERT_EQUAL_MEM(current_reply, data, msg.len);
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_TIMEOUT, kline_rx(&msg, 0));
 }

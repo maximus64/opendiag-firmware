@@ -211,7 +211,8 @@ static void bus_teardown(fake_bus_id_t id) {
     b->teardown_count++;
 }
 
-static int bus_send(fake_bus_id_t id, const uint8_t *data, uint8_t len) {
+static int bus_send(fake_bus_id_t id, const uint8_t *data, uint8_t len,
+                    uint32_t flags) {
     bus_t *b = bus_of(id);
 
     if (!data) {
@@ -225,6 +226,11 @@ static int bus_send(fake_bus_id_t id, const uint8_t *data, uint8_t len) {
 
     if (b->sent_count < MAX_FRAMES) {
         stage(&b->sent[b->sent_count++], data, len, 0);
+    }
+
+    if (id == FAKE_BUS_KLINE && (flags & BUS_TX_CLEAR_RX_QUEUE)) {
+        b->live_head = 0;
+        b->live_count = 0;
     }
 
     /* The ECU's answer becomes readable now that the request has gone out. */
@@ -300,14 +306,12 @@ static esp_err_t fake_open(fake_bus_id_t id) {
 
 static int fake_send(fake_bus_id_t id, const uint8_t *data, size_t len,
                      uint32_t flags) {
-    (void)flags;
-
     if (len > UINT8_MAX) {
         return BUS_ERR_TOO_LONG;
     }
 
     g_stats[id].tx_msgs++;
-    return bus_send(id, data, (uint8_t)len);
+    return bus_send(id, data, (uint8_t)len, flags);
 }
 
 static int fake_recv(fake_bus_id_t id, bus_msg_t *msg, TickType_t wait) {

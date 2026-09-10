@@ -914,7 +914,7 @@ static void wait_before_tx(bool p3_only) {
  * @param wait    Honour the inter-request quiet time first. False only for
  *                the StartCommunication request of a fast init, which clause
  *                5.1.5.3 requires to follow the wake up pattern immediately.
- * @param p3_only See wait_before_tx().
+ * @param flags   BUS_TX_* flags for the quiet wait and receive boundary.
  *
  * Each byte is read back as it is driven. The transceiver's loopback makes
  * that free, and it is the only way to tell a message that was transmitted
@@ -925,13 +925,19 @@ static void wait_before_tx(bool p3_only) {
  * than a fault, so it is noted once and the checking is dropped for the rest
  * of the session.
  */
-static int tx_once(const uint8_t *buf, size_t len, bool wait, bool p3_only) {
+static int tx_once(const uint8_t *buf, size_t len, bool wait, uint32_t flags) {
     uint32_t echo_us = byte_time_us() * 2 + 2000;
     bool collision = false;
     int rc = 0;
 
     if (wait) {
-        wait_before_tx(p3_only);
+        wait_before_tx((flags & BUS_TX_WAIT_P3_MIN_ONLY) != 0);
+    }
+
+    /* The wait can publish replies to the previous request. Only the worker
+     * can clear them at the transmit boundary without losing a new reply. */
+    if (flags & BUS_TX_CLEAR_RX_QUEUE) {
+        xQueueReset(g.rx_q);
     }
 
     /* Anything unframed at this point predates the request, and so does
@@ -999,8 +1005,9 @@ static int tx_once(const uint8_t *buf, size_t len, bool wait, bool p3_only) {
 }
 
 /** @brief tx_once() with whatever retransmission policy is configured. */
-static int tx_message(const uint8_t *buf, size_t len, bool wait, bool p3_only) {
-    int rc = tx_once(buf, len, wait, p3_only);
+static int tx_message(const uint8_t *buf, size_t len, bool wait,
+                      uint32_t flags) {
+    int rc = tx_once(buf, len, wait, flags);
 
     for (uint32_t i = 0; rc == BUS_ERR_ECHO && i < g.cfg.tx_retries; i++) {
         ESP_LOGW(TAG, "corrupted transmission, retransmitting");
@@ -1008,7 +1015,7 @@ static int tx_message(const uint8_t *buf, size_t len, bool wait, bool p3_only) {
         /* Whoever we collided with is entitled to finish. Clause 6.6 puts the
          * retransmission after P2max. */
         delay_until_us(g.last_bus_us + P_TO_US(g.cfg.p2_max));
-        rc = tx_once(buf, len, true, p3_only);
+        rc = tx_once(buf, len, true, flags);
     }
 
     if (rc == 0 || rc == BUS_ERR_ECHO) {
@@ -1203,7 +1210,7 @@ static int init_5baud(const bus_init_t *in) {
         delay_until_us(kb2_at + W_TO_US(g.cfg.w4_min));
 
         b = (uint8_t)~kb2;
-        if (tx_once(&b, 1, false, false) == BUS_ERR_TX_FAILED) {
+        if (tx_once(&b, 1, false, 0) == BUS_ERR_TX_FAILED) {
             return BUS_ERR_TX_FAILED;
         }
     }
@@ -1301,7 +1308,7 @@ static int init_fast(bus_init_t *io) {
         return BUS_ERR_BAD_ARG;
     }
 
-    rc = tx_message(msg, n, false, false);
+    rc = tx_message(msg, n, false, 0);
     if (rc == BUS_ERR_TX_FAILED) {
         return rc;
     }
@@ -1437,7 +1444,7 @@ static int do_stop_comm(void) {
         msg[n] = kline_checksum(msg, n);
         n++;
 
-        tx_message(msg, n, true, false);
+        tx_message(msg, n, true, 0);
         /* Whatever it answers is the end of the session, not data. */
         g.suppress_until_us = now_us() + P_TO_US(g.cfg.p2_max);
     }
@@ -1475,7 +1482,7 @@ static void send_periodic(void) {
     }
 
     ESP_LOGD(TAG, "periodic message");
-    tx_message(msg, n, true, false);
+    tx_message(msg, n, true, 0);
 
     g.stats.periodic_sent++;
     g.suppress_until_us =
@@ -1530,8 +1537,7 @@ static void kline_task(void *arg) {
         /* A command. The caller is blocked on cmd_done until we answer. */
         switch (g.cmd) {
         case CMD_TX:
-            g.result = tx_message(g.req, g.req_len, true,
-                                  (g.req_flags & BUS_TX_WAIT_P3_MIN_ONLY) != 0);
+            g.result = tx_message(g.req, g.req_len, true, g.req_flags);
             break;
         case CMD_FIVE_BAUD:
         case CMD_FAST_INIT:

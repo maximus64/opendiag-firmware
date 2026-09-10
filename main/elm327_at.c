@@ -2455,8 +2455,8 @@ static int elm327_kline_ensure_link(elm327_ctx_t *e) {
  *
  * - @p cap  is the largest frame the bus carries. J1850 is 12 bytes plus the
  *   three header bytes; K-Line messages run longer.
- * - @p drain_first discards traffic queued before the request. J1850 does;
- *   ISO 9141 does not, so a reply that arrived early still gets printed.
+ * - @p drain_first discards queued J1850 traffic. K-Line clears its queue in
+ *   the driver, after waiting for the bus to go quiet and before sending.
  * - @p settle_ms holds the prompt until the bus is quiet, for the buses whose
  *   modules retransmit unacknowledged replies. See J1850_SETTLE_MS.
  */
@@ -2469,6 +2469,7 @@ static int elm327_bus_xfer(elm327_ctx_t *e, const uint8_t *frame, size_t len,
     bus_msg_t rx;
     bus_msg_t tx_msg;
     size_t tx_len;
+    uint32_t tx_flags = 0;
 
     if (cap > sizeof(tx_frame)) {
         cap = sizeof(tx_frame);
@@ -2489,8 +2490,11 @@ static int elm327_bus_xfer(elm327_ctx_t *e, const uint8_t *frame, size_t len,
     }
 
     elm327_apply_pwm_ifr(e, tx_frame[2]);
+    if (elm327_bus(e) == VIF_BUS_KLINE) {
+        tx_flags = BUS_TX_CLEAR_RX_QUEUE;
+    }
     bus_msg_tx(&tx_msg, tx_frame, tx_len, 0);
-    ret = vif_bus_send(VIF_OWNER_LINK, elm327_bus(e), &tx_msg, 0);
+    ret = vif_bus_send(VIF_OWNER_LINK, elm327_bus(e), &tx_msg, tx_flags);
     if (ret != 0) {
         ESP_LOGE(TAG, "Fail to send frame ret=%d", ret);
         return -2;
