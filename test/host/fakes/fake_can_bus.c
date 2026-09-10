@@ -19,11 +19,13 @@
 typedef struct {
     struct can_frame frame;
     uint32_t delay_ms;
+    uint64_t ready_ms;
     int release_at; /* Transmit count that frees this frame */
 } staged_t;
 
 static struct {
     bool up;
+    uint32_t rx_timestamp_us;
     int baud;
     int setup_count;
     int teardown_count;
@@ -61,6 +63,7 @@ static void stage(staged_t *slot, uint32_t id, uint8_t dlc, const uint8_t *data,
         memcpy(slot->frame.data, data, dlc > 8 ? 8 : dlc);
     }
     slot->delay_ms = delay_ms;
+    slot->ready_ms = fake_clock_ms();
 }
 
 void fake_can_stage_response_at(uint32_t id, uint8_t dlc, const uint8_t *data,
@@ -160,6 +163,13 @@ int can_send(const struct can_frame *frame) {
 
     /* Release whatever the ECU was staged to answer with by this transmit,
      * keeping the rest waiting for a later one. */
+    uint64_t ready_ms = fake_clock_ms();
+    if (g.live_count) {
+        uint64_t tail =
+            g.live[(g.live_head + g.live_count - 1) % MAX_FRAMES].ready_ms;
+        if (tail > ready_ms)
+            ready_ms = tail;
+    }
     int kept = 0;
     for (int i = 0; i < g.pending_count; i++) {
         if (g.pending[i].release_at > g.sent_total ||
@@ -168,6 +178,8 @@ int can_send(const struct can_frame *frame) {
             continue;
         }
 
+        ready_ms += g.pending[i].delay_ms;
+        g.pending[i].ready_ms = ready_ms;
         g.live[(g.live_head + g.live_count) % MAX_FRAMES] = g.pending[i];
         g.live_count++;
     }
@@ -188,11 +200,9 @@ int can_receive(struct can_frame *frame, TickType_t ticks_to_wait) {
 
     s = &g.live[g.live_head];
 
-    if (s->delay_ms > (uint32_t)ticks_to_wait) {
-        /* The ECU has not answered yet. The caller waited as long as it asked
-         * to and times out, exactly as the real driver would; the frame stays
-         * queued with the rest of its delay still to run. */
-        s->delay_ms -= (uint32_t)ticks_to_wait;
+    uint32_t delay_ms =
+        s->ready_ms > fake_clock_ms() ? s->ready_ms - fake_clock_ms() : 0;
+    if (delay_ms > (uint32_t)ticks_to_wait) {
         fake_clock_advance_ms((uint32_t)ticks_to_wait);
         return -1;
     }
@@ -201,7 +211,8 @@ int can_receive(struct can_frame *frame, TickType_t ticks_to_wait) {
         *frame = s->frame;
     }
 
-    fake_clock_advance_ms(s->delay_ms);
+    fake_clock_advance_ms(delay_ms);
+    g.rx_timestamp_us = (uint32_t)(s->ready_ms * 1000u);
 
     g.live_head = (g.live_head + 1) % MAX_FRAMES;
     g.live_count--;
@@ -264,6 +275,8 @@ static int can_ops_recv(bus_msg_t *msg, TickType_t wait) {
     memcpy(msg->data, f.data, len);
     msg->id = f.id;
     msg->len = f.dlc;
+    msg->timestamp_us = g.rx_timestamp_us;
+    msg->status = 0;
 
     return (int)len;
 }

@@ -989,333 +989,349 @@ TEST(at_pc_ends_the_session_before_the_driver_goes_down) {
 }
 
 /* ------------------------------------------------------------------ *
- * Adaptive timing - AT AT0, AT1, AT2
- *
- * Every rule below is quoted from the ELM327 datasheet, because the whole
- * point of the feature is compatibility: an application written against a
- * real ELM327 has to see the same behaviour from this one.
+ * OpenDIAG adaptive timing policy
  * ------------------------------------------------------------------ */
 
-/** @brief Drive one exchange whose reply arrives @p delay_ms after the request.
- */
 static void elm_exchange_at(uint32_t delay_ms) {
-    static const uint8_t reply[] = {0x48, 0x6B, 0x10, 0x41, 0x00, 0xBE, 0x22};
-
     fake_bus_stage_response(FAKE_BUS_KLINE, reply, sizeof(reply), delay_ms);
-    elm_ask("0100\r");
+    TEST_ASSERT_EQUAL_STRING(REPLY_STRIPPED ELM_PROMPT, elm_ask("0100\r"));
 }
 
-/**
- * The failure this exists to prevent, reproduced from the bench.
- *
- * A J1850 PWM module answers anywhere between 6 and 21 ms depending on where
- * the request lands in its own cycle. A run of quick replies pulls the
- * adaptive window down to the floor; the next slow reply misses it. Before
- * the window learned from its own timeouts, what happened next was the bug:
- * the timeout discarded everything learned, the following request got the
- * full window and was answered quickly, and that one quick answer pulled the
- * window straight back under the slow replies. Every other request failed,
- * indefinitely, on a bus with no errors of any kind on it.
- */
-TEST(a_window_that_timed_out_is_never_chosen_again) {
-    uint16_t floor_after_failure;
+static void train_fast_bytebus(fake_bus_id_t bus) {
+    for (int i = 0; i < 4; i++) {
+        fake_bus_stage_response(bus, reply, sizeof(reply), 6);
+        TEST_ASSERT_EQUAL_STRING(REPLY_STRIPPED ELM_PROMPT, elm_ask("0100\r"));
+    }
+    TEST_ASSERT_EQUAL_INT(30, elm327_reply_window(g_elm));
+}
 
+TEST(adaptive_timing_shortens_both_waits_during_fast_polling) {
     elm_echo_off();
     elm_kline_select("ATSP3\r");
-
-    /* Quick replies pull the window down as far as it will go. */
-    for (int i = 0; i < 6; i++) {
-        elm_exchange_at(6);
-    }
-    TEST_ASSERT_MSG(elm327_reply_window(g_elm) < 40,
-                    "six quick replies left the window at %u ms",
-                    elm327_reply_window(g_elm));
-
-    /* Now one that arrives after that window: nothing comes back. */
-    elm_exchange_at(elm327_reply_window(g_elm) + 10);
-    floor_after_failure = g_elm->adaptive_floor_ms;
-
-    TEST_ASSERT_MSG(floor_after_failure > 0,
-                    "a timeout taught the algorithm nothing");
-
-    /* The next request gets the full window, and is answered quickly. That
-     * single quick answer must not undo what the timeout established. */
-    elm_exchange_at(6);
-
-    TEST_ASSERT_MSG(elm327_reply_window(g_elm) >= floor_after_failure,
-                    "one quick reply pulled the window back to %u ms, under "
-                    "the %u ms that had already failed",
-                    elm327_reply_window(g_elm), floor_after_failure);
-}
-
-/**
- * The floor is evidence about one vehicle on one protocol, so a reset clears
- * it along with everything else learned. AT SP 0 deliberately does not: it
- * keeps whichever bus is working rather than tearing it down, so there is
- * nothing to forget.
- */
-TEST(the_learned_floor_is_forgotten_on_a_reset) {
-    elm_echo_off();
-    elm_kline_select("ATSP3\r");
-
-    for (int i = 0; i < 6; i++) {
-        elm_exchange_at(6);
-    }
-    elm_exchange_at(elm327_reply_window(g_elm) + 10);
-    TEST_ASSERT(g_elm->adaptive_floor_ms > 0);
-
-    elm_ask("ATZ\r");
-    TEST_ASSERT_EQUAL_INT(0, g_elm->adaptive_floor_ms);
-}
-
-TEST(adaptive_timing_is_on_by_default) {
-    /* "By default, Adaptive Timing option 1 (AT1) is enabled, and is the
-     * recommended setting." */
     TEST_ASSERT_EQUAL_INT(1, g_elm->settings.adaptive_timing);
-}
+    TEST_ASSERT_EQUAL_INT(200, elm327_reply_window(g_elm));
+    train_fast_bytebus(FAKE_BUS_KLINE);
 
-TEST(nothing_is_assumed_before_a_reply_has_been_timed) {
-    elm_echo_off();
-    elm_kline_select("ATSP3\r");
-
-    /* With no evidence there is nothing to shorten, so the full AT ST window
-     * stands. A window guessed at from nothing would be the one thing worse
-     * than a window that is too long. */
-    TEST_ASSERT_EQUAL_INT(0, g_elm->adaptive_ms);
-    TEST_ASSERT_EQUAL_INT(g_elm->settings.timeout, elm327_reply_window(g_elm));
-}
-
-TEST(the_window_shrinks_towards_what_the_vehicle_actually_does) {
-    elm_echo_off();
-    elm_kline_select("ATSP3\r");
-
-    elm_exchange_at(40);
-
-    /* "automatically sets the timeout value for you, to a value that is based
-     * on the actual response times that your vehicle is responding in" - and
-     * the datasheet's own example turns a 58 ms response into a window "in the
-     * range of 90 msec", a little over half again. */
-    TEST_ASSERT_EQUAL_INT(60, g_elm->adaptive_ms);
+    uint32_t before = fake_clock_ms();
+    elm_exchange_at(6);
+    TEST_ASSERT_EQUAL_INT(36, fake_clock_ms() - before);
+    before = fake_clock_ms();
+    TEST_ASSERT_EQUAL_STRING("NO DATA\r" ELM_PROMPT, elm_ask("0100\r"));
+    TEST_ASSERT_EQUAL_INT(30, fake_clock_ms() - before);
     TEST_ASSERT_EQUAL_INT(60, elm327_reply_window(g_elm));
 }
 
-TEST(the_datasheets_own_worked_example_lands_where_it_says) {
+TEST(reply_variation_adds_margin_beyond_the_recent_peak) {
     elm_echo_off();
     elm_kline_select("ATSP3\r");
-
-    /* "The engine controller responds very quickly, but the transmission
-     * takes considerably longer... the adaptive timing algorithm measures the
-     * longer transmission response times and will use them to set the
-     * timeout, likely to a value in the range of 90 msec." */
-    elm_exchange_at(58);
-
-    TEST_ASSERT_MSG(g_elm->adaptive_ms >= 80 && g_elm->adaptive_ms <= 100,
-                    "a 58 ms response should give a window near 90 ms, got %u",
-                    g_elm->adaptive_ms);
-}
-
-TEST(at_st_is_the_ceiling_the_algorithm_never_passes) {
-    elm_echo_off();
-    elm_kline_select("ATSP3\r");
-
-    /* AT ST 05 is 20 ms. "it always uses your AT ST hh setting as the maximum
-     * setting, and will never choose one which is longer." */
-    elm_ok("ATST05\r");
-    elm_exchange_at(60);
-
-    TEST_ASSERT_EQUAL_INT(20, elm327_reply_window(g_elm));
-}
-
-TEST(a_slower_reply_widens_the_window_at_once) {
-    elm_echo_off();
-    elm_kline_select("ATSP3\r");
-
-    elm_exchange_at(60);
-    uint16_t was = g_elm->adaptive_ms;
-
-    /* Still inside the 90 ms the last one taught it, so this reply is heard -
-     * and being one exchange late is a slow reading where being one exchange
-     * short is a reading that never arrives, so widening is immediate rather
-     * than gradual. */
-    elm_exchange_at(80);
-
-    TEST_ASSERT_MSG(g_elm->adaptive_ms > was,
-                    "an 80 ms reply after a 60 ms one should widen the window "
-                    "at once, went from %u to %u",
-                    was, g_elm->adaptive_ms);
-    TEST_ASSERT_MSG(g_elm->adaptive_ms >= 110,
-                    "and should clear the next reply of that length: %u",
-                    g_elm->adaptive_ms);
-}
-
-TEST(a_reply_slower_than_the_learned_window_costs_one_exchange_and_no_more) {
-    elm_echo_off();
-    elm_kline_select("ATSP3\r");
-
-    /* Twenty consistent quick replies, so the window is well down. */
-    for (int i = 0; i < 10; i++) {
-        elm_exchange_at(20);
+    for (int i = 0; i < 8; i++) {
+        elm_exchange_at(10);
+        elm_exchange_at(30);
     }
-    TEST_ASSERT(g_elm->adaptive_ms < 60);
-
-    /* Now the vehicle takes 120 ms - bus loading, a slower PID, a module that
-     * woke up. The reply falls outside the learned window and is missed. This
-     * is the cost of adaptive timing, and the datasheet's AT0 exists for
-     * anyone unwilling to pay it. */
-    TEST_ASSERT_EQUAL_STRING("NO DATA\r" ELM_PROMPT,
-                             (elm_exchange_at(120), fake_port_text(0)));
-
-    /* What matters is that it costs exactly one exchange: the miss drops
-     * everything learned, so the retry runs on the full AT ST window and
-     * succeeds. A window that stayed too short would cut off the very reply
-     * that would have corrected it. */
-    TEST_ASSERT_EQUAL_INT(0, g_elm->adaptive_ms);
-
-    fake_bus_reset_all();
-    elm_exchange_at(120);
-    TEST_ASSERT_MSG(g_elm->adaptive_ms >= 150,
-                    "the retry should have seen the 120 ms reply and learned "
-                    "from it, got %u",
-                    g_elm->adaptive_ms);
+    TEST_ASSERT_TRUE(elm327_reply_window(g_elm) > 45);
+    TEST_ASSERT_TRUE(elm327_reply_window(g_elm) < 100);
 }
 
-TEST(a_faster_vehicle_narrows_the_window_gradually) {
+TEST(a_slow_sample_is_remembered_then_ages_out_after_sustained_fast_replies) {
     elm_echo_off();
     elm_kline_select("ATSP3\r");
-
     elm_exchange_at(80);
-    uint16_t wide = g_elm->adaptive_ms;
-
-    elm_exchange_at(20);
-    uint16_t after_one = g_elm->adaptive_ms;
-
-    /* "As conditions such as bus loading, etc. change, the algorithm learns
-     * from them, and makes appropriate adjustments" - learns, rather than
-     * jumps: one quick reply on a busy bus must not commit the next request
-     * to a window that only suited that one. */
-    TEST_ASSERT_MSG(after_one < wide, "it should come down");
-    TEST_ASSERT_MSG(after_one > 30, "but not all at once: %u -> %u", wide,
-                    after_one);
-
-    for (int i = 0; i < 12; i++) {
-        elm_exchange_at(20);
-    }
-
-    TEST_ASSERT_MSG(g_elm->adaptive_ms <= 40,
-                    "and should settle near 30 ms after a dozen consistent "
-                    "exchanges, got %u",
-                    g_elm->adaptive_ms);
+    for (int i = 0; i < 15; i++)
+        elm_exchange_at(6);
+    TEST_ASSERT_TRUE(elm327_reply_window(g_elm) >= 120);
+    uint16_t wide = g_elm->timing.estimate_ms;
+    elm_exchange_at(6);
+    TEST_ASSERT_TRUE(g_elm->timing.estimate_ms < wide);
+    TEST_ASSERT_TRUE(g_elm->timing.estimate_ms > 30);
+    for (int i = 0; i < 40; i++)
+        elm_exchange_at(6);
+    TEST_ASSERT_EQUAL_INT(30, elm327_reply_window(g_elm));
 }
 
-TEST(an_exchange_that_drew_nothing_forgets_what_was_learned) {
+TEST(idle_widens_one_exchange_without_erasing_fast_history) {
     elm_echo_off();
     elm_kline_select("ATSP3\r");
-
-    elm_exchange_at(20);
-    TEST_ASSERT(g_elm->adaptive_ms != 0);
-
-    /* Nothing staged, so nothing answers. Without this the window that was
-     * too short would stay too short: the reply that would have corrected it
-     * is the one being cut off. */
-    TEST_ASSERT_EQUAL_STRING("NO DATA\r" ELM_PROMPT, elm_ask("0100\r"));
-
-    TEST_ASSERT_EQUAL_INT(0, g_elm->adaptive_ms);
-    TEST_ASSERT_EQUAL_INT(g_elm->settings.timeout, elm327_reply_window(g_elm));
+    train_fast_bytebus(FAKE_BUS_KLINE);
+    fake_clock_advance_ms(3000);
+    TEST_ASSERT_TRUE(elm327_reply_window(g_elm) > 30);
+    TEST_ASSERT_TRUE(elm327_reply_window(g_elm) < 200);
+    fake_clock_advance_ms(3000);
+    TEST_ASSERT_EQUAL_INT(200, elm327_reply_window(g_elm));
+    uint32_t before = fake_clock_ms();
+    elm_exchange_at(6);
+    TEST_ASSERT_EQUAL_INT(206, fake_clock_ms() - before);
+    TEST_ASSERT_EQUAL_INT(30, elm327_reply_window(g_elm));
 }
 
-TEST(at_at0_turns_the_whole_thing_off) {
+static void slow_reply_after_idle(fake_bus_id_t bus, const char *protocol) {
     elm_echo_off();
-    elm_kline_select("ATSP3\r");
-
-    elm_exchange_at(20);
-
-    /* "AT0 is used to disable Adaptive Timing (so the timeout is always as
-     * set by AT ST)". */
-    elm_ok("ATAT0\r");
-    TEST_ASSERT_EQUAL_INT(g_elm->settings.timeout, elm327_reply_window(g_elm));
-
-    elm_exchange_at(20);
-    TEST_ASSERT_EQUAL_INT(g_elm->settings.timeout, elm327_reply_window(g_elm));
+    if (bus == FAKE_BUS_KLINE)
+        elm_kline_select(protocol);
+    else
+        elm_ok(protocol);
+    train_fast_bytebus(bus);
+    fake_clock_advance_ms(6000);
+    fake_bus_stage_response(bus, reply, sizeof(reply), 80);
+    TEST_ASSERT_EQUAL_STRING(REPLY_STRIPPED ELM_PROMPT, elm_ask("0100\r"));
+    TEST_ASSERT_TRUE(g_elm->timing.estimate_ms >= 120);
+    TEST_ASSERT_EQUAL_INT(5, fake_bus_sent_count(bus));
 }
 
-TEST(at_at2_is_more_aggressive_than_at_at1) {
-    uint16_t at1, at2;
-
-    elm_echo_off();
-    elm_kline_select("ATSP3\r");
-    elm_exchange_at(40);
-    at1 = g_elm->adaptive_ms;
-
-    elm327_reset(g_elm);
-    fake_bus_reset_all();
-    elm_echo_off();
-    elm_kline_select("ATSP3\r");
-    elm_ok("ATAT2\r");
-    elm_exchange_at(40);
-    at2 = g_elm->adaptive_ms;
-
-    /* "AT2 [is] a more aggressive version of AT1". */
-    TEST_ASSERT_MSG(at2 < at1, "AT2 gave %u, AT1 gave %u", at2, at1);
+TEST(pwm_accepts_a_slow_reply_after_idle) {
+    slow_reply_after_idle(FAKE_BUS_J1850_PWM, "ATSP1\r");
 }
 
-TEST(changing_the_mode_drops_what_the_other_one_learned) {
-    elm_echo_off();
-    elm_kline_select("ATSP3\r");
-
-    elm_exchange_at(40);
-    TEST_ASSERT(g_elm->adaptive_ms != 0);
-
-    /* The two modes weigh the same measurement differently, so a window
-     * learned under one is not the window the other would have chosen. */
-    elm_ok("ATAT2\r");
-    TEST_ASSERT_EQUAL_INT(0, g_elm->adaptive_ms);
+TEST(vpw_accepts_a_slow_reply_after_idle) {
+    slow_reply_after_idle(FAKE_BUS_J1850_VPW, "ATSP2\r");
 }
 
-TEST(switching_protocol_drops_what_was_learned) {
+TEST(kline_accepts_a_slow_reply_after_idle) {
+    slow_reply_after_idle(FAKE_BUS_KLINE, "ATSP3\r");
+}
+
+TEST(idle_collection_still_allows_a_slow_second_ecu_after_a_fast_first) {
     elm_echo_off();
     elm_kline_select("ATSP3\r");
+    train_fast_bytebus(FAKE_BUS_KLINE);
+    fake_clock_advance_ms(6000);
+    fake_bus_stage_response(FAKE_BUS_KLINE, reply, sizeof(reply), 6);
+    fake_bus_stage_response(FAKE_BUS_KLINE, reply, sizeof(reply), 74);
+    TEST_ASSERT_EQUAL_STRING(REPLY_STRIPPED REPLY_STRIPPED ELM_PROMPT,
+                             elm_ask("0100\r"));
+    TEST_ASSERT_EQUAL_INT(80, g_elm->timing.watch.latency_ms);
+}
 
-    elm_exchange_at(40);
-    TEST_ASSERT(g_elm->adaptive_ms != 0);
-
-    /* A different bus answers in a different time. */
+TEST(a_late_pwm_reply_teaches_its_wire_latency_without_an_idle_reset) {
+    elm_echo_off();
     elm_ok("ATSP1\r");
-    TEST_ASSERT_EQUAL_INT(0, g_elm->adaptive_ms);
+    train_fast_bytebus(FAKE_BUS_J1850_PWM);
+    fake_bus_stage_response(FAKE_BUS_J1850_PWM, reply, sizeof(reply), 40);
+    TEST_ASSERT_EQUAL_STRING("NO DATA\r" ELM_PROMPT, elm_ask("0100\r"));
+    TEST_ASSERT_EQUAL_INT(4, g_elm->timing.count);
+    fake_clock_advance_ms(100);
+    elm327_frontend.poll();
+    TEST_ASSERT_EQUAL_STRING("NO DATA\r" ELM_PROMPT, fake_port_text(0));
+    TEST_ASSERT_EQUAL_INT(5, g_elm->timing.count);
+    TEST_ASSERT_EQUAL_INT(40, g_elm->timing.watch.latency_ms);
+    TEST_ASSERT_TRUE(g_elm->timing.estimate_ms >= 60 &&
+                     g_elm->timing.estimate_ms < 100);
+    fake_bus_stage_response(FAKE_BUS_J1850_PWM, reply, sizeof(reply), 40);
+    TEST_ASSERT_EQUAL_STRING(REPLY_STRIPPED ELM_PROMPT, elm_ask("0100\r"));
+    TEST_ASSERT_EQUAL_INT(6, fake_bus_sent_count(FAKE_BUS_J1850_PWM));
 }
 
-TEST(the_window_never_drops_below_what_a_bus_can_answer_in) {
+TEST(a_late_second_ecu_updates_the_same_exchange_sample) {
     elm_echo_off();
     elm_kline_select("ATSP3\r");
+    train_fast_bytebus(FAKE_BUS_KLINE);
+    fake_bus_stage_response(FAKE_BUS_KLINE, reply, sizeof(reply), 6);
+    fake_bus_stage_response(FAKE_BUS_KLINE, reply, sizeof(reply), 74);
+    TEST_ASSERT_EQUAL_STRING(REPLY_STRIPPED ELM_PROMPT, elm_ask("0100\r"));
+    fake_clock_advance_ms(60);
+    elm327_frontend.poll();
+    TEST_ASSERT_EQUAL_STRING(REPLY_STRIPPED ELM_PROMPT, fake_port_text(0));
+    TEST_ASSERT_EQUAL_INT(5, g_elm->timing.count);
+    TEST_ASSERT_EQUAL_INT(80, g_elm->timing.watch.latency_ms);
+    TEST_ASSERT_TRUE(g_elm->timing.estimate_ms >= 120);
+    fake_bus_stage_response(FAKE_BUS_KLINE, reply, sizeof(reply), 6);
+    fake_bus_stage_response(FAKE_BUS_KLINE, reply, sizeof(reply), 74);
+    TEST_ASSERT_EQUAL_STRING(REPLY_STRIPPED REPLY_STRIPPED ELM_PROMPT,
+                             elm_ask("01002\r"));
+}
 
-    /* An immediate reply must not teach the adapter to stop listening: ISO
-     * 14230-2 alone allows an ECU 50 ms, so a window under 20 could only ever
-     * cut off a reply that was on its way. */
-    for (int i = 0; i < 20; i++) {
-        elm_exchange_at(0);
+TEST(late_collection_extends_from_the_last_reply_and_keeps_the_at_st_cap) {
+    elm_echo_off();
+    elm_ok("ATSP2\r");
+    fake_bus_stage_response(FAKE_BUS_J1850_VPW, reply, sizeof(reply), 80);
+    elm_ask("0100\r");
+    TEST_ASSERT_EQUAL_INT(120, elm327_reply_window(g_elm));
+
+    /* The 250 ms reply exceeds TX + ST, but arrives within ST of the first
+     * reply at 80 ms. The learned 120 ms wait misses it on this exchange. */
+    fake_bus_stage_response(FAKE_BUS_J1850_VPW, reply, sizeof(reply), 80);
+    fake_bus_stage_response(FAKE_BUS_J1850_VPW, reply, sizeof(reply), 170);
+    TEST_ASSERT_EQUAL_STRING(REPLY_STRIPPED ELM_PROMPT, elm_ask("0100\r"));
+    fake_clock_advance_ms(50);
+    elm327_frontend.poll();
+    TEST_ASSERT_EQUAL_INT(200, elm327_reply_window(g_elm));
+    TEST_ASSERT_EQUAL_INT(2, g_elm->timing.count);
+    TEST_ASSERT_EQUAL_STRING(REPLY_STRIPPED ELM_PROMPT, fake_port_text(0));
+
+    fake_bus_stage_response(FAKE_BUS_J1850_VPW, reply, sizeof(reply), 80);
+    fake_bus_stage_response(FAKE_BUS_J1850_VPW, reply, sizeof(reply), 170);
+    TEST_ASSERT_EQUAL_STRING(REPLY_STRIPPED REPLY_STRIPPED ELM_PROMPT,
+                             elm_ask("0100\r"));
+    TEST_ASSERT_EQUAL_INT(3, fake_bus_sent_count(FAKE_BUS_J1850_VPW));
+}
+
+TEST(late_traffic_is_harvested_before_the_next_command_without_stale_output) {
+    elm_echo_off();
+    elm_kline_select("ATSP3\r");
+    train_fast_bytebus(FAKE_BUS_KLINE);
+    fake_bus_stage_response(FAKE_BUS_KLINE, reply, sizeof(reply), 80);
+    TEST_ASSERT_EQUAL_STRING("NO DATA\r" ELM_PROMPT, elm_ask("0100\r"));
+    fake_clock_advance_ms(60);
+    elm_exchange_at(6);
+    TEST_ASSERT_TRUE(g_elm->timing.estimate_ms >= 120);
+    TEST_ASSERT_EQUAL_INT(6, g_elm->timing.count);
+}
+
+TEST(missing_an_explicitly_requested_second_reply_backs_off) {
+    elm_echo_off();
+    elm_kline_select("ATSP3\r");
+    train_fast_bytebus(FAKE_BUS_KLINE);
+    for (int i = 0; i < 2; i++) {
+        fake_bus_stage_response(FAKE_BUS_KLINE, reply, sizeof(reply), 6);
+        TEST_ASSERT_EQUAL_STRING(REPLY_STRIPPED ELM_PROMPT, elm_ask("01002\r"));
+        TEST_ASSERT_EQUAL_INT(60u << i, elm327_reply_window(g_elm));
+        TEST_ASSERT_EQUAL_INT(5 + i, g_elm->timing.count);
     }
-
-    TEST_ASSERT_MSG(elm327_reply_window(g_elm) >= 20,
-                    "window collapsed to %u ms", elm327_reply_window(g_elm));
+    fake_bus_stage_response(FAKE_BUS_KLINE, reply, sizeof(reply), 6);
+    fake_bus_stage_response(FAKE_BUS_KLINE, reply, sizeof(reply), 74);
+    TEST_ASSERT_EQUAL_STRING(REPLY_STRIPPED REPLY_STRIPPED ELM_PROMPT,
+                             elm_ask("01002\r"));
+    TEST_ASSERT_FALSE(g_elm->timing.incomplete);
+    TEST_ASSERT_EQUAL_INT(7, fake_bus_sent_count(FAKE_BUS_KLINE));
 }
 
-TEST(a_protocol_search_keeps_a_floor_under_the_window) {
+TEST(late_observation_stops_at_the_next_command_and_the_at_st_limit) {
     elm_echo_off();
     elm_kline_select("ATSP3\r");
+    train_fast_bytebus(FAKE_BUS_KLINE);
+    fake_bus_stage_response(FAKE_BUS_KLINE, reply, sizeof(reply), 80);
+    elm_ask("0100\r");
+    elm_ok("ATH1\r");
+    fake_clock_advance_ms(100);
+    elm327_frontend.poll();
+    TEST_ASSERT_EQUAL_INT(4, g_elm->timing.count);
+    TEST_ASSERT_EQUAL_INT(60, g_elm->timing.estimate_ms);
 
-    /* "during protocol searches, an internally set minimum time is used - you
-     * may select longer times with AT ST, but not shorter ones." A search
-     * that gives up on a protocol early reports the wrong protocol, which is
-     * a far worse failure than a slow one. */
-    elm_ok("ATST05\r"); /* 20 ms */
-    elm_exchange_at(10);
+    fake_bus_stage_response(FAKE_BUS_KLINE, reply, sizeof(reply), 250);
+    elm_ask("0100\r");
+    fake_clock_advance_ms(300);
+    elm327_frontend.poll();
+    TEST_ASSERT_EQUAL_INT(4, g_elm->timing.count);
+}
 
+TEST(late_learning_ignores_other_pids_addresses_and_driver_status_frames) {
+    elm_echo_off();
+    elm_kline_select("ATSP3\r");
+    train_fast_bytebus(FAKE_BUS_KLINE);
+    uint8_t different[sizeof(reply)];
+    memcpy(different, reply, sizeof(reply));
+    different[4] = 0x01;
+    fake_bus_stage_response(FAKE_BUS_KLINE, different, sizeof(different), 40);
+    memcpy(different, reply, sizeof(reply));
+    different[1] = 0x44;
+    fake_bus_stage_response(FAKE_BUS_KLINE, different, sizeof(different), 5);
+    const uint32_t statuses[] = {BUS_RX_TX_MSG_TYPE,  BUS_RX_PERIODIC_REPLY,
+                                 BUS_RX_BAD_CHECKSUM, BUS_RX_BUFFER_OVERFLOW,
+                                 BUS_RX_DUPLICATE,    BUS_RX_BREAK,
+                                 BUS_RX_START_OF_MSG, BUS_RX_LINK_DOWN};
+    for (unsigned i = 0; i < sizeof(statuses) / sizeof(statuses[0]); i++)
+        fake_bus_stage_response_status(FAKE_BUS_KLINE, reply, sizeof(reply), 5,
+                                       statuses[i]);
+    elm_ask("0100\r");
+    fake_clock_advance_ms(100);
+    elm327_frontend.poll();
+    TEST_ASSERT_EQUAL_INT(4, g_elm->timing.count);
+    TEST_ASSERT_EQUAL_INT(60, g_elm->timing.estimate_ms);
+}
+
+TEST(late_driver_timestamps_work_across_the_32_bit_microsecond_wrap) {
+    uint32_t wrap_ms = UINT32_MAX / 1000;
+    fake_clock_advance_ms(wrap_ms - 500);
+    elm_echo_off();
+    elm_kline_select("ATSP3\r");
+    train_fast_bytebus(FAKE_BUS_KLINE);
+    /* Position the following request just before the timestamp wraps. */
+    fake_clock_advance_ms(wrap_ms - 20 - fake_clock_ms());
+    fake_bus_stage_response(FAKE_BUS_KLINE, reply, sizeof(reply), 80);
+    elm_ask("0100\r");
+    fake_clock_advance_ms(60);
+    elm327_frontend.poll();
+    TEST_ASSERT_EQUAL_INT(80, g_elm->timing.watch.latency_ms);
+}
+
+TEST(timeouts_back_off_without_inventing_response_samples) {
+    elm_echo_off();
+    elm_kline_select("ATSP3\r");
+    train_fast_bytebus(FAKE_BUS_KLINE);
+    const uint32_t windows[] = {30, 60, 120, 200};
+    for (unsigned i = 0; i < 4; i++) {
+        uint32_t before = fake_clock_ms();
+        TEST_ASSERT_EQUAL_STRING("NO DATA\r" ELM_PROMPT, elm_ask("0100\r"));
+        TEST_ASSERT_EQUAL_INT(windows[i], fake_clock_ms() - before);
+        TEST_ASSERT_EQUAL_INT(4, g_elm->timing.count);
+    }
+    for (int i = 0; i < 40; i++)
+        elm_exchange_at(6);
+    TEST_ASSERT_EQUAL_INT(30, elm327_reply_window(g_elm));
+}
+
+TEST(disabled_responses_count_zero_and_send_failure_do_not_train) {
+    elm_echo_off();
+    elm_kline_select("ATSP3\r");
+    train_fast_bytebus(FAKE_BUS_KLINE);
+    elm_ok("ATR0\r");
+    fake_bus_stage_response(FAKE_BUS_KLINE, reply, sizeof(reply), 80);
+    TEST_ASSERT_EQUAL_STRING(ELM_PROMPT, elm_ask("0100\r"));
+    fake_clock_advance_ms(100);
+    elm327_frontend.poll();
+    elm_ok("ATR1\r");
+    TEST_ASSERT_EQUAL_STRING(ELM_PROMPT, elm_ask("01000\r"));
+    fake_bus_fail_next_send(FAKE_BUS_KLINE);
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("0100\r"));
+    TEST_ASSERT_EQUAL_INT(30, g_elm->timing.estimate_ms);
+    TEST_ASSERT_EQUAL_INT(4, g_elm->timing.count);
+    TEST_ASSERT_FALSE(g_elm->timing.watch.active);
+}
+
+TEST(at_st_caps_both_waits_and_the_search_minimum_is_preserved) {
+    elm_echo_off();
+    elm_kline_select("ATSP3\r");
+    elm_ok("ATST05\r");
+    uint32_t before = fake_clock_ms();
+    elm_exchange_at(6);
+    TEST_ASSERT_EQUAL_INT(26, fake_clock_ms() - before);
     TEST_ASSERT_EQUAL_INT(20, elm327_reply_window(g_elm));
-
     g_elm->in_search = true;
-    TEST_ASSERT_MSG(elm327_reply_window(g_elm) >= 200,
-                    "a search should not run with a %u ms window",
-                    elm327_reply_window(g_elm));
+    TEST_ASSERT_EQUAL_INT(200, elm327_reply_window(g_elm));
     g_elm->in_search = false;
+}
+
+TEST(at_at0_uses_fixed_timing_and_at_at2_has_a_smaller_margin) {
+    elm_echo_off();
+    elm_kline_select("ATSP3\r");
+    elm_exchange_at(58);
+    TEST_ASSERT_EQUAL_INT(87, elm327_reply_window(g_elm));
+    elm_ok("ATAT2\r");
+    TEST_ASSERT_EQUAL_INT(0, g_elm->timing.count);
+    elm_exchange_at(58);
+    TEST_ASSERT_EQUAL_INT(73, elm327_reply_window(g_elm));
+    elm_ok("ATAT0\r");
+    uint32_t before = fake_clock_ms();
+    elm_exchange_at(6);
+    TEST_ASSERT_EQUAL_INT(206, fake_clock_ms() - before);
+    TEST_ASSERT_EQUAL_INT(200, elm327_reply_window(g_elm));
+    TEST_ASSERT_EQUAL_INT(0, g_elm->timing.count);
+}
+
+TEST(an_immediate_reply_is_a_timing_sample_and_reset_clears_history) {
+    elm_echo_off();
+    elm_kline_select("ATSP3\r");
+    elm_exchange_at(0);
+    TEST_ASSERT_EQUAL_INT(1, g_elm->timing.samples[0]);
+    TEST_ASSERT_EQUAL_INT(30, elm327_reply_window(g_elm));
+    elm_ok("ATSP1\r");
+    TEST_ASSERT_EQUAL_INT(0, g_elm->timing.count);
+    TEST_ASSERT_EQUAL_INT(200, elm327_reply_window(g_elm));
+    fake_bus_stage_response(FAKE_BUS_J1850_PWM, reply, sizeof(reply), 6);
+    elm_ask("0100\r");
+    elm_ask("ATZ\r");
+    TEST_ASSERT_EQUAL_INT(0, g_elm->timing.count);
+    TEST_ASSERT_EQUAL_INT(0, g_elm->timing.estimate_ms);
+    TEST_ASSERT_FALSE(g_elm->timing.watch.active);
 }
 
 /* ------------------------------------------------------------------ *

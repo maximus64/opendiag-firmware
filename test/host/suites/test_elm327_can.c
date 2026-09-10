@@ -40,6 +40,221 @@ static void on_can_29bit(void) {
 static const uint8_t supported_pids[8] = {0x06, 0x41, 0x00, 0xBE,
                                           0x3F, 0xB8, 0x13, 0x00};
 
+TEST(can_adaptive_timing_accepts_a_slow_first_reply_after_idle) {
+    elm_echo_off();
+    elm_ok(CAN_11BIT_500K);
+    for (int i = 0; i < 4; i++) {
+        fake_can_stage_response(0x7E8, 8, supported_pids, 6);
+        TEST_ASSERT_EQUAL_STRING("41 00 BE 3F B8 13 \r" ELM_PROMPT,
+                                 elm_ask("0100\r"));
+    }
+    TEST_ASSERT_TRUE(elm327_reply_window(g_elm) == 30);
+
+    fake_clock_advance_ms(6000);
+    fake_can_stage_response(0x7E8, 8, supported_pids, 80);
+    TEST_ASSERT_EQUAL_STRING("41 00 BE 3F B8 13 \r" ELM_PROMPT,
+                             elm_ask("0100\r"));
+    TEST_ASSERT_TRUE(g_elm->timing.estimate_ms >= 120);
+    TEST_ASSERT_EQUAL_INT(5, fake_can_sent_count());
+}
+
+TEST(can_collection_does_not_shorten_another_ecus_response_pending_wait) {
+    static const uint8_t pending[8] = {0x03, 0x7F, 0x01, 0x78};
+    on_can_11bit();
+    fake_can_stage_response(0x7E8, 8, pending, 5);
+    fake_can_stage_response(0x7E9, 8, supported_pids, 5);
+    fake_can_stage_response(0x7E8, 8, supported_pids, 500);
+
+    TEST_ASSERT_EQUAL_STRING("7E8 03 7F 01 78 00 00 00 00 \r"
+                             "7E9 06 41 00 BE 3F B8 13 00 \r"
+                             "7E8 06 41 00 BE 3F B8 13 00 \r" ELM_PROMPT,
+                             elm_ask("0100\r"));
+}
+
+TEST(can_fast_polling_stays_short_and_a_late_second_ecu_updates_timing) {
+    on_can_11bit();
+    fake_can_stage_response(0x7E8, 8, supported_pids, 6);
+    elm_ask("0100\r");
+    uint32_t before = fake_clock_ms();
+    fake_can_stage_response(0x7E8, 8, supported_pids, 6);
+    fake_can_stage_response(0x7E9, 8, supported_pids, 74);
+    TEST_ASSERT_EQUAL_STRING("7E8 06 41 00 BE 3F B8 13 00 \r" ELM_PROMPT,
+                             elm_ask("0100\r"));
+    TEST_ASSERT_EQUAL_INT(36, fake_clock_ms() - before);
+    fake_clock_advance_ms(100);
+    elm327_frontend.poll();
+    TEST_ASSERT_EQUAL_INT(80, g_elm->timing.watch.latency_ms);
+    TEST_ASSERT_EQUAL_INT(2, g_elm->timing.count);
+    TEST_ASSERT_TRUE(g_elm->timing.estimate_ms >= 120);
+    TEST_ASSERT_EQUAL_STRING("7E8 06 41 00 BE 3F B8 13 00 \r" ELM_PROMPT,
+                             fake_port_text(0));
+
+    fake_can_stage_response(0x7E8, 8, supported_pids, 6);
+    fake_can_stage_response(0x7E9, 8, supported_pids, 74);
+    TEST_ASSERT_EQUAL_STRING("7E8 06 41 00 BE 3F B8 13 00 \r"
+                             "7E9 06 41 00 BE 3F B8 13 00 \r" ELM_PROMPT,
+                             elm_ask("01002\r"));
+    TEST_ASSERT_EQUAL_INT(3, fake_can_sent_count());
+}
+
+TEST(can_late_learning_respects_the_physical_destination_and_pid) {
+    on_can_11bit();
+    elm_ok("ATSH7E0\r");
+    fake_can_stage_response(0x7E8, 8, supported_pids, 6);
+    elm_ask("0100\r");
+    fake_can_stage_response(0x7E9, 8, supported_pids, 40);
+    uint8_t different[8];
+    memcpy(different, supported_pids, sizeof(different));
+    different[2] = 0x01;
+    fake_can_stage_response(0x7E8, 8, different, 10);
+    TEST_ASSERT_EQUAL_STRING("NO DATA\r" ELM_PROMPT, elm_ask("0100\r"));
+    fake_clock_advance_ms(100);
+    elm327_frontend.poll();
+    TEST_ASSERT_EQUAL_INT(1, g_elm->timing.count);
+    TEST_ASSERT_EQUAL_INT(60, g_elm->timing.estimate_ms);
+}
+
+TEST(can_missing_an_explicit_reply_count_widens_the_next_window) {
+    on_can_11bit();
+    fake_can_stage_response(0x7E8, 8, supported_pids, 6);
+    elm_ask("0100\r");
+    fake_can_stage_response(0x7E8, 8, supported_pids, 6);
+    TEST_ASSERT_EQUAL_STRING("7E8 06 41 00 BE 3F B8 13 00 \r" ELM_PROMPT,
+                             elm_ask("01002\r"));
+    TEST_ASSERT_TRUE(g_elm->timing.incomplete);
+    TEST_ASSERT_EQUAL_INT(60, elm327_reply_window(g_elm));
+}
+
+TEST(can_late_first_frame_is_observed_without_sending_flow_control) {
+    static const uint8_t first[8] = {0x10, 0x0A, 0x49, 0x02,
+                                     0x01, 'V',  'I',  'N'};
+    on_can_29bit();
+    fake_can_stage_response(0x18DAF110 | CAN_EFF_FLAG, 8, supported_pids, 6);
+    elm_ask("0100\r");
+    fake_can_stage_response(0x18DAF110 | CAN_EFF_FLAG, 8, first, 80);
+    TEST_ASSERT_EQUAL_STRING("NO DATA\r" ELM_PROMPT, elm_ask("0902\r"));
+    fake_clock_advance_ms(100);
+    elm327_frontend.poll();
+    TEST_ASSERT_EQUAL_INT(80, g_elm->timing.watch.latency_ms);
+    TEST_ASSERT_EQUAL_INT(2, fake_can_sent_count());
+}
+
+TEST(can_late_pending_reply_teaches_timing_and_preserves_the_final_reply) {
+    static const uint8_t pending[8] = {3, 0x7F, 1, 0x78};
+    on_can_11bit();
+    fake_can_stage_response(0x7E8, 8, supported_pids, 6);
+    elm_ask("0100\r");
+    /* ECU A replies at 6 ms; ECU B sends pending at 40 ms and final at 500 ms.
+     * The learned 30 ms wait initially ends this exchange at 36 ms. */
+    fake_can_stage_response(0x7E8, 8, supported_pids, 6);
+    fake_can_stage_response(0x7E9, 8, pending, 34);
+    fake_can_stage_response(0x7E9, 8, supported_pids, 460);
+    TEST_ASSERT_EQUAL_STRING("7E8 06 41 00 BE 3F B8 13 00 \r" ELM_PROMPT,
+                             elm_ask("0100\r"));
+
+    fake_clock_advance_ms(14);
+    elm327_frontend.poll();
+    TEST_ASSERT_TRUE(elm327_reply_window(g_elm) >= 60);
+    fake_clock_advance_ms(450);
+    elm327_frontend.poll();
+    TEST_ASSERT_EQUAL_INT(200, elm327_reply_window(g_elm));
+    TEST_ASSERT_EQUAL_INT(2, g_elm->timing.count);
+    TEST_ASSERT_EQUAL_STRING("7E8 06 41 00 BE 3F B8 13 00 \r" ELM_PROMPT,
+                             fake_port_text(0));
+
+    fake_can_stage_response(0x7E8, 8, supported_pids, 6);
+    fake_can_stage_response(0x7E9, 8, pending, 34);
+    fake_can_stage_response(0x7E9, 8, supported_pids, 460);
+    TEST_ASSERT_EQUAL_STRING("7E8 06 41 00 BE 3F B8 13 00 \r"
+                             "7E9 03 7F 01 78 00 00 00 00 \r"
+                             "7E9 06 41 00 BE 3F B8 13 00 \r" ELM_PROMPT,
+                             elm_ask("0100\r"));
+    TEST_ASSERT_EQUAL_INT(3, fake_can_sent_count());
+}
+
+TEST(can_delayed_observation_handles_pending_at_the_same_timestamp) {
+    static const uint8_t pending[8] = {3, 0x7F, 1, 0x78};
+    on_can_11bit();
+    fake_can_stage_response(0x7E8, 8, supported_pids, 6);
+    elm_ask("0100\r");
+    fake_can_stage_response(0x7E8, 8, supported_pids, 6);
+    fake_can_stage_response(0x7E9, 8, supported_pids, 34);
+    fake_can_stage_response(0x7EA, 8, pending, 0);
+    fake_can_stage_response(0x7EA, 8, supported_pids, 460);
+    elm_ask("0100\r");
+
+    /* The poll runs after the original deadline. Both 40 ms replies must be
+     * processed before the pending notification can admit the 500 ms reply. */
+    fake_clock_advance_ms(600);
+    elm327_frontend.poll();
+    TEST_ASSERT_EQUAL_INT(500, g_elm->timing.watch.latency_ms);
+    TEST_ASSERT_EQUAL_INT(200, elm327_reply_window(g_elm));
+    TEST_ASSERT_EQUAL_INT(2, g_elm->timing.count);
+    TEST_ASSERT_EQUAL_INT(2, fake_can_sent_count());
+    TEST_ASSERT_EQUAL_STRING("7E8 06 41 00 BE 3F B8 13 00 \r" ELM_PROMPT,
+                             fake_port_text(0));
+}
+
+TEST(can_late_collection_extends_from_each_matching_reply) {
+    on_can_11bit();
+    fake_can_stage_response(0x7E8, 8, supported_pids, 80);
+    elm_ask("0100\r");
+    fake_can_stage_response(0x7E8, 8, supported_pids, 80);
+    fake_can_stage_response(0x7E9, 8, supported_pids, 170);
+    fake_can_stage_response(0x7EA, 8, supported_pids, 170);
+    elm_ask("0100\r");
+
+    fake_clock_advance_ms(50);
+    elm327_frontend.poll();
+    TEST_ASSERT_EQUAL_INT(250, g_elm->timing.watch.latency_ms);
+    TEST_ASSERT_EQUAL_INT(200, elm327_reply_window(g_elm));
+    fake_clock_advance_ms(170);
+    elm327_frontend.poll();
+    TEST_ASSERT_EQUAL_INT(420, g_elm->timing.watch.latency_ms);
+    TEST_ASSERT_EQUAL_INT(2, g_elm->timing.count);
+    TEST_ASSERT_EQUAL_STRING("7E8 06 41 00 BE 3F B8 13 00 \r" ELM_PROMPT,
+                             fake_port_text(0));
+}
+
+TEST(can_unrelated_late_traffic_does_not_extend_the_collection_deadline) {
+    uint8_t other_pid[8];
+    memcpy(other_pid, supported_pids, sizeof(other_pid));
+    other_pid[2] = 1;
+    on_can_11bit();
+    fake_can_stage_response(0x7E8, 8, supported_pids, 80);
+    elm_ask("0100\r");
+    fake_can_stage_response(0x7E8, 8, supported_pids, 80);
+    fake_can_stage_response(0x7E9, 8, other_pid, 170);
+    fake_can_stage_response(0x7EA, 8, supported_pids, 100);
+    elm_ask("0100\r");
+    fake_clock_advance_ms(200);
+    elm327_frontend.poll();
+    TEST_ASSERT_EQUAL_INT(80, g_elm->timing.watch.latency_ms);
+    TEST_ASSERT_EQUAL_INT(120, elm327_reply_window(g_elm));
+    TEST_ASSERT_FALSE(g_elm->timing.watch.active);
+}
+
+TEST(can_late_learning_accepts_services_above_3f) {
+    static const uint8_t answer[8] = {2, 0xC5, 1};
+    on_can_11bit();
+    fake_can_stage_response(0x7E8, 8, answer, 6);
+    elm_ask("8501\r");
+    fake_can_stage_response(0x7E8, 8, answer, 6);
+    fake_can_stage_response(0x7E9, 8, answer, 74);
+    TEST_ASSERT_EQUAL_STRING("7E8 02 C5 01 00 00 00 00 00 \r" ELM_PROMPT,
+                             elm_ask("8501\r"));
+    fake_clock_advance_ms(60);
+    elm327_frontend.poll();
+    TEST_ASSERT_TRUE(elm327_reply_window(g_elm) >= 120);
+
+    fake_can_stage_response(0x7E8, 8, answer, 6);
+    fake_can_stage_response(0x7E9, 8, answer, 74);
+    TEST_ASSERT_EQUAL_STRING("7E8 02 C5 01 00 00 00 00 00 \r"
+                             "7E9 02 C5 01 00 00 00 00 00 \r" ELM_PROMPT,
+                             elm_ask("85012\r"));
+    TEST_ASSERT_EQUAL_INT(3, fake_can_sent_count());
+}
+
 /* ------------------------------------------------------------------ *
  * Request framing
  * ------------------------------------------------------------------ */

@@ -79,6 +79,8 @@ typedef struct {
     void (*feed)(const uint8_t *data, size_t len);
     void (*poll)(void);
     void (*stop)(void);
+    /** Poll cadence; zero uses the default for streaming frontends. */
+    uint32_t poll_interval_ms;
 } vif_frontend_t;
 
 /**

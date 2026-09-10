@@ -9,6 +9,7 @@
 #include "esp_flash.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "ble_uart.h"
 #include "can_xfer.h"
 #include "common.h"
@@ -26,6 +27,7 @@
 #define ELM327_TX_BUF 512
 
 #define DEFAULT_TIMEOUT_MS 200
+#define ELM327_TIMING_SAMPLES 16
 
 #define TAG "ELM327_AT"
 
@@ -189,6 +191,36 @@ typedef struct {
     uint8_t wakeup_len;
 } elm327_settings_t;
 
+/* Timing evidence belongs to one exchange until the next command. */
+typedef struct {
+    bool active;
+    int64_t sent_us;
+    /* Both times are relative to TX; only history samples are capped by ST. */
+    uint32_t deadline_ms;
+    uint32_t latency_ms;
+    int sample; /* History slot, or -1 until a reply has been recorded. */
+    uint8_t request[8];
+    uint8_t request_len;
+} elm327_reply_watch_t;
+
+typedef struct {
+    uint16_t estimate_ms;
+    uint16_t samples[ELM327_TIMING_SAMPLES];
+    uint8_t count;
+    uint8_t next;
+    int64_t last_exchange_us;
+    /* Selected at TX; never shortened during the exchange. */
+    uint32_t window_ms;
+    bool incomplete;
+    elm327_reply_watch_t watch;
+} elm327_timing_t;
+
+typedef enum {
+    ELM327_REPLY_NONE,
+    ELM327_REPLY_NORMAL,
+    ELM327_REPLY_PENDING,
+} elm327_reply_kind_t;
+
 /**
  * @brief The interpreter's state: a grammar, and the client it speaks to.
  *
@@ -205,48 +237,7 @@ typedef struct {
     elm327_settings_t settings;
     elm327_line_t line;
 
-    /**
-     * What adaptive timing has learned about this vehicle, milliseconds.
-     *
-     * Zero until a reply has been timed, and returned to zero whenever an
-     * exchange draws nothing at all - see elm327_note_latency(). It lives on
-     * here rather than in the settings because it is an observation
-     * rather than a setting: AT Z clears it, but so does changing protocol,
-     * and no client can set it directly.
-     */
-    uint16_t adaptive_ms;
-
-    /**
-     * The shortest window this vehicle has already proved is not enough.
-     *
-     * Without it the algorithm cannot learn from a timeout, only from a
-     * reply, and on a module whose response latency varies it oscillates:
-     * a run of quick answers pulls the window down to the floor, the next
-     * slow answer misses it, the timeout throws away everything learned, the
-     * full window then succeeds with a quick answer, and the window is pulled
-     * straight back down to where it just failed. Every other request fails,
-     * indefinitely, and the counters show a perfectly healthy bus.
-     *
-     * That is not hypothetical - it is what the J1850 PWM module on the bench
-     * does. Its reply lands anywhere between 5.7 and 21.1 ms, and
-     * ELM327_ADAPTIVE_MIN_MS is 20, so roughly one reply in ten arrives just
-     * after the window the previous nine taught the algorithm to use.
-     *
-     * So a window that expired empty raises this floor above itself, and no
-     * amount of subsequent good luck lets the window back under it. Cleared
-     * with adaptive_ms, which means AT Z and any change of protocol.
-     */
-    uint16_t adaptive_floor_ms;
-
-    /**
-     * How long after the request the most recent reply arrived, milliseconds.
-     *
-     * Written by whichever transfer path is running and read once by the
-     * dispatcher. It lives here rather than being returned because the CAN
-     * path alone has five exits, and a measurement that has to be repeated at
-     * each of them is a measurement that will be missed at one.
-     */
-    uint32_t last_latency_ms;
+    elm327_timing_t timing;
 
     /**
      * The protocol an automatic search should try before any other.
@@ -413,9 +404,7 @@ static void elm327_load_defaults(elm327_ctx_t *e) {
     e->settings.tx_filter = 0;
     e->settings.ifr_mode = ELM327_IFR_AUTO;
     e->settings.ifr_from_source = false;
-    e->adaptive_ms = 0;
-    e->adaptive_floor_ms = 0;
-    e->last_latency_ms = 0;
+    memset(&e->timing, 0, sizeof(e->timing));
     e->search_first = 0;
     e->settings.iso_init_address = KLINE_INIT_ADDR_OBD;
     e->settings.key_word_check = true;
@@ -734,8 +723,7 @@ static int elm327_set_protocol(elm327_ctx_t *e, int proto) {
         return 0;
     }
 
-    e->adaptive_ms = 0;
-    e->adaptive_floor_ms = 0;
+    memset(&e->timing, 0, sizeof(e->timing));
 
     if (vif_bus_release_all(VIF_OWNER_LINK) != ESP_OK)
         return -1;
@@ -751,8 +739,7 @@ static int elm327_set_protocol(elm327_ctx_t *e, int proto) {
 
     /* A different bus answers in a different time. What was learned about the
      * last one says nothing about this one. */
-    e->adaptive_ms = 0;
-    e->adaptive_floor_ms = 0;
+    memset(&e->timing, 0, sizeof(e->timing));
 
     e->settings.header_id = header_id;
     e->settings.current_protocol = proto;
@@ -1155,8 +1142,7 @@ static void elm327_at_command_handler(elm327_ctx_t *e, const char *cmd) {
         e->settings.adaptive_timing = (uint8_t)(cmd[2] - '0');
         /* The two modes weigh the same measurement differently, so what was
          * learned under one is not what the other would have concluded. */
-        e->adaptive_ms = 0;
-        e->adaptive_floor_ms = 0;
+        memset(&e->timing, 0, sizeof(e->timing));
         ESP_LOGI(TAG, "Adaptive timing %s",
                  e->settings.adaptive_timing ? "on" : "off");
         elm327_send_string(e, "OK\r");
@@ -1529,156 +1515,184 @@ static void elm327_print_can_frame(elm327_ctx_t *e, uint32_t id, uint8_t dlc,
     elm327_send_string(e, outstr);
 }
 
-/* ------------------------------------------------------------------ *
- * Adaptive timing - AT AT0, AT1, AT2
- * ------------------------------------------------------------------ *
- *
- * The datasheet describes the problem exactly: "The ELM327 sends a request
- * then waits up to 200 msec for a reply... After each reply has been
- * received, the ELM327 must wait to see if any more replies are coming."
- * With a vehicle answering in 50 ms and a 200 ms window, most of every
- * exchange is spent waiting for a reply that already arrived.
- *
- * Adaptive timing "automatically sets the timeout value for you, to a value
- * that is based on the actual response times that your vehicle is responding
- * in", and "always uses your AT ST hh setting as the maximum setting, and
- * will never choose one which is longer".
- *
- * The datasheet's worked example is what fixes the margin: a J1850 VPW
- * vehicle answering at 4 ms and 58 ms is said to settle "likely to a value in
- * the range of 90 msec" - a little over one and a half times the slowest
- * response. AT2 is documented only as "a little more aggressive", so it takes
- * a smaller margin over the same measurement.
- */
-
-/** AT1: the datasheet's 58 ms observation becoming a 90 ms window. */
-#define ELM327_ADAPTIVE_NUM_AT1 3
-#define ELM327_ADAPTIVE_DEN_AT1 2
-
-/** AT2, "a little more aggressive". */
-#define ELM327_ADAPTIVE_NUM_AT2 5
-#define ELM327_ADAPTIVE_DEN_AT2 4
-
-/**
- * @brief Shortest window adaptive timing will choose.
- *
- * Nothing on these buses can answer faster than this and still be answering
- * the request that was just sent - ISO 14230-2 alone allows an ECU 50 ms - so
- * a window below it could only ever cut off a reply that was on its way.
- */
-#define ELM327_ADAPTIVE_MIN_MS 20
-
-/**
- * @brief Floor on the window while the automatic search is running.
- *
- * "Also, during protocol searches, an internally set minimum time is used -
- * you may select longer times with AT ST, but not shorter ones." A search
- * that gives up on a protocol early reports the wrong protocol, not a slow
- * one, so this floor applies whatever AT ST and adaptive timing say.
+/* OpenDIAG adaptive policy: recent peak plus a margin for response variation.
  */
 #define ELM327_SEARCH_MIN_MS 200
+#define ELM327_RESPONSE_PENDING_MS 3000
+#define ELM327_ADAPTIVE_MIN_AT1_MS 30
+#define ELM327_ADAPTIVE_MIN_AT2_MS 20
+#define ELM327_ADAPTIVE_IDLE_START_MS 1000
+#define ELM327_ADAPTIVE_IDLE_FULL_MS 5000
 
-/**
- * @brief How long to wait for the next reply, in milliseconds.
- *
- * AT ST is the ceiling in every case; the datasheet is explicit that the
- * algorithm "will never choose one which is longer".
- */
+static uint32_t elm327_timeout_limit(const elm327_ctx_t *e) {
+    uint32_t limit = (uint32_t)e->settings.timeout;
+    if (e->in_search && limit < ELM327_SEARCH_MIN_MS)
+        limit = ELM327_SEARCH_MIN_MS;
+    return limit;
+}
+
 static uint32_t elm327_reply_window(const elm327_ctx_t *e) {
-    uint32_t window = (uint32_t)e->settings.timeout;
+    uint32_t limit = elm327_timeout_limit(e);
+    uint32_t window = e->timing.estimate_ms;
 
-    if (e->settings.adaptive_timing != 0 && e->adaptive_ms != 0) {
-        uint32_t learned = e->adaptive_ms;
-
-        if (learned < ELM327_ADAPTIVE_MIN_MS) {
-            learned = ELM327_ADAPTIVE_MIN_MS;
-        }
-        if (learned < window) {
-            window = learned;
+    if (!e->settings.adaptive_timing || !window || e->in_search)
+        return limit;
+    if (window > limit)
+        window = limit;
+    /* Widen an idle exchange temporarily without erasing the learned history.
+     */
+    if (e->timing.last_exchange_us) {
+        int64_t idle_ms =
+            (esp_timer_get_time() - e->timing.last_exchange_us) / 1000;
+        if (idle_ms >= ELM327_ADAPTIVE_IDLE_FULL_MS)
+            return limit;
+        if (idle_ms > ELM327_ADAPTIVE_IDLE_START_MS) {
+            window +=
+                (limit - window) * (idle_ms - ELM327_ADAPTIVE_IDLE_START_MS) /
+                (ELM327_ADAPTIVE_IDLE_FULL_MS - ELM327_ADAPTIVE_IDLE_START_MS);
         }
     }
-
-    if (e->in_search && window < ELM327_SEARCH_MIN_MS) {
-        window = ELM327_SEARCH_MIN_MS;
-    }
-
     return window;
 }
 
-/**
- * @brief Feed the algorithm one exchange's worth of evidence.
- *
- * @param latency_ms How long after the request the last reply arrived, or
- *                   zero when the exchange drew nothing at all.
- *
- * Two rules, and the asymmetry between them is the whole safety argument:
- *
- * - A slower vehicle than expected raises the window immediately. Being one
- *   exchange late is a slow reading; being one exchange short is a reading
- *   that never arrives.
- * - A faster one lowers it gradually, which is what "as conditions such as
- *   bus loading, etc. change, the algorithm learns from them" asks for -
- *   a single quick reply on a busy bus should not commit the next request to
- *   a window that only suited that one.
- *
- * An exchange that drew nothing forgets everything learned, so the next
- * request waits the full AT ST window. Without that, one window that turned
- * out to be too short would keep being too short: the reply that would have
- * corrected it is the one being cut off.
- */
-static void elm327_note_latency(elm327_ctx_t *e, uint32_t latency_ms) {
-    uint32_t target;
+static uint32_t elm327_latency_margin(const elm327_ctx_t *e,
+                                      uint32_t latency_ms) {
+    uint32_t limit = elm327_timeout_limit(e);
+    bool aggressive = e->settings.adaptive_timing == 2;
+    uint32_t minimum =
+        aggressive ? ELM327_ADAPTIVE_MIN_AT2_MS : ELM327_ADAPTIVE_MIN_AT1_MS;
+    uint32_t target = limit;
+    if (latency_ms < limit) {
+        /* AT1 adds 50%, AT2 adds 25%; round fractional milliseconds up. */
+        uint32_t divisor = aggressive ? 4 : 2;
+        target = latency_ms + (latency_ms + divisor - 1) / divisor;
+    }
+    if (target < minimum)
+        target = minimum;
+    return target < limit ? target : limit;
+}
 
-    if (latency_ms == 0) {
-        /*
-         * The window just expired with nothing in it, so whatever it was is
-         * known to be too short for this vehicle. Recording that is the whole
-         * difference between an algorithm that converges and one that
-         * oscillates - see adaptive_floor_ms. It grows by the same margin a
-         * measured reply would be given, and is capped by AT ST because the
-         * datasheet is explicit that the algorithm "will never choose one
-         * which is longer".
-         */
-        uint32_t floor = (uint32_t)e->adaptive_ms * ELM327_ADAPTIVE_NUM_AT1 /
-                         ELM327_ADAPTIVE_DEN_AT1;
+static uint32_t elm327_timing_target(const elm327_ctx_t *e) {
+    uint32_t sum = 0;
+    uint32_t peak = 0;
+    uint32_t deviation = 0;
+    for (unsigned i = 0; i < e->timing.count; i++) {
+        uint32_t sample = e->timing.samples[i];
+        sum += sample;
+        if (sample > peak)
+            peak = sample;
+    }
+    /* Keep the recent peak and allow for variation around the mean. One fast
+     * ECU must not erase the evidence that another ECU is slower. */
+    uint32_t mean = (sum + e->timing.count - 1) / e->timing.count;
+    for (unsigned i = 0; i < e->timing.count; i++) {
+        uint32_t sample = e->timing.samples[i];
+        deviation += sample > mean ? sample - mean : mean - sample;
+    }
+    deviation = (deviation + e->timing.count - 1) / e->timing.count;
+    uint32_t target =
+        mean + 4 + deviation * (e->settings.adaptive_timing == 2 ? 2u : 4u);
+    uint32_t margin = elm327_latency_margin(e, peak);
+    if (target < margin)
+        target = margin;
+    uint32_t limit = elm327_timeout_limit(e);
+    return target < limit ? target : limit;
+}
 
-        if (floor > (uint32_t)e->settings.timeout) {
-            floor = (uint32_t)e->settings.timeout;
-        }
-        if (floor > e->adaptive_floor_ms) {
-            e->adaptive_floor_ms = (uint16_t)floor;
-        }
+static void elm327_timing_update(elm327_ctx_t *e, bool allow_shrink) {
+    uint32_t target = elm327_timing_target(e);
+    if (!e->timing.estimate_ms || target > e->timing.estimate_ms)
+        e->timing.estimate_ms = (uint16_t)target;
+    else if (allow_shrink) {
+        /* Shrink by one eighth; rounding up lets the estimate reach target. */
+        e->timing.estimate_ms -= (e->timing.estimate_ms - target + 7) / 8;
+    }
+}
 
-        /* Still zero, so the next request gets the full window: the reply
-         * that would calibrate the new floor is the one being cut off. */
-        e->adaptive_ms = 0;
+static uint32_t elm327_collection_window(const elm327_ctx_t *e) {
+    uint32_t window = e->timing.window_ms;
+    if (e->settings.adaptive_timing) {
+        uint32_t target = elm327_latency_margin(e, e->timing.watch.latency_ms);
+        if (target > window)
+            window = target;
+    }
+    return window;
+}
+
+static void elm327_timing_begin(elm327_ctx_t *e, const uint8_t *request,
+                                size_t len, int num_frame) {
+    elm327_reply_watch_t *watch = &e->timing.watch;
+
+    e->timing.window_ms = elm327_reply_window(e);
+    e->timing.incomplete = false;
+    memset(watch, 0, sizeof(*watch));
+    watch->sent_us = esp_timer_get_time();
+    watch->deadline_ms = elm327_timeout_limit(e);
+    watch->sample = -1;
+    watch->active =
+        e->settings.adaptive_timing && e->settings.responses && num_frame != 0;
+    if (len <= sizeof(watch->request)) {
+        watch->request_len = len;
+        memcpy(watch->request, request, len);
+    }
+}
+
+/* AT ST limits each wait, not the total exchange. Keep the full arrival time
+ * for observation deadlines; only the learned timeout is capped. */
+static void elm327_timing_reply(elm327_ctx_t *e, uint32_t latency_ms,
+                                bool pending) {
+    elm327_reply_watch_t *watch = &e->timing.watch;
+    uint32_t wait_ms = elm327_timeout_limit(e);
+
+    if (!latency_ms)
+        latency_ms = 1;
+    if (latency_ms > watch->latency_ms)
+        watch->latency_ms = latency_ms;
+    if (pending && elm327_bus(e) == VIF_BUS_CAN)
+        wait_ms = ELM327_RESPONSE_PENDING_MS;
+
+    /* Another ECU's ordinary reply must not shorten a pending ECU's wait. */
+    uint32_t deadline_ms = latency_ms + wait_ms;
+    if (deadline_ms > watch->deadline_ms)
+        watch->deadline_ms = deadline_ms;
+}
+
+/* Normal and late replies share one history slot per exchange. A late reply
+ * replaces that sample instead of giving a multi-ECU exchange extra weight. */
+static void elm327_record_latency(elm327_ctx_t *e, bool allow_shrink) {
+    elm327_timing_t *timing = &e->timing;
+    elm327_reply_watch_t *watch = &timing->watch;
+    uint32_t limit = elm327_timeout_limit(e);
+    uint32_t latency_ms = watch->latency_ms;
+
+    if (watch->sample < 0) {
+        watch->sample = timing->next;
+        timing->next = (timing->next + 1) % ELM327_TIMING_SAMPLES;
+        if (timing->count < ELM327_TIMING_SAMPLES)
+            timing->count++;
+    }
+    timing->samples[watch->sample] = latency_ms < limit ? latency_ms : limit;
+    elm327_timing_update(e, allow_shrink);
+}
+
+static void elm327_timing_backoff(elm327_ctx_t *e) {
+    uint32_t limit = elm327_timeout_limit(e);
+    uint32_t wider = e->timing.window_ms * 2;
+    if (wider > limit)
+        wider = limit;
+    if (wider > e->timing.estimate_ms)
+        e->timing.estimate_ms = wider;
+}
+
+static void elm327_timing_finish(elm327_ctx_t *e) {
+    if (!e->settings.adaptive_timing)
         return;
-    }
-
-    if (e->settings.adaptive_timing >= 2) {
-        target = latency_ms * ELM327_ADAPTIVE_NUM_AT2 / ELM327_ADAPTIVE_DEN_AT2;
-    } else {
-        target = latency_ms * ELM327_ADAPTIVE_NUM_AT1 / ELM327_ADAPTIVE_DEN_AT1;
-    }
-
-    if (target < ELM327_ADAPTIVE_MIN_MS) {
-        target = ELM327_ADAPTIVE_MIN_MS;
-    }
-    /* Never back under a window this vehicle has already failed. */
-    if (target < e->adaptive_floor_ms) {
-        target = e->adaptive_floor_ms;
-    }
-    if (target > UINT16_MAX) {
-        target = UINT16_MAX;
-    }
-
-    if (e->adaptive_ms == 0 || target > e->adaptive_ms) {
-        e->adaptive_ms = (uint16_t)target;
-    } else {
-        /* A quarter of the way down, so it takes a few consistent exchanges
-         * to commit to a shorter window. */
-        e->adaptive_ms -= (uint16_t)((e->adaptive_ms - target) / 4);
-    }
+    e->timing.last_exchange_us = esp_timer_get_time();
+    if (e->timing.watch.latency_ms)
+        elm327_record_latency(e, true);
+    /* Silence is a reason to widen, never an invented response-time sample. */
+    if (!e->timing.watch.latency_ms || e->timing.incomplete)
+        elm327_timing_backoff(e);
 }
 
 /** @brief True for the two ISO 15765-4 protocols that use 11 bit identifiers.
@@ -1817,6 +1831,8 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
         goto fail;
     }
 
+    elm327_timing_begin(e, frame, len, num_frame);
+
     /* AT R0 overrides the frame count hint, as the datasheet requires. The
      * byte buses have honoured it in elm327_bus_xfer() all along; CAN was
      * waiting out the full reply window and printing the answer to a request
@@ -1830,13 +1846,13 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
      * buffers. */
     isotp_rx_t streams[8] = {0};
     unsigned frame_counter = 0;
-    uint32_t window = elm327_reply_window(e);
+    bool response_pending = false;
     Timer since_request;
     Timer_init(&since_request);
     Timer_start(&since_request, 0);
     Timer timer;
     Timer_init(&timer);
-    Timer_start(&timer, window);
+    Timer_start(&timer, e->timing.window_ms);
 
     for (;;) {
         uint32_t now = (uint32_t)Timer_elapsed_ms(&since_request) * 1000u;
@@ -1916,18 +1932,26 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
             !segment.started)
             display_dlc = 1 + segment.length;
         elm327_print_can_frame(e, rx.id, display_dlc, rx.data);
-        e->last_latency_ms = (uint32_t)Timer_elapsed_ms(&since_request);
+        uint32_t latency_ms = (uint32_t)Timer_elapsed_ms(&since_request);
+        bool pending = segment.started && segment.complete &&
+                       segment.length == 3 && segment.data[0] == 0x7F &&
+                       segment.data[2] == 0x78;
+        elm327_timing_reply(e, latency_ms, pending);
         frame_counter++;
-        if (segment.started && segment.complete && segment.length == 3 &&
-            segment.data[0] == 0x7f && segment.data[2] == 0x78) {
-            Timer_start(&timer, 3000);
+        if (pending) {
+            Timer_start(&timer, ELM327_RESPONSE_PENDING_MS);
+            response_pending = true;
             continue;
         }
         if (num_frame > 0 && frame_counter >= (unsigned)num_frame)
             return 0;
         if (!multicast && segment.complete)
             return 0;
+        if (!response_pending) {
+            Timer_start(&timer, elm327_collection_window(e));
+        }
     }
+    e->timing.incomplete = num_frame > 0 && frame_counter < (unsigned)num_frame;
     return frame_counter ? 0 : -1;
 
 fail:
@@ -2082,6 +2106,121 @@ static bool elm327_frame_is_addressed_to_us(const elm327_ctx_t *e,
 
     return target == req_source || target == e->settings.tester_address ||
            target == (uint8_t)(req_target | 1u);
+}
+
+static elm327_reply_kind_t elm327_late_reply_kind(const elm327_ctx_t *e,
+                                                  const bus_msg_t *msg) {
+    const uint8_t *data = msg->data;
+    size_t len = msg->len;
+    const uint8_t *request = e->timing.watch.request;
+    size_t request_len = e->timing.watch.request_len;
+
+    if (!len || !request_len ||
+        msg->status &
+            (BUS_RX_TX_MSG_TYPE | BUS_RX_PERIODIC_REPLY | BUS_RX_BAD_CHECKSUM |
+             BUS_RX_BUFFER_OVERFLOW | BUS_RX_BREAK | BUS_RX_START_OF_MSG |
+             BUS_RX_DUPLICATE | BUS_RX_LINK_DOWN))
+        return ELM327_REPLY_NONE;
+
+    if (elm327_bus(e) == VIF_BUS_CAN) {
+        if (!e->settings.can_auto_format || len > 8 ||
+            !elm327_can_reply_id_ok(e, msg->id))
+            return ELM327_REPLY_NONE;
+        uint32_t mask = elm327_can_is_11bit(e)
+                            ? CAN_SFF_MASK
+                            : CAN_EFF_MASK & ~ELM327_CAN_PRIORITY_MASK;
+        uint32_t functional = elm327_can_is_11bit(e) ? 0x7DF : 0x18DB33F1;
+        if (((e->settings.header_id ^ functional) & mask) &&
+            ((elm327_can_flow_control_id(e, msg->id) ^ e->settings.header_id) &
+             mask))
+            return ELM327_REPLY_NONE;
+        if (data[0] >> 4 == 0 && data[0] && data[0] < len) {
+            len = *data++;
+        } else if (data[0] >> 4 == 1 && len >= 3 &&
+                   (((data[0] & 0x0F) << 8) | data[1]) > 7) {
+            data += 2;
+            len -= 2;
+        } else {
+            return ELM327_REPLY_NONE;
+        }
+    } else {
+        if (!elm327_frame_is_addressed_to_us(e, data, len))
+            return ELM327_REPLY_NONE;
+        size_t header = elm327_header_len(e, data, len);
+        if (len <= header + 1)
+            return ELM327_REPLY_NONE;
+        data += header;
+        len -= header + 1;
+    }
+
+    /* Negative reply: 7F <request service> <reason>. A pending notification
+     * proves how long it takes to hear this ECU, but is not its final reply. */
+    if (len == 3 && data[0] == 0x7F) {
+        if (data[1] != request[0])
+            return ELM327_REPLY_NONE;
+        return data[2] == 0x78 ? ELM327_REPLY_PENDING : ELM327_REPLY_NORMAL;
+    }
+
+    /* Positive service codes add 0x40, including 0x85 -> 0xC5. Use integer
+     * arithmetic so an out-of-range sum cannot wrap into a false match. */
+    if (data[0] != request[0] + 0x40)
+        return ELM327_REPLY_NONE;
+
+    /* The prefix includes the service byte already checked. Known services
+     * also echo identifiers: 41 01 must not match 01 00. Other services fall
+     * back to matching only the service. */
+    size_t prefix = 1;
+    switch (request[0]) {
+    case 0x01: /* Current data: PID. */
+    case 0x09: /* Vehicle information: info type. */
+    case 0x21: /* KWP local data: one-byte identifier. */
+        prefix = 2;
+        break;
+    case 0x02: /* Freeze frame: PID and frame number. */
+    case 0x22: /* Read data by identifier: two-byte identifier. */
+        prefix = 3;
+        break;
+    }
+    if (request_len < prefix || len < prefix ||
+        memcmp(data + 1, request + 1, prefix - 1))
+        return ELM327_REPLY_NONE;
+    return ELM327_REPLY_NORMAL;
+}
+
+/* No output or transmission here: a prompt has already ended this exchange. */
+static void elm327_observe_late_replies(elm327_ctx_t *e) {
+    elm327_reply_watch_t *watch = &e->timing.watch;
+    if (!watch->active)
+        return;
+    /* Beyond one timestamp wrap, the frame's request cannot be established. */
+    if (esp_timer_get_time() - watch->sent_us > UINT32_MAX) {
+        watch->active = false;
+        return;
+    }
+    uint8_t data[ELM327_BUS_CAP];
+    bus_msg_t msg;
+    bus_msg_init(&msg, data, sizeof(data));
+    for (unsigned i = 0; i < 16; i++) {
+        if (vif_bus_recv(VIF_OWNER_LINK, elm327_bus(e), &msg, 0) <= 0)
+            break;
+        /* Unsigned subtraction also handles a wrapped driver timestamp. */
+        uint32_t elapsed_us = msg.timestamp_us - (uint32_t)watch->sent_us;
+        uint32_t latency_ms = elapsed_us / 1000 + (elapsed_us % 1000 != 0);
+        if (!latency_ms || latency_ms > watch->deadline_ms)
+            continue;
+        elm327_reply_kind_t kind = elm327_late_reply_kind(e, &msg);
+        if (kind == ELM327_REPLY_NONE)
+            continue;
+        /* Pending may extend the deadline even if two frames share a rounded
+         * millisecond. It widens timing without reopening the host response. */
+        elm327_timing_reply(e, latency_ms, kind == ELM327_REPLY_PENDING);
+        elm327_record_latency(e, false);
+    }
+    /* Drain timestamped replies before expiring: a queued pending reply can
+     * extend the deadline even when the observer itself was scheduled late. */
+    if (esp_timer_get_time() - watch->sent_us >=
+        (int64_t)watch->deadline_ms * 1000)
+        watch->active = false;
 }
 
 static void elm327_print_j1850_kline_frame(elm327_ctx_t *e, const uint8_t *data,
@@ -2500,6 +2639,8 @@ static int elm327_bus_xfer(elm327_ctx_t *e, const uint8_t *frame, size_t len,
         return -2;
     }
 
+    elm327_timing_begin(e, frame, len, num_frame);
+
     /* AT R0 overrides the frame count hint, as the datasheet requires. */
     if (num_frame == 0 || !e->settings.responses) {
         /* Nothing to read - but the module has not necessarily stopped
@@ -2509,7 +2650,7 @@ static int elm327_bus_xfer(elm327_ctx_t *e, const uint8_t *frame, size_t len,
     }
 
     uint8_t frame_counter = 0;
-    uint32_t window = elm327_reply_window(e);
+    uint32_t window = e->timing.window_ms;
 
     /* Started once and never restarted, so each reply is measured against the
      * request rather than against the reply before it - which is what the
@@ -2524,7 +2665,7 @@ static int elm327_bus_xfer(elm327_ctx_t *e, const uint8_t *frame, size_t len,
     while (!Timer_is_expired(&timer)) {
 
         ret = vif_bus_recv(VIF_OWNER_LINK, elm327_bus(e), &rx,
-                           pdMS_TO_TICKS(window));
+                           pdMS_TO_TICKS(Timer_remaining_ms(&timer)));
 
         if (ret <= 0) {
             continue;
@@ -2546,9 +2687,10 @@ static int elm327_bus_xfer(elm327_ctx_t *e, const uint8_t *frame, size_t len,
 
         elm327_print_j1850_kline_frame(e, rx_frame, ret);
         frame_counter++;
-        e->last_latency_ms = (uint32_t)Timer_elapsed_ms(&since_request);
+        uint32_t latency_ms = (uint32_t)Timer_elapsed_ms(&since_request);
+        elm327_timing_reply(e, latency_ms, false);
 
-        /* restart timer */
+        window = elm327_collection_window(e);
         Timer_start(&timer, window);
 
         if (num_frame > 0 && frame_counter >= num_frame) {
@@ -2558,6 +2700,7 @@ static int elm327_bus_xfer(elm327_ctx_t *e, const uint8_t *frame, size_t len,
         }
     }
 
+    e->timing.incomplete = num_frame > 0 && frame_counter < num_frame;
     /* The window ran out, so the bus has been quiet for exactly that long. */
     elm327_bus_settle(e, cap, settle_ms, window);
 
@@ -2771,6 +2914,8 @@ done:
 }
 
 static void elm327_parse_command(elm327_ctx_t *e, const char *cmd) {
+    elm327_observe_late_replies(e);
+    e->timing.watch.active = false;
     /* One marker per dispatch. Bytes on the wire cannot tell "the client sent
      * it twice" from "we ran it twice"; this can. */
     ble_uart_trace_note('!', cmd, strlen(cmd));
@@ -2808,12 +2953,6 @@ static void elm327_parse_command(elm327_ctx_t *e, const char *cmd) {
             elm327_send_string(e, "?\r");
         } else {
             rc = -2;
-
-            /* Every transfer path reports the latency of its last reply
-             * through this, and the algorithm is fed once here rather than at
-             * each of their exits. Zero means nothing answered, which is
-             * itself evidence - see elm327_note_latency(). */
-            e->last_latency_ms = 0;
 
             if (e->settings.current_protocol == 0) {
                 /* Search every time the protocol is still unknown. A search
@@ -2858,7 +2997,12 @@ static void elm327_parse_command(elm327_ctx_t *e, const char *cmd) {
                                                  tried);
             }
 
-            elm327_note_latency(e, e->last_latency_ms);
+            if (e->settings.responses && num_frame != 0 &&
+                (rc == 0 || rc == -1)) {
+                elm327_timing_finish(e);
+            } else {
+                e->timing.watch.active = false;
+            }
 
             if (rc == -1) {
                 elm327_send_string(e, "NO DATA\r");
@@ -2996,6 +3140,7 @@ static void elm327_fe_feed(const uint8_t *data, size_t len) {
 
 static void elm327_fe_stop(void) {
     elm327_ctx_t *e = &g_elm327;
+    e->timing.watch.active = false;
 
     /* Whatever the last command answered is still in the tx buffer; the client
      * should see it before the grammar changes underneath it. */
@@ -3019,11 +3164,15 @@ static void elm327_fe_stop(void) {
     }
 }
 
+static void elm327_fe_poll(void) { elm327_observe_late_replies(&g_elm327); }
+
 const vif_frontend_t elm327_frontend = {
     .name = "elm327",
     .start = elm327_fe_start,
     .feed = elm327_fe_feed,
+    .poll = elm327_fe_poll,
     .stop = elm327_fe_stop,
+    .poll_interval_ms = 50,
 };
 
 void elm327_register(void) {

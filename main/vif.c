@@ -435,7 +435,11 @@ static void link_task(void *param) {
         /* A front-end with unsolicited output has to come round often enough
          * to drain the bus; one without can sleep until a byte shows up, bar
          * the wakeup that lets a front-end switch land. */
-        wait = wait_ticks(fe->poll ? VIF_POLL_WAIT_MS : VIF_IDLE_WAIT_MS);
+        uint32_t interval = VIF_IDLE_WAIT_MS;
+        if (fe->poll)
+            interval =
+                fe->poll_interval_ms ? fe->poll_interval_ms : VIF_POLL_WAIT_MS;
+        wait = wait_ticks(interval);
 
         n = comm_port_read(port, buf, sizeof(buf), wait);
         if (n && fe->feed) {

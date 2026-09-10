@@ -154,3 +154,23 @@ TEST(a_deferred_release_finishes_before_the_next_chunk) {
     TEST_ASSERT_EQUAL_INT(0, old_stops);
     TEST_ASSERT_EQUAL_INT(0, new_bytes);
 }
+
+TEST(a_frontend_can_observe_late_replies_at_the_idle_poll_cadence) {
+    static const vif_frontend_t observer = {
+        .name = "observer",
+        .poll = old_poll,
+        .poll_interval_ms = 50,
+    };
+    vif_link_set_frontend(&observer);
+    if (setjmp(loop_done) == 0)
+        link_task(NULL);
+    TEST_ASSERT_EQUAL_INT(1, old_polls);
+    TEST_ASSERT_EQUAL_INT(50, fake_clock_ms());
+}
+
+TEST(streaming_frontends_keep_the_default_poll_cadence) {
+    if (setjmp(loop_done) == 0)
+        link_task(NULL);
+    TEST_ASSERT_EQUAL_INT(1, old_polls);
+    TEST_ASSERT_EQUAL_INT(2, fake_clock_ms());
+}

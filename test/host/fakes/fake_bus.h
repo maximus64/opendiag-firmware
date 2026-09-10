@@ -37,6 +37,10 @@ void fake_bus_reset_all(void);
 void fake_bus_stage_response(fake_bus_id_t bus, const uint8_t *data, size_t len,
                              uint32_t delay_ms);
 
+void fake_bus_stage_response_status(fake_bus_id_t bus, const uint8_t *data,
+                                    size_t len, uint32_t delay_ms,
+                                    uint32_t status);
+
 /** Queue a frame already sitting in the driver before any request. */
 void fake_bus_stage_stale(fake_bus_id_t bus, const uint8_t *data, size_t len);
 

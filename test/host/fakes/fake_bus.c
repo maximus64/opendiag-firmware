@@ -22,10 +22,14 @@ typedef struct {
     uint8_t data[MAX_FRAME_LEN];
     size_t len;
     uint32_t delay_ms;
+    uint64_t ready_ms;
+    uint32_t status;
 } staged_t;
 
 typedef struct {
     bool up;
+    uint32_t rx_timestamp_us;
+    uint32_t rx_status;
     int setup_count;
     int teardown_count;
     bool fail_next_send;
@@ -127,6 +131,7 @@ static void stage(staged_t *slot, const uint8_t *data, size_t len,
 
     slot->len = len;
     slot->delay_ms = delay_ms;
+    slot->ready_ms = fake_clock_ms();
 }
 
 void fake_bus_stage_response(fake_bus_id_t id, const uint8_t *data, size_t len,
@@ -137,6 +142,16 @@ void fake_bus_stage_response(fake_bus_id_t id, const uint8_t *data, size_t len,
         return;
     }
     stage(&b->pending[b->pending_count++], data, len, delay_ms);
+}
+
+void fake_bus_stage_response_status(fake_bus_id_t id, const uint8_t *data,
+                                    size_t len, uint32_t delay_ms,
+                                    uint32_t status) {
+    bus_t *b = bus_of(id);
+    if (b->pending_count >= MAX_FRAMES)
+        return;
+    fake_bus_stage_response(id, data, len, delay_ms);
+    b->pending[b->pending_count - 1].status = status;
 }
 
 void fake_bus_stage_stale(fake_bus_id_t id, const uint8_t *data, size_t len) {
@@ -233,8 +248,17 @@ static int bus_send(fake_bus_id_t id, const uint8_t *data, uint8_t len,
         b->live_count = 0;
     }
 
-    /* The ECU's answer becomes readable now that the request has gone out. */
+    /* Delays are between frames, on the wire rather than between reads. */
+    uint64_t ready_ms = fake_clock_ms();
+    if (b->live_count) {
+        uint64_t tail =
+            b->live[(b->live_head + b->live_count - 1) % MAX_FRAMES].ready_ms;
+        if (tail > ready_ms)
+            ready_ms = tail;
+    }
     for (int i = 0; i < b->pending_count && b->live_count < MAX_FRAMES; i++) {
+        ready_ms += b->pending[i].delay_ms;
+        b->pending[i].ready_ms = ready_ms;
         b->live[(b->live_head + b->live_count) % MAX_FRAMES] = b->pending[i];
         b->live_count++;
     }
@@ -263,9 +287,9 @@ static int bus_receive(fake_bus_id_t id, uint8_t *data, uint8_t len,
 
     s = &b->live[b->live_head];
 
-    if (s->delay_ms > (uint32_t)ticks_to_wait) {
-        /* Not on the wire yet. See fake_can_bus.c for the reasoning. */
-        s->delay_ms -= (uint32_t)ticks_to_wait;
+    uint32_t delay_ms =
+        s->ready_ms > fake_clock_ms() ? s->ready_ms - fake_clock_ms() : 0;
+    if (delay_ms > (uint32_t)ticks_to_wait) {
         fake_clock_advance_ms((uint32_t)ticks_to_wait);
         return -1;
     }
@@ -276,7 +300,9 @@ static int bus_receive(fake_bus_id_t id, uint8_t *data, uint8_t len,
         memcpy(data, s->data, n);
     }
 
-    fake_clock_advance_ms(s->delay_ms);
+    fake_clock_advance_ms(delay_ms);
+    b->rx_timestamp_us = (uint32_t)(s->ready_ms * 1000u);
+    b->rx_status = s->status;
 
     b->live_head = (b->live_head + 1) % MAX_FRAMES;
     b->live_count--;
@@ -335,8 +361,8 @@ static int fake_recv(fake_bus_id_t id, bus_msg_t *msg, TickType_t wait) {
     }
 
     msg->len = (uint16_t)rc;
-    msg->status = 0;
-    msg->timestamp_us = fake_clock_ms() * 1000u;
+    msg->status = b->rx_status;
+    msg->timestamp_us = b->rx_timestamp_us;
     g_stats[id].rx_msgs++;
     return rc;
 }
