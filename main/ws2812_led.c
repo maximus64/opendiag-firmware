@@ -80,7 +80,6 @@ static void led_animation_task(void *pvParameters) {
         // Check for a new state from the queue without blocking.
         if (xQueueReceive(led_state_queue, &new_state, 0) == pdPASS) {
             if (current_state != new_state) {
-                ESP_LOGI(TAG, "Changing LED state to %d", new_state);
                 current_state = new_state;
             }
         }
