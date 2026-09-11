@@ -1,4 +1,4 @@
-name: Firmware
+name: Firmware and J2534 driver
 
 on:
   push:
@@ -59,9 +59,40 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  j2534-driver:
+    name: Test and build Windows J2534 driver package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Test and build driver package
+        run: |
+          mkdir -p build/docker
+          docker compose --progress plain run --rm --build -T j2534-driver
+
+      - name: Verify driver package
+        run: |
+          verification_dir=$(mktemp -d)
+          trap 'rm -rf -- "$verification_dir"' EXIT
+          unzip build/docker/opendiag-j2534-driver.zip -d "$verification_dir"
+          (cd "$verification_dir" && sha256sum --check SHA256SUMS)
+
+      - name: Upload driver package
+        uses: actions/upload-artifact@v7
+        with:
+          path: build/docker/opendiag-j2534-driver.zip
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
+
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [build, j2534-driver]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -75,12 +106,21 @@ jobs:
           path: dist
           skip-decompress: true
 
-      - name: Verify release package
+      - name: Download verified driver package
+        uses: actions/download-artifact@v8
+        with:
+          name: opendiag-j2534-driver.zip
+          path: dist
+          skip-decompress: true
+
+      - name: Verify release packages
         run: |
           verification_dir=$(mktemp -d)
           trap 'rm -rf -- "$verification_dir"' EXIT
-          unzip dist/opendiag-firmware.zip -d "$verification_dir"
-          (cd "$verification_dir" && sha256sum --check SHA256SUMS)
+          for package in opendiag-firmware.zip opendiag-j2534-driver.zip; do
+            unzip "dist/$package" -d "$verification_dir/$package"
+            (cd "$verification_dir/$package" && sha256sum --check SHA256SUMS)
+          done
 
       - name: Publish release
         env:
@@ -94,4 +134,5 @@ jobs:
           fi
           gh release create "$RELEASE_TAG" \
             dist/opendiag-firmware.zip \
+            dist/opendiag-j2534-driver.zip \
             "${release_flags[@]}"

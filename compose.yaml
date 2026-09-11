@@ -2,6 +2,24 @@
 # docker compose run --rm --build firmware
 # Add --verify after firmware to build twice and compare the ZIPs.
 services:
+  j2534-driver:
+    build:
+      context: .
+      dockerfile: j2534_driver/Dockerfile
+    platform: linux/amd64
+    init: true
+    entrypoint: ["bash", "j2534_driver/tools/docker_build.sh"]
+    command: []
+    environment:
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+      TZ: UTC
+    volumes:
+      - type: bind
+        source: ./build/docker
+        target: /output
+        bind:
+          create_host_path: false
   firmware:
     build: .
     platform: linux/amd64

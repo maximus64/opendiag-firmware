@@ -1,0 +1,16 @@
+LIBRARY odg40432
+EXPORTS
+    PassThruOpen=PassThruOpen@8 @1
+    PassThruClose=PassThruClose@4 @2
+    PassThruConnect=PassThruConnect@20 @3
+    PassThruDisconnect=PassThruDisconnect@4 @4
+    PassThruReadMsgs=PassThruReadMsgs@16 @5
+    PassThruWriteMsgs=PassThruWriteMsgs@16 @6
+    PassThruStartPeriodicMsg=PassThruStartPeriodicMsg@16 @7
+    PassThruStopPeriodicMsg=PassThruStopPeriodicMsg@8 @8
+    PassThruStartMsgFilter=PassThruStartMsgFilter@24 @9
+    PassThruStopMsgFilter=PassThruStopMsgFilter@8 @10
+    PassThruSetProgrammingVoltage=PassThruSetProgrammingVoltage@12 @11
+    PassThruReadVersion=PassThruReadVersion@16 @12
+    PassThruGetLastError=PassThruGetLastError@4 @13
+    PassThruIoctl=PassThruIoctl@16 @14

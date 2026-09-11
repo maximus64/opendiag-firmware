@@ -1,0 +1,18 @@
+#pragma once
+#define IDD_CONFIG 101
+#define IDC_NAME 1001
+#define IDC_TRANSPORT 1002
+#define IDC_COM 1003
+#define IDC_HOST 1005
+#define IDC_PORT 1006
+#define IDC_BAUD 1009
+#define IDC_TIMEOUT 1010
+#define IDC_LOGGING 1012
+#define IDC_LOG_SIZE 1013
+#define IDC_REFRESH 1014
+#define IDC_LOG_FOLDER 1015
+#define IDC_UPDATE 1016
+#define IDC_TEST 1017
+#define IDC_SAVE 1018
+#define IDC_STATUS 1019
+#define IDC_VERSIONS 1020

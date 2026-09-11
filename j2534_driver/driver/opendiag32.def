@@ -1,0 +1,21 @@
+LIBRARY opendiag32
+EXPORTS
+    PassThruOpen=PassThruOpen@8 @1
+    PassThruClose=PassThruClose@4 @2
+    PassThruConnect=PassThruConnect@32 @3
+    PassThruDisconnect=PassThruDisconnect@4 @4
+    PassThruReadMsgs=PassThruReadMsgs@16 @5
+    PassThruStartPeriodicMsg=PassThruStartPeriodicMsg@16 @7
+    PassThruStopPeriodicMsg=PassThruStopPeriodicMsg@8 @8
+    PassThruStartMsgFilter=PassThruStartMsgFilter@20 @9
+    PassThruStopMsgFilter=PassThruStopMsgFilter@8 @10
+    PassThruSetProgrammingVoltage=PassThruSetProgrammingVoltage@20 @11
+    PassThruReadVersion=PassThruReadVersion@16 @12
+    PassThruGetLastError=PassThruGetLastError@4 @13
+    PassThruIoctl=PassThruIoctl@16 @14
+    PassThruQueueMsgs=PassThruQueueMsgs@12 @15
+    PassThruScanForDevices=PassThruScanForDevices@4 @16
+    PassThruGetNextDevice=PassThruGetNextDevice@4 @17
+    PassThruLogicalConnect=PassThruLogicalConnect@20 @18
+    PassThruLogicalDisconnect=PassThruLogicalDisconnect@4 @19
+    PassThruSelect=PassThruSelect@12 @20
