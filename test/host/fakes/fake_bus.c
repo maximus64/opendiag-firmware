@@ -63,6 +63,7 @@ static int g_kline_only_result;
 static uint32_t g_wakeup_ms;
 static uint32_t g_ifr_enabled;
 static uint32_t g_ifr_byte;
+static bus_init_t g_init_request, g_init_reply;
 static uint8_t g_wakeup[KLINE_WAKEUP_MAX];
 static uint8_t g_wakeup_len;
 
@@ -70,6 +71,8 @@ void fake_bus_reset_all(void) {
     memset(g_bus, 0, sizeof(g_bus));
     memset(&g_link, 0, sizeof(g_link));
     g_sync_count = 0;
+    memset(&g_init_request, 0, sizeof(g_init_request));
+    memset(&g_init_reply, 0, sizeof(g_init_reply));
     g_stop_comm_count = 0;
     g_connect_result = 0;
     g_kline_baud = KLINE_BAUD_DEFAULT;
@@ -439,6 +442,8 @@ static int fake_kline_ioctl(bus_ioctl_t id, const void *in, void *out) {
     case BUS_IOCTL_FAST_INIT: {
         const bus_init_t *req = in;
 
+        if (req)
+            g_init_request = *req;
         g_sync_count++;
 
         if (g_connect_result != 0) {
@@ -476,6 +481,9 @@ static int fake_kline_ioctl(bus_ioctl_t id, const void *in, void *out) {
             if (req) {
                 *rsp = *req;
             }
+            rsp->reply_len = g_init_reply.reply_len;
+            memcpy(rsp->reply, g_init_reply.reply, rsp->reply_len);
+            rsp->reply_timestamp_us = g_init_reply.reply_timestamp_us;
             rsp->key[0] = g_link.key[0];
             rsp->key[1] = g_link.key[1];
         }
@@ -595,3 +603,11 @@ const bus_ops_t j1850_vpw_bus_ops = {
     .get_stats = fk_vpw_stats,
     .reset_stats = fk_vpw_clear,
 };
+
+const bus_init_t *fake_bus_kline_last_init(void) { return &g_init_request; }
+void fake_bus_kline_init_reply(const uint8_t *data, size_t len,
+                               uint32_t timestamp) {
+    g_init_reply.reply_len = len;
+    memcpy(g_init_reply.reply, data, len);
+    g_init_reply.reply_timestamp_us = timestamp;
+}

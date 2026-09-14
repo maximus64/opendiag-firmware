@@ -59,6 +59,12 @@ message Ioctl {
   uint32 connector = 5;
   uint32 pin = 6;
 }
+message FastInit {
+  uint32 channel = 1;
+  uint32 tx_flags = 2;
+  bytes data = 3;
+  bool no_response = 4;
+}
 message Select { uint32 type = 1; repeated uint32 channels = 2; }
 message Request {
   oneof command {
@@ -80,6 +86,7 @@ message Request {
     LogicalConnect logical_connect = 19;
     Target logical_disconnect = 20;
     Select select = 21;
+    FastInit fast_init = 22;
   }
 }
 message ProtocolLimit {
@@ -100,6 +107,7 @@ message Capabilities {
   uint32 tx_queue_messages = 10;
   repeated ProtocolLimit protocols = 11;
   bool full_j2534_compliance = 12;
+  uint32 fast_init_max_data = 13;
 }
 message Response {
   uint32 status = 1;

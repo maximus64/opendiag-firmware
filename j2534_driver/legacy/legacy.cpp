@@ -781,6 +781,10 @@ J2534_LONG PassThruStartMsgFilter(J2534_ULONG id,
         native::PASSTHRU_MSG nativePattern;
         encodeMessage(*mask, channel->protocol, 0, nativeMask);
         encodeMessage(*pattern, channel->protocol, 0, nativePattern);
+        if (channel->protocol == ISO9141 || channel->protocol == ISO14230) {
+            nativeMask.TxFlags &= ~WAIT_P3_MIN_ONLY;
+            nativePattern.TxFlags &= ~WAIT_P3_MIN_ONLY;
+        }
         filter.endpoint = channel->physical;
         status = translate(backend.startMsgFilter(channel->physical,
                                                   type,
@@ -1164,24 +1168,28 @@ J2534_LONG PassThruIoctl(J2534_ULONG target, J2534_ULONG id, void *input, void *
         return status;
     }
     case FAST_INIT: {
-        if (!input || !output) {
-            return ERR_NULL_PARAMETER;
-        }
-        PASSTHRU_MSG &source = *(PASSTHRU_MSG *)input;
-        PASSTHRU_MSG &destination = *(PASSTHRU_MSG *)output;
-        if (source.DataSize > sizeof(source.Data)) {
-            return ERR_INVALID_MSG;
-        }
-        native::PASSTHRU_MSG nativeSource;
+        native::PASSTHRU_MSG nativeSource = {};
         native::PASSTHRU_MSG nativeDestination = {};
         unsigned char data[4128];
-        encodeMessage(source, source.ProtocolID, 0, nativeSource);
+        if (input) {
+            PASSTHRU_MSG &source = *(PASSTHRU_MSG *)input;
+            if (source.DataSize > sizeof(source.Data)) {
+                return ERR_INVALID_MSG;
+            }
+            encodeMessage(source, source.ProtocolID, 0, nativeSource);
+        }
         nativeDestination.DataBuffer = data;
         nativeDestination.DataBufferSize = sizeof(data);
-        status = translate(backend.ioctl(channel->physical, id, &nativeSource, &nativeDestination));
-        if (!status) {
+        status = translate(backend.ioctl(channel->physical,
+                                         id,
+                                         input ? &nativeSource : NULL,
+                                         output ? &nativeDestination : NULL));
+        if (!status && output) {
+            PASSTHRU_MSG &destination = *(PASSTHRU_MSG *)output;
             memset(&destination, 0, sizeof(destination));
             destination.ProtocolID = nativeDestination.ProtocolID;
+            destination.Timestamp = nativeDestination.Timestamp;
+            destination.RxStatus = nativeDestination.RxStatus;
             destination.DataSize = nativeDestination.DataLength;
             destination.ExtraDataIndex = nativeDestination.ExtraDataIndex;
             memcpy(destination.Data, data, destination.DataSize);

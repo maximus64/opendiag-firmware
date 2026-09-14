@@ -387,6 +387,16 @@ static void tx_done(channel_t *channel, bool ok) {
     channel->tx_active = false;
 }
 
+static int send_byte_message(channel_t *channel) {
+    bus_msg_t msg;
+    const uint8_t *data = channel->tx + MSG_HEADER;
+    uint32_t flags = j2534_u32(channel->tx + 12);
+
+    bus_msg_tx(&msg, data, channel->tx_len - MSG_HEADER, 0);
+    return vif_bus_send(VIF_OWNER_LINK, channel->bus, &msg,
+                        flags & J2534_WAIT_P3 ? BUS_TX_WAIT_P3_MIN_ONLY : 0);
+}
+
 static void poll_tx(channel_t *channel) {
     if (!channel->tx_len || physical_channel(channel)->link_down)
         return;
@@ -441,11 +451,7 @@ static void poll_tx(channel_t *channel) {
         memcpy(frame.data, data + 4, len - 4);
         rc = send_can(channel, &frame);
     } else {
-        bus_msg_t msg;
-
-        bus_msg_tx(&msg, data, len, 0);
-        rc = vif_bus_send(VIF_OWNER_LINK, channel->bus, &msg,
-                          flags & J2534_WAIT_P3 ? BUS_TX_WAIT_P3_MIN_ONLY : 0);
+        rc = send_byte_message(channel);
     }
     tx_done(channel, rc == 0);
 }
@@ -705,6 +711,11 @@ static uint32_t connect_channel(const opendiag_Connect *req) {
             rc = vif_bus_param_set(VIF_OWNER_LINK, bus, BUS_P_CHECKSUM_TX,
                                    !(flags & J2534_CHECKSUM_DISABLED));
         if (!rc)
+            rc = vif_bus_param_set(VIF_OWNER_LINK, bus, BUS_P_KLINE_FRAME_MODE,
+                                   proto == J2534_ISO9141
+                                       ? BUS_KLINE_FRAME_ISO9141
+                                       : BUS_KLINE_FRAME_ISO14230);
+        if (!rc)
             rc = vif_bus_param_set(VIF_OWNER_LINK, bus, BUS_P_PERIODIC_MS, 0);
         if (!rc)
             rc =
@@ -946,7 +957,7 @@ static uint32_t ioctl_request(channel_t *channel, const opendiag_Ioctl *req) {
             if (channel->protocol != J2534_ISO14230)
                 return J2534_IOCTL;
 
-            if (!len || len > BUS_INIT_MSG_MAX)
+            if (!len || len > 8)
                 return J2534_MSG;
 
             if (channel->flags & J2534_CHECKSUM_DISABLED)
@@ -972,6 +983,8 @@ static uint32_t ioctl_request(channel_t *channel, const opendiag_Ioctl *req) {
             response.data.size = 2;
         } else {
             response.data.size = init.reply_len ? init.reply_len - 1 : 0;
+            if (response.data.size > sizeof(response.data.bytes))
+                return J2534_FULL;
             memcpy(response.data.bytes, init.reply, response.data.size);
         }
         return J2534_OK;
@@ -1110,6 +1123,49 @@ static void store_tx(channel_t *channel, const opendiag_Message *message) {
     channel->tx_len = MSG_HEADER + message->data.size;
 }
 
+_Static_assert(BUS_INIT_MSG_MAX == sizeof(((opendiag_FastInit *)0)->data.bytes),
+               "FAST_INIT capability and protobuf capacity must agree");
+
+static uint32_t fast_init(channel_t *channel, const opendiag_FastInit *req) {
+    if (channel->bus != VIF_BUS_KLINE || channel->parent)
+        return J2534_IOCTL;
+
+    bool checksum = !(channel->flags & J2534_CHECKSUM_DISABLED);
+    if (req->tx_flags & ~J2534_WAIT_P3 ||
+        req->data.size > BUS_INIT_MSG_MAX - (checksum ? 1u : 0u))
+        return J2534_MSG;
+
+    if (channel->tx_len) {
+        int rc = send_byte_message(channel);
+        tx_done(channel, rc == 0);
+        if (rc)
+            return bus_error(rc);
+    }
+    bus_init_t init = {0};
+    init.raw_response = true;
+    init.no_response = req->no_response;
+    init.msg_len = req->data.size;
+    init.tx_flags = req->tx_flags & J2534_WAIT_P3 ? BUS_TX_WAIT_P3_MIN_ONLY : 0;
+    memcpy(init.msg, req->data.bytes, init.msg_len);
+    int rc = vif_bus_ioctl(VIF_OWNER_LINK, channel->bus, BUS_IOCTL_FAST_INIT,
+                           &init, &init);
+    if (rc)
+        return bus_error(rc);
+    if (!req->no_response) {
+        if (init.reply_len <= (checksum ? 1u : 0u) ||
+            init.reply_len > sizeof(init.reply))
+            return J2534_INIT;
+        response.has_message = true;
+        response.message.protocol = channel->protocol;
+        response.message.timestamp_us = init.reply_timestamp_us;
+        response.message.data.size = init.reply_len - (checksum ? 1u : 0u);
+        response.message.extra_data_index = response.message.data.size;
+        memcpy(response.message.data.bytes, init.reply,
+               response.message.data.size);
+    }
+    return J2534_OK;
+}
+
 static uint32_t read_capabilities(void) {
     response.has_capabilities = true;
     response.capabilities = (opendiag_Capabilities){
@@ -1123,6 +1179,7 @@ static uint32_t read_capabilities(void) {
         .rpc_bytes = J2534_RPC_MAX,
         .rx_queue_bytes = RX_BYTES,
         .tx_queue_messages = 1,
+        .fast_init_max_data = BUS_INIT_MSG_MAX,
         .protocols_count = 6,
         .protocols = {{J2534_CAN, 12, 12},
                       {J2534_PWM, 10, 11},
@@ -1320,6 +1377,9 @@ static uint32_t dispatch_channel_request(const opendiag_Request *req) {
     case opendiag_Request_stop_filter_tag:
         id = req->command.stop_filter.channel;
         break;
+    case opendiag_Request_fast_init_tag:
+        id = req->command.fast_init.channel;
+        break;
     case opendiag_Request_ioctl_tag:
         id = req->command.ioctl.target;
         break;
@@ -1357,6 +1417,8 @@ static uint32_t dispatch_channel_request(const opendiag_Request *req) {
         return start_filter(channel, &req->command.start_filter);
     case opendiag_Request_stop_filter_tag:
         return stop_filter(channel, req->command.stop_filter.id);
+    case opendiag_Request_fast_init_tag:
+        return fast_init(channel, &req->command.fast_init);
     case opendiag_Request_ioctl_tag:
         return ioctl_request(channel, &req->command.ioctl);
     case opendiag_Request_logical_connect_tag:

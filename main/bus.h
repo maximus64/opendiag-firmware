@@ -183,7 +183,16 @@ typedef enum {
 
     /* K-Line initialization uses pin 15 as well when false. Default true. */
     BUS_P_K_LINE_ONLY,
+
+    /* K-Line: discovery (0), ISO9141 gap (1), ISO14230 length/gap (2). */
+    BUS_P_KLINE_FRAME_MODE,
 } bus_param_t;
+
+typedef enum {
+    BUS_KLINE_FRAME_DISCOVERY = 0,
+    BUS_KLINE_FRAME_ISO9141,
+    BUS_KLINE_FRAME_ISO14230,
+} bus_kline_frame_mode_t;
 
 /* J2534 Table 86 values for BUS_P_PARITY. */
 #define BUS_PARITY_NONE 0
@@ -228,7 +237,7 @@ typedef enum {
      *
      * in:  bus_init_t carrying the StartCommunication request to send,
      *      or a zero length one to drive the pattern and send nothing.
-     * out: bus_init_t, whose @c msg holds the response.
+     * out: bus_init_t, whose @c reply holds the response.
      */
     BUS_IOCTL_FAST_INIT = 0x05,
 
@@ -288,8 +297,8 @@ typedef enum {
  *  limit, and comfortably more than a TesterPresent needs. */
 #define BUS_PERIODIC_MAX 6
 
-/** Longest request a fast initialisation may carry, before its checksum. */
-#define BUS_INIT_MSG_MAX 8
+/** Current K-Line frame capacity, including any generated checksum. */
+#define BUS_INIT_MSG_MAX 260
 
 /**
  * @brief In and out for the two initialisation IOCTLs.
@@ -302,14 +311,20 @@ typedef enum {
  */
 typedef struct {
     /* In. */
-    uint8_t address;               /**< The 5 baud address word. */
-    uint8_t msg[BUS_INIT_MSG_MAX]; /**< Fast init request, no checksum. */
-    uint8_t msg_len;               /**< Zero sends no message. */
+    uint8_t address; /**< The 5 baud address word. */
+    uint8_t
+        msg[BUS_INIT_MSG_MAX]; /**< Request under the bus checksum policy. */
+    size_t msg_len;            /**< Zero sends no message. */
+
+    bool raw_response; /**< Return bytes without interpreting key bytes. */
+    bool no_response;  /**< Complete after the pulse and request. */
+    uint32_t tx_flags;
 
     /* Out. */
-    uint8_t key[2];                      /**< Key bytes, in arrival order. */
-    uint8_t reply[BUS_INIT_MSG_MAX + 8]; /**< Fast init response. */
-    uint8_t reply_len;
+    uint8_t key[2];                  /**< Key bytes, in arrival order. */
+    uint8_t reply[BUS_INIT_MSG_MAX]; /**< Fast init response. */
+    size_t reply_len;
+    uint32_t reply_timestamp_us;
 } bus_init_t;
 
 /**

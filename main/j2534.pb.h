@@ -102,6 +102,14 @@ typedef struct _opendiag_Ioctl {
     uint32_t pin;
 } opendiag_Ioctl;
 
+typedef PB_BYTES_ARRAY_T(260) opendiag_FastInit_data_t;
+typedef struct _opendiag_FastInit {
+    uint32_t channel;
+    uint32_t tx_flags;
+    opendiag_FastInit_data_t data;
+    bool no_response;
+} opendiag_FastInit;
+
 typedef struct _opendiag_Select {
     uint32_t type;
     pb_size_t channels_count;
@@ -129,6 +137,7 @@ typedef struct _opendiag_Request {
         opendiag_LogicalConnect logical_connect;
         opendiag_Target logical_disconnect;
         opendiag_Select select;
+        opendiag_FastInit fast_init;
     } command;
 } opendiag_Request;
 
@@ -152,6 +161,7 @@ typedef struct _opendiag_Capabilities {
     pb_size_t protocols_count;
     opendiag_ProtocolLimit protocols[6];
     bool full_j2534_compliance;
+    uint32_t fast_init_max_data;
 } opendiag_Capabilities;
 
 typedef PB_BYTES_ARRAY_T(255) opendiag_Response_data_t;
@@ -190,10 +200,11 @@ extern "C" {
 #define opendiag_Filter_init_default             {0, 0, 0, {0, {0}}, {0, {0}}}
 #define opendiag_Voltage_init_default            {0, 0, 0, 0}
 #define opendiag_Ioctl_init_default              {0, 0, 0, {opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default}, {0, {0}}, 0, 0}
+#define opendiag_FastInit_init_default           {0, 0, {0, {0}}, 0}
 #define opendiag_Select_init_default             {0, 0, {0, 0, 0, 0, 0}}
 #define opendiag_Request_init_default            {0, {opendiag_Empty_init_default}}
 #define opendiag_ProtocolLimit_init_default      {0, 0, 0}
-#define opendiag_Capabilities_init_default       {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {opendiag_ProtocolLimit_init_default, opendiag_ProtocolLimit_init_default, opendiag_ProtocolLimit_init_default, opendiag_ProtocolLimit_init_default, opendiag_ProtocolLimit_init_default, opendiag_ProtocolLimit_init_default}, 0}
+#define opendiag_Capabilities_init_default       {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {opendiag_ProtocolLimit_init_default, opendiag_ProtocolLimit_init_default, opendiag_ProtocolLimit_init_default, opendiag_ProtocolLimit_init_default, opendiag_ProtocolLimit_init_default, opendiag_ProtocolLimit_init_default}, 0, 0}
 #define opendiag_Response_init_default           {0, 0, 0, false, opendiag_Message_init_default, 0, {opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default}, {0, {0}}, 0, {0, 0, 0, 0, 0}, "", false, opendiag_Capabilities_init_default, 0}
 #define opendiag_Empty_init_zero                 {0}
 #define opendiag_Target_init_zero                {0}
@@ -207,10 +218,11 @@ extern "C" {
 #define opendiag_Filter_init_zero                {0, 0, 0, {0, {0}}, {0, {0}}}
 #define opendiag_Voltage_init_zero               {0, 0, 0, 0}
 #define opendiag_Ioctl_init_zero                 {0, 0, 0, {opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero}, {0, {0}}, 0, 0}
+#define opendiag_FastInit_init_zero              {0, 0, {0, {0}}, 0}
 #define opendiag_Select_init_zero                {0, 0, {0, 0, 0, 0, 0}}
 #define opendiag_Request_init_zero               {0, {opendiag_Empty_init_zero}}
 #define opendiag_ProtocolLimit_init_zero         {0, 0, 0}
-#define opendiag_Capabilities_init_zero          {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {opendiag_ProtocolLimit_init_zero, opendiag_ProtocolLimit_init_zero, opendiag_ProtocolLimit_init_zero, opendiag_ProtocolLimit_init_zero, opendiag_ProtocolLimit_init_zero, opendiag_ProtocolLimit_init_zero}, 0}
+#define opendiag_Capabilities_init_zero          {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {opendiag_ProtocolLimit_init_zero, opendiag_ProtocolLimit_init_zero, opendiag_ProtocolLimit_init_zero, opendiag_ProtocolLimit_init_zero, opendiag_ProtocolLimit_init_zero, opendiag_ProtocolLimit_init_zero}, 0, 0}
 #define opendiag_Response_init_zero              {0, 0, 0, false, opendiag_Message_init_zero, 0, {opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero}, {0, {0}}, 0, {0, 0, 0, 0, 0}, "", false, opendiag_Capabilities_init_zero, 0}
 
 /* Field tags (for use in manual encoding/decoding) */
@@ -259,6 +271,10 @@ extern "C" {
 #define opendiag_Ioctl_data_tag                  4
 #define opendiag_Ioctl_connector_tag             5
 #define opendiag_Ioctl_pin_tag                   6
+#define opendiag_FastInit_channel_tag            1
+#define opendiag_FastInit_tx_flags_tag           2
+#define opendiag_FastInit_data_tag               3
+#define opendiag_FastInit_no_response_tag        4
 #define opendiag_Select_type_tag                 1
 #define opendiag_Select_channels_tag             2
 #define opendiag_Request_capabilities_tag        1
@@ -279,6 +295,7 @@ extern "C" {
 #define opendiag_Request_logical_connect_tag     19
 #define opendiag_Request_logical_disconnect_tag  20
 #define opendiag_Request_select_tag              21
+#define opendiag_Request_fast_init_tag           22
 #define opendiag_ProtocolLimit_protocol_tag      1
 #define opendiag_ProtocolLimit_max_tx_data_tag   2
 #define opendiag_ProtocolLimit_max_rx_data_tag   3
@@ -294,6 +311,7 @@ extern "C" {
 #define opendiag_Capabilities_tx_queue_messages_tag 10
 #define opendiag_Capabilities_protocols_tag      11
 #define opendiag_Capabilities_full_j2534_compliance_tag 12
+#define opendiag_Capabilities_fast_init_max_data_tag 13
 #define opendiag_Response_status_tag             1
 #define opendiag_Response_id_tag                 2
 #define opendiag_Response_count_tag              3
@@ -403,6 +421,14 @@ X(a, STATIC,   SINGULAR, UINT32,   pin,               6)
 #define opendiag_Ioctl_DEFAULT NULL
 #define opendiag_Ioctl_config_MSGTYPE opendiag_Config
 
+#define opendiag_FastInit_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT32,   channel,           1) \
+X(a, STATIC,   SINGULAR, UINT32,   tx_flags,          2) \
+X(a, STATIC,   SINGULAR, BYTES,    data,              3) \
+X(a, STATIC,   SINGULAR, BOOL,     no_response,       4)
+#define opendiag_FastInit_CALLBACK NULL
+#define opendiag_FastInit_DEFAULT NULL
+
 #define opendiag_Select_FIELDLIST(X, a) \
 X(a, STATIC,   SINGULAR, UINT32,   type,              1) \
 X(a, STATIC,   REPEATED, UINT32,   channels,          2)
@@ -427,7 +453,8 @@ X(a, STATIC,   ONEOF,    MESSAGE,  (command,ioctl,command.ioctl),  15) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (command,queue,command.queue),  16) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (command,logical_connect,command.logical_connect),  19) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (command,logical_disconnect,command.logical_disconnect),  20) \
-X(a, STATIC,   ONEOF,    MESSAGE,  (command,select,command.select),  21)
+X(a, STATIC,   ONEOF,    MESSAGE,  (command,select,command.select),  21) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (command,fast_init,command.fast_init),  22)
 #define opendiag_Request_CALLBACK NULL
 #define opendiag_Request_DEFAULT NULL
 #define opendiag_Request_command_capabilities_MSGTYPE opendiag_Empty
@@ -448,6 +475,7 @@ X(a, STATIC,   ONEOF,    MESSAGE,  (command,select,command.select),  21)
 #define opendiag_Request_command_logical_connect_MSGTYPE opendiag_LogicalConnect
 #define opendiag_Request_command_logical_disconnect_MSGTYPE opendiag_Target
 #define opendiag_Request_command_select_MSGTYPE opendiag_Select
+#define opendiag_Request_command_fast_init_MSGTYPE opendiag_FastInit
 
 #define opendiag_ProtocolLimit_FIELDLIST(X, a) \
 X(a, STATIC,   SINGULAR, UINT32,   protocol,          1) \
@@ -468,7 +496,8 @@ X(a, STATIC,   SINGULAR, UINT32,   rpc_bytes,         8) \
 X(a, STATIC,   SINGULAR, UINT32,   rx_queue_bytes,    9) \
 X(a, STATIC,   SINGULAR, UINT32,   tx_queue_messages,  10) \
 X(a, STATIC,   REPEATED, MESSAGE,  protocols,        11) \
-X(a, STATIC,   SINGULAR, BOOL,     full_j2534_compliance,  12)
+X(a, STATIC,   SINGULAR, BOOL,     full_j2534_compliance,  12) \
+X(a, STATIC,   SINGULAR, UINT32,   fast_init_max_data,  13)
 #define opendiag_Capabilities_CALLBACK NULL
 #define opendiag_Capabilities_DEFAULT NULL
 #define opendiag_Capabilities_protocols_MSGTYPE opendiag_ProtocolLimit
@@ -502,6 +531,7 @@ extern const pb_msgdesc_t opendiag_Periodic_msg;
 extern const pb_msgdesc_t opendiag_Filter_msg;
 extern const pb_msgdesc_t opendiag_Voltage_msg;
 extern const pb_msgdesc_t opendiag_Ioctl_msg;
+extern const pb_msgdesc_t opendiag_FastInit_msg;
 extern const pb_msgdesc_t opendiag_Select_msg;
 extern const pb_msgdesc_t opendiag_Request_msg;
 extern const pb_msgdesc_t opendiag_ProtocolLimit_msg;
@@ -521,6 +551,7 @@ extern const pb_msgdesc_t opendiag_Response_msg;
 #define opendiag_Filter_fields &opendiag_Filter_msg
 #define opendiag_Voltage_fields &opendiag_Voltage_msg
 #define opendiag_Ioctl_fields &opendiag_Ioctl_msg
+#define opendiag_FastInit_fields &opendiag_FastInit_msg
 #define opendiag_Select_fields &opendiag_Select_msg
 #define opendiag_Request_fields &opendiag_Request_msg
 #define opendiag_ProtocolLimit_fields &opendiag_ProtocolLimit_msg
@@ -529,10 +560,11 @@ extern const pb_msgdesc_t opendiag_Response_msg;
 
 /* Maximum encoded size of messages (where known) */
 #define OPENDIAG_J2534_PB_H_MAX_SIZE             opendiag_Response_size
-#define opendiag_Capabilities_size               182
+#define opendiag_Capabilities_size               188
 #define opendiag_Config_size                     12
 #define opendiag_Connect_size                    42
 #define opendiag_Empty_size                      0
+#define opendiag_FastInit_size                   277
 #define opendiag_Filter_size                     46
 #define opendiag_Ioctl_size                      730
 #define opendiag_LogicalConnect_size             44
@@ -542,7 +574,7 @@ extern const pb_msgdesc_t opendiag_Response_msg;
 #define opendiag_ProtocolLimit_size              18
 #define opendiag_Queue_size                      4176
 #define opendiag_Request_size                    4185
-#define opendiag_Response_size                   5245
+#define opendiag_Response_size                   5251
 #define opendiag_Select_size                     36
 #define opendiag_Target_size                     6
 #define opendiag_Voltage_size                    24

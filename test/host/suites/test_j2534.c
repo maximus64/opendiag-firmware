@@ -615,3 +615,109 @@ TEST(k_line_and_l_line_require_matching_resources_and_preserve_flags) {
         }
     }
 }
+
+static uint32_t hds_channel(bool checksum) {
+    command(opendiag_Request_connect_tag);
+    req.command.connect =
+        (opendiag_Connect){.device = dev,
+                           .protocol = J2534_ISO9141,
+                           .flags = checksum ? 0 : J2534_CHECKSUM_DISABLED,
+                           .baudrate = 10400,
+                           .connector = 1,
+                           .pins_count = 2,
+                           .pins = {7, 15}};
+    TEST_ASSERT_EQUAL_INT(0, call());
+    return res.id;
+}
+
+static void hds_init(uint32_t channel, size_t length, bool no_response) {
+    command(opendiag_Request_fast_init_tag);
+    req.command.fast_init.channel = channel;
+    req.command.fast_init.no_response = no_response;
+    req.command.fast_init.data.size = length;
+    memset(req.command.fast_init.data.bytes, 0x55, length);
+}
+
+TEST(j2534_fast_init_advertises_capacity_and_bypasses_filters_for_first_reply) {
+    command(opendiag_Request_capabilities_tag);
+    TEST_ASSERT_EQUAL_INT(0, call());
+    TEST_ASSERT_EQUAL_INT(260, res.capabilities.fast_init_max_data);
+    uint32_t ch = hds_channel(false);
+    const uint8_t reply[] = {0x10, 0x02};
+    fake_bus_kline_init_reply(reply, sizeof(reply), 123456);
+    hds_init(ch, 260, false);
+    req.command.fast_init.tx_flags = 0x200;
+    TEST_ASSERT_EQUAL_INT(0, call());
+    TEST_ASSERT_TRUE(res.has_message);
+    TEST_ASSERT_EQUAL_INT(2, res.message.data.size);
+    TEST_ASSERT_EQUAL_MEM(reply, res.message.data.bytes, 2);
+    TEST_ASSERT_EQUAL_INT(123456, res.message.timestamp_us);
+    const bus_init_t *init = fake_bus_kline_last_init();
+    TEST_ASSERT_TRUE(init->raw_response);
+    TEST_ASSERT_EQUAL_INT(260, init->msg_len);
+    TEST_ASSERT_EQUAL_INT(BUS_TX_WAIT_P3_MIN_ONLY, init->tx_flags);
+    TEST_ASSERT_EQUAL_INT(J2534_EMPTY, read_message(ch));
+}
+
+TEST(j2534_fast_init_checksum_and_invalid_request_have_correct_boundaries) {
+    uint32_t ch = hds_channel(true);
+    const uint8_t reply[] = {0x12, 0x34, 0x46};
+    fake_bus_kline_init_reply(reply, sizeof(reply), 42);
+    hds_init(ch, 260, false);
+    TEST_ASSERT_EQUAL_INT(J2534_MSG, call());
+    TEST_ASSERT_EQUAL_INT(0, fake_bus_sync_count());
+    hds_init(ch, 259, false);
+    TEST_ASSERT_EQUAL_INT(0, call());
+    TEST_ASSERT_EQUAL_INT(2, res.message.data.size);
+    TEST_ASSERT_EQUAL_MEM(reply, res.message.data.bytes, 2);
+    hds_init(ch, 1, true);
+    req.command.fast_init.tx_flags = 0x100;
+    TEST_ASSERT_EQUAL_INT(J2534_MSG, call());
+    TEST_ASSERT_EQUAL_INT(1, fake_bus_sync_count());
+}
+
+TEST(j2534_fast_init_optional_io_and_bus_errors) {
+    uint32_t ch = hds_channel(false);
+    hds_init(ch, 0, true);
+    TEST_ASSERT_EQUAL_INT(0, call());
+    TEST_ASSERT_FALSE(res.has_message);
+    TEST_ASSERT_TRUE(fake_bus_kline_last_init()->no_response);
+    TEST_ASSERT_EQUAL_INT(0, fake_bus_kline_last_init()->msg_len);
+    fake_bus_kline_connect_result(BUS_ERR_ECHO);
+    hds_init(ch, 1, false);
+    TEST_ASSERT_EQUAL_INT(J2534_FAILED, call());
+    TEST_ASSERT_FALSE(res.has_message);
+    fake_bus_kline_connect_result(BUS_ERR_INIT);
+    TEST_ASSERT_EQUAL_INT(J2534_INIT, call());
+}
+
+TEST(j2534_fast_init_drains_pending_tx_and_stops_on_tx_failure) {
+    uint32_t ch = hds_channel(false);
+    const uint8_t pid00[] = {0x68, 0x6a, 0xf1, 1, 0, 0xc4};
+    queue(ch, J2534_ISO9141, 0x200, pid00, sizeof(pid00));
+    TEST_ASSERT_EQUAL_INT(0, call());
+    hds_init(ch, 0, true);
+    TEST_ASSERT_EQUAL_INT(0, call());
+    TEST_ASSERT_EQUAL_INT(1, fake_bus_sent_count(FAKE_BUS_KLINE));
+    TEST_ASSERT_EQUAL_INT(1, fake_bus_sync_count());
+    TEST_ASSERT_EQUAL_INT(0, read_message(ch));
+    TEST_ASSERT_EQUAL_INT(J2534_TX_SUCCESS, res.message.rx_status);
+    queue(ch, J2534_ISO9141, 0x200, pid00, sizeof(pid00));
+    TEST_ASSERT_EQUAL_INT(0, call());
+    fake_bus_fail_next_send(FAKE_BUS_KLINE);
+    hds_init(ch, 0, true);
+    TEST_ASSERT_EQUAL_INT(J2534_TIMEOUT, call());
+    TEST_ASSERT_EQUAL_INT(1, fake_bus_sync_count());
+    TEST_ASSERT_EQUAL_INT(0, read_message(ch));
+    TEST_ASSERT_EQUAL_INT(J2534_TX_FAILED, res.message.rx_status);
+}
+
+TEST(j2534_native_filter_still_rejects_hds_legacy_tx_flags) {
+    uint32_t ch = hds_channel(false);
+    command(opendiag_Request_start_filter_tag);
+    req.command.start_filter =
+        (opendiag_Filter){.channel = ch, .type = 1, .flags = 0x200};
+    req.command.start_filter.mask.size = req.command.start_filter.pattern.size =
+        1;
+    TEST_ASSERT_EQUAL_INT(J2534_MSG, call());
+}

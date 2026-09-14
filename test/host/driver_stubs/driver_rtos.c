@@ -7,8 +7,10 @@
 
 struct driver_queue {
     struct driver_queue *next;
+    struct driver_queue *set;
     bool deleted, mutex;
     unsigned count, capacity, item_size;
+    unsigned selected;
     void *data;
 };
 static struct driver_queue *objects;
@@ -16,11 +18,13 @@ static TaskFunction_t worker;
 static void *worker_arg;
 static bool worker_alive;
 int driver_allocations, driver_live_objects, driver_fail_allocation;
+int driver_queue_set_waits;
 bool driver_fail_task, driver_exit_on_wait;
 int driver_set_joins, driver_fail_set_join;
 int driver_task_starts, driver_task_exits, driver_notifications;
 
 void driver_rtos_reset(void) {
+    driver_queue_set_waits = 0;
     TEST_ASSERT_EQUAL_INT(0, driver_live_objects);
     TEST_ASSERT_FALSE(worker_alive);
     while (objects) {
@@ -70,6 +74,10 @@ BaseType_t xQueueSend(QueueHandle_t q, const void *item, TickType_t wait) {
     if (q->item_size)
         memcpy((char *)q->data + q->count * q->item_size, item, q->item_size);
     q->count++;
+    if (q->set) {
+        TEST_ASSERT_TRUE(q->set->count < q->set->capacity);
+        TEST_ASSERT_EQUAL_INT(pdTRUE, xQueueSend(q->set, &q, 0));
+    }
     return pdTRUE;
 }
 BaseType_t xQueueSendFromISR(QueueHandle_t q, const void *item,
@@ -80,6 +88,10 @@ BaseType_t xQueueReceive(QueueHandle_t q, void *item, TickType_t wait) {
     TEST_ASSERT_FALSE(q->deleted);
     if (!q->count)
         return pdFALSE;
+    if (q->set) {
+        TEST_ASSERT_TRUE(q->selected > 0);
+        q->selected--;
+    }
     if (q->item_size) {
         memcpy(item, q->data, q->item_size);
         memmove(q->data, (char *)q->data + q->item_size,
@@ -93,14 +105,26 @@ QueueSetHandle_t xQueueCreateSet(UBaseType_t n) {
 }
 BaseType_t xQueueAddToSet(QueueSetMemberHandle_t q, QueueSetHandle_t set) {
     driver_set_joins++;
-    return driver_set_joins == driver_fail_set_join ? pdFAIL : pdPASS;
+    if (driver_set_joins == driver_fail_set_join)
+        return pdFAIL;
+    TEST_ASSERT_NULL(q->set);
+    TEST_ASSERT_EQUAL_INT(0, q->count);
+    q->set = set;
+    return pdPASS;
 }
 BaseType_t xQueueRemoveFromSet(QueueSetMemberHandle_t q, QueueSetHandle_t set) {
+    TEST_ASSERT_TRUE(q->set == set);
+    q->set = NULL;
     return pdPASS;
 }
 QueueSetMemberHandle_t xQueueSelectFromSet(QueueSetHandle_t set,
                                            TickType_t wait) {
-    return NULL;
+    if (wait)
+        driver_queue_set_waits++;
+    QueueHandle_t member = NULL;
+    if (xQueueReceive(set, &member, 0) == pdTRUE)
+        member->selected++;
+    return member;
 }
 SemaphoreHandle_t xSemaphoreCreateMutex(void) {
     struct driver_queue *q = xQueueCreate(1, 0);

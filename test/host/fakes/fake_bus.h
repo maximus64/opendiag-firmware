@@ -82,3 +82,7 @@ int fake_bus_sent_count(fake_bus_id_t bus);
 
 /** Bytes of transmit @p idx, with its length in @p out_len. NULL if absent. */
 const uint8_t *fake_bus_sent(fake_bus_id_t bus, int idx, size_t *out_len);
+
+const bus_init_t *fake_bus_kline_last_init(void);
+void fake_bus_kline_init_reply(const uint8_t *data, size_t len,
+                               uint32_t timestamp);

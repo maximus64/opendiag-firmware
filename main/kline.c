@@ -51,14 +51,18 @@
 #define KLINE_RX_RINGBUF 1024
 
 /*
- * UART events in flight. Losing one costs nothing - every path drains the
- * ring buffer rather than trusting the event to say how much is there.
+ * UART events in flight. Reads also drain the ring when DATA notifications
+ * are lost; available notifications preserve ordering with receive errors.
  */
 #define KLINE_UART_EVENTS 16
+#define KLINE_UART_TIMEOUT_MS 100
 
 #define KLINE_RX_QUEUE 8
 
 #define KLINE_TASK_STACK 4096
+
+_Static_assert(BUS_INIT_MSG_MAX <= KLINE_MAX_MSG,
+               "FAST_INIT exceeds K-Line capacity");
 
 /*
  * Above the session tasks: framing by inter-byte gap is time sensitive and
@@ -116,13 +120,6 @@ typedef enum {
     CMD_STOP_COMM,
 } kline_cmd_t;
 
-/* Whether the transceiver loops our own transmissions back at us. */
-typedef enum {
-    ECHO_UNKNOWN = 0,
-    ECHO_PRESENT,
-    ECHO_ABSENT,
-} kline_echo_t;
-
 /**
  * @brief Every parameter of bus.h that applies to this bus.
  *
@@ -171,6 +168,7 @@ typedef struct {
 
     /* L-Line carries initialization only; UART traffic stays on K-Line. */
     bool k_line_only;
+    uint32_t frame_mode;
 
     /**
      * Retransmissions after a corrupted transmission. Zero.
@@ -203,6 +201,15 @@ typedef struct {
     uint8_t periodic_len;
 } kline_cfg_t;
 
+typedef struct {
+    const uint8_t *data;
+    size_t len;
+    size_t sent;
+    size_t echoed;
+    size_t announced;
+    bool failed;
+} kline_tx_t;
+
 static struct {
     bool started;
     bool uart_installed;
@@ -217,6 +224,9 @@ static struct {
     SemaphoreHandle_t exited;
     SemaphoreHandle_t api_lock; /**< One outstanding command at a time. */
     unsigned pending_inits;
+    bool command_pending;
+    bool command_timed_out;
+    bool uart_tx_unresolved;
     SemaphoreHandle_t data_lock; /**< Guards the fields below from readers. */
 
     /* Request payload. Written by a caller holding api_lock, read by the
@@ -229,12 +239,12 @@ static struct {
     int result;
 
     kline_cfg_t cfg;
+    kline_tx_t *tx; /**< Borrowed only while the worker is inside tx_once(). */
 
     /* Live state, task-owned. */
     uint32_t active_baud; /**< UART rate; slow init may detect a new one. */
     bus_link_t link;
     kline_keybytes_t keys;
-    kline_echo_t echo;
     int64_t last_bus_us; /**< Last byte seen or driven, either direction. */
     int64_t tx_end_us;   /**< End of the most recent transmission. */
     bool p2_pending;     /**< The next message completes a P2 measurement. */
@@ -243,10 +253,16 @@ static struct {
     uint16_t pending_status; /**< Flags owed to the next delivered message. */
 
     /* Receive assembly. */
+    uint8_t uart_pending[64];
+    size_t uart_pending_pos;
+    size_t uart_pending_len;
+    int64_t uart_pending_us;
     uint8_t asm_buf[KLINE_MAX_MSG];
     size_t asm_len;
     int64_t asm_start_us;
     int64_t asm_last_us;
+    bool rx_invalid;
+    int64_t rx_invalid_last_us;
 
     /* The UART cannot determine all ISO rates on ESP32-S3: its hardware
      * auto-baud period counter saturates below about 9.8 kbaud on the 40 MHz
@@ -258,6 +274,11 @@ static struct {
 
     bus_stats_t stats;
 } g;
+
+static bool command_blocked(void) {
+    return __atomic_load_n(&g.command_timed_out, __ATOMIC_ACQUIRE) ||
+           __atomic_load_n(&g.uart_tx_unresolved, __ATOMIC_ACQUIRE);
+}
 
 /* The mutex is created on the first open. Reading the counters of a bus that
  * has never been up is legitimate - the shell does it - and there is nothing
@@ -293,9 +314,6 @@ static uint32_t byte_time_at_baud(uint32_t baud) {
 
     return (bits * 1000000u + baud - 1) / baud;
 }
-
-/** @brief Microseconds one character occupies at the current settings. */
-static uint32_t byte_time_us(void) { return byte_time_at_baud(g.active_baud); }
 
 /**
  * @brief The interval between two timestamps, less the character that ended
@@ -393,7 +411,44 @@ static void tx_pin_to_uart(void) {
  *         predate what is about to happen. */
 static void rx_discard(void) {
     uart_flush_input(KLINE_UART);
+    g.uart_pending_pos = 0;
+    g.uart_pending_len = 0;
     g.asm_len = 0;
+    g.rx_invalid = false;
+}
+
+static bool receive_event(TickType_t wait);
+
+static void uart_events(void) {
+    while (receive_event(0)) {
+    }
+}
+
+/* Fill the shared cursor without recursively processing UART events. */
+static bool uart_fill(TickType_t wait) {
+    if (g.uart_pending_pos < g.uart_pending_len)
+        return true;
+
+    int n =
+        uart_read_bytes(KLINE_UART, g.uart_pending, sizeof(g.uart_pending), 0);
+    if (n == 0 && wait)
+        n = uart_read_bytes(KLINE_UART, g.uart_pending, 1, wait);
+    if (n <= 0) {
+        return false;
+    }
+
+    g.uart_pending_pos = 0;
+    g.uart_pending_len = (size_t)n;
+    g.uart_pending_us = now_us();
+    return true;
+}
+
+/* Echo checking, handshake bytes and message framing share this cursor. */
+static bool uart_receive(TickType_t wait) {
+    uart_events();
+    uart_fill(wait);
+    uart_events();
+    return g.uart_pending_pos < g.uart_pending_len;
 }
 
 /* ------------------------------------------------------------------ *
@@ -602,22 +657,24 @@ static void asm_push(uint8_t b, int64_t when) {
 static bool asm_complete(bool gap_elapsed, kline_frame_t *out) {
     size_t want;
     uint16_t status = 0;
+    bool checksum_ok;
 
     if (g.asm_len == 0) {
         return false;
     }
 
-    if (g.cfg.checksum_rx) {
+    if (g.cfg.frame_mode != BUS_KLINE_FRAME_ISO9141) {
         want = kline_msg_len(g.asm_buf, g.asm_len);
-
-        if (want && g.asm_len == want && kline_frame_ok(g.asm_buf, g.asm_len)) {
-            goto deliver;
+        if (want && g.asm_len == want &&
+            (g.cfg.frame_mode == BUS_KLINE_FRAME_ISO14230 ||
+             (g.cfg.checksum_rx && kline_frame_ok(g.asm_buf, g.asm_len)))) {
+            goto validate;
         }
-
-        if (kline_is_carb_fmt(g.asm_buf[0]) &&
+        if (g.cfg.frame_mode == BUS_KLINE_FRAME_DISCOVERY &&
+            g.cfg.checksum_rx && kline_is_carb_fmt(g.asm_buf[0]) &&
             g.asm_len == KLINE_CARB_MAX_MSG &&
             kline_frame_ok(g.asm_buf, g.asm_len)) {
-            goto deliver;
+            goto validate;
         }
     }
 
@@ -625,7 +682,9 @@ static bool asm_complete(bool gap_elapsed, kline_frame_t *out) {
         return false;
     }
 
-    if (g.asm_len < KLINE_MIN_MSG) {
+    if (g.asm_len < (g.cfg.frame_mode == BUS_KLINE_FRAME_ISO9141
+                         ? (g.cfg.checksum_rx ? 2u : 1u)
+                         : KLINE_MIN_MSG)) {
         /* One or two bytes and then silence. A line settling after an
          * initialisation, or an ECU that gave up mid-message. */
         g.stats.rx_short++;
@@ -633,7 +692,14 @@ static bool asm_complete(bool gap_elapsed, kline_frame_t *out) {
         return false;
     }
 
-    if (!kline_frame_ok(g.asm_buf, g.asm_len)) {
+validate:
+    checksum_ok =
+        g.cfg.frame_mode == BUS_KLINE_FRAME_ISO9141
+            ? g.asm_len >= 2 && kline_checksum(g.asm_buf, g.asm_len - 1) ==
+                                    g.asm_buf[g.asm_len - 1]
+            : kline_frame_ok(g.asm_buf, g.asm_len);
+    if ((g.cfg.checksum_rx || g.cfg.frame_mode == BUS_KLINE_FRAME_DISCOVERY) &&
+        !checksum_ok) {
         g.stats.rx_bad_checksum++;
         if (g.cfg.checksum_rx) {
             g.asm_len = 0;
@@ -642,7 +708,6 @@ static bool asm_complete(bool gap_elapsed, kline_frame_t *out) {
         status |= BUS_RX_BAD_CHECKSUM;
     }
 
-deliver:
     memcpy(out->data, g.asm_buf, g.asm_len);
     out->len = (uint16_t)g.asm_len;
     out->status = status;
@@ -652,25 +717,56 @@ deliver:
     return true;
 }
 
-/** @brief Read everything the UART has, without waiting. */
-static void rx_drain(void) {
-    uint8_t buf[64];
-    int n;
-
-    while ((n = uart_read_bytes(KLINE_UART, buf, sizeof(buf), 0)) > 0) {
-        int64_t when = now_us();
-
-        for (int i = 0; i < n; i++) {
-            asm_push(buf[i], when);
-        }
-
-        g.stats.rx_bytes += (uint32_t)n;
-        g.last_bus_us = when;
+/** Read up to one frame, retaining the rest of the UART batch. */
+static bool rx_drain(kline_frame_t *out) {
+    if (__atomic_load_n(&g.uart_tx_unresolved, __ATOMIC_ACQUIRE)) {
+        rx_discard();
+        return false;
     }
+    while (uart_receive(0)) {
+        uint8_t byte = g.uart_pending[g.uart_pending_pos++];
+        g.stats.rx_bytes++;
+        g.last_bus_us = g.uart_pending_us;
+        if (g.rx_invalid) {
+            bool gap = g.uart_pending_us - g.rx_invalid_last_us >=
+                       P_TO_US(g.cfg.p1_max);
+            if (g.uart_pending_us > g.rx_invalid_last_us)
+                g.rx_invalid_last_us = g.uart_pending_us;
+            if (!gap)
+                continue;
+            g.rx_invalid = false;
+        }
+        asm_push(byte, g.uart_pending_us);
+        if (asm_complete(false, out)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void tx_read_echo(kline_tx_t *tx, size_t limit);
+
+static void rx_fault(void) {
+    if (g.tx && g.tx->echoed < g.tx->len)
+        g.tx->failed = true;
+    g.asm_len = 0;
+    g.rx_invalid = true;
+    g.rx_invalid_last_us = now_us();
 }
 
 static void uart_event(const uart_event_t *ev) {
     switch (ev->type) {
+    case UART_DATA:
+        if (g.tx) {
+            /* Confirm the announced echo bytes before a following RX error.
+             * Notifications may be lost; normal reads still drain the ring. */
+            size_t remaining = g.tx->len - g.tx->announced;
+            g.tx->announced += ev->size < remaining ? ev->size : remaining;
+            size_t limit =
+                g.tx->announced < g.tx->sent ? g.tx->announced : g.tx->sent;
+            tx_read_echo(g.tx, limit);
+        }
+        break;
     case UART_FIFO_OVF:
     case UART_BUFFER_FULL:
         /* Bytes were lost, so whatever is half assembled is a fragment. The
@@ -680,6 +776,7 @@ static void uart_event(const uart_event_t *ev) {
         g.stats.rx_overrun++;
         g.pending_status |= BUS_RX_BUFFER_OVERFLOW;
         rx_discard();
+        rx_fault();
         break;
     case UART_BREAK:
         g.stats.rx_break++;
@@ -690,10 +787,24 @@ static void uart_event(const uart_event_t *ev) {
         /* Nearly always the wrong baud rate, which is what makes this worth
          * a counter of its own rather than a share of the checksum errors. */
         g.stats.rx_frame_err++;
+        rx_fault();
         break;
     default:
         break;
     }
+}
+
+static bool receive_event(TickType_t wait) {
+    QueueSetMemberHandle_t member = xQueueSelectFromSet(g.set, wait);
+    if (member == (QueueSetMemberHandle_t)g.uart_q) {
+        uart_event_t event;
+        if (xQueueReceive(g.uart_q, &event, 0) == pdTRUE)
+            uart_event(&event);
+    } else if (member == (QueueSetMemberHandle_t)g.cmd_q) {
+        if (xQueueReceive(g.cmd_q, &g.cmd, 0) == pdTRUE)
+            g.command_pending = true;
+    }
+    return member != NULL;
 }
 
 /**
@@ -708,12 +819,17 @@ static void uart_event(const uart_event_t *ev) {
  * @return 1 with @p out filled, 0 when @p deadline passed, -1 when a command
  *         is waiting in g.cmd.
  */
-static int rx_service(int64_t deadline_us, kline_frame_t *out) {
+static int rx_service(int64_t deadline_us, kline_frame_t *out,
+                      bool allow_command) {
     for (;;) {
+        if (rx_drain(out)) {
+            return 1;
+        }
+        if (allow_command && g.command_pending)
+            return -1;
         int64_t now = now_us();
         int64_t wake = deadline_us;
         int64_t gap_at = 0;
-        QueueSetMemberHandle_t member;
         TickType_t ticks;
 
         if (g.asm_len) {
@@ -738,30 +854,7 @@ static int rx_service(int64_t deadline_us, kline_frame_t *out) {
             ticks = 1;
         }
 
-        member = xQueueSelectFromSet(g.set, ticks);
-
-        if (member == (QueueSetMemberHandle_t)g.cmd_q) {
-            if (xQueueReceive(g.cmd_q, &g.cmd, 0) == pdTRUE) {
-                return -1;
-            }
-            continue;
-        }
-
-        if (member == (QueueSetMemberHandle_t)g.uart_q) {
-            uart_event_t ev;
-
-            /* uart_flush_input() resets this queue behind the set's back, so
-             * a handle can be handed over with nothing behind it. */
-            if (xQueueReceive(g.uart_q, &ev, 0) == pdTRUE) {
-                uart_event(&ev);
-            }
-        }
-
-        rx_drain();
-
-        if (asm_complete(false, out)) {
-            return 1;
-        }
+        receive_event(ticks);
     }
 }
 
@@ -786,11 +879,12 @@ static bool rx_raw_byte(int64_t deadline_us, uint8_t *out) {
             ticks = 1;
         }
 
-        if (uart_read_bytes(KLINE_UART, out, 1, ticks) == 1) {
+        if (uart_receive(ticks)) {
+            *out = g.uart_pending[g.uart_pending_pos++];
             /* Not counted in rx_bytes: this path also swallows our own echo,
              * and a receive counter that includes what we transmitted is a
              * counter nobody can read. */
-            g.last_bus_us = now_us();
+            g.last_bus_us = g.uart_pending_us;
             return true;
         }
     }
@@ -874,8 +968,8 @@ static void publish_loopback(const uint8_t *data, size_t len) {
  * transmission, which is how a late second module comes to look like a module
  * that never answered.
  *
- * Only ever called from inside a command, and only one command is ever
- * outstanding, so rx_service() cannot report another one here.
+ * An operation already owns TX. Commands arriving during periodic traffic
+ * remain pending until that operation finishes, including its quiet wait.
  *
  * @param p3_only J2534 WAIT_P3_MIN_ONLY: wait P3min whatever happened.
  */
@@ -891,13 +985,10 @@ static void wait_before_tx(bool p3_only) {
             return;
         }
 
-        r = rx_service(deadline, &f);
+        r = rx_service(deadline, &f, false);
 
         if (r == 1) {
             publish(&f);
-        } else if (r < 0) {
-            ESP_LOGE(TAG, "command arrived while one was running");
-            return;
         }
     }
 }
@@ -905,6 +996,53 @@ static void wait_before_tx(bool p3_only) {
 /* ------------------------------------------------------------------ *
  * Transmit
  * ------------------------------------------------------------------ */
+
+static void tx_read_echo(kline_tx_t *tx, size_t limit) {
+    while (!tx->failed && tx->echoed < limit) {
+        if (!uart_fill(0))
+            return;
+        uint8_t byte = g.uart_pending[g.uart_pending_pos++];
+        g.last_bus_us = g.uart_pending_us;
+        if (byte != tx->data[tx->echoed]) {
+            g.stats.tx_echo_bad++;
+            tx->failed = true;
+            return;
+        }
+        tx->echoed++;
+        g.stats.tx_echo_ok++;
+    }
+}
+
+static int tx_collect_echo(kline_tx_t *tx, TickType_t wait) {
+    uart_events();
+    if (!tx->failed && tx->echoed < tx->sent) {
+        uart_fill(wait);
+        /* Account for errors delivered during the blocking read before
+         * accepting bytes that have no DATA notification. */
+        uart_events();
+        tx_read_echo(tx, tx->sent);
+    }
+    return tx->failed ? BUS_ERR_ECHO : 0;
+}
+
+static int tx_finish_echo(kline_tx_t *tx) {
+    int64_t deadline = g.tx_end_us + W_TO_US(KLINE_UART_TIMEOUT_MS);
+    for (;;) {
+        int rc = tx_collect_echo(tx, 0);
+        if (rc || tx->echoed == tx->sent)
+            return rc;
+
+        int64_t left = deadline - now_us();
+        if (left <= 0) {
+            g.stats.tx_echo_missing += (uint32_t)(tx->sent - tx->echoed);
+            return BUS_ERR_ECHO;
+        }
+        TickType_t ticks = pdMS_TO_TICKS((uint32_t)((left + 999) / 1000));
+        rc = tx_collect_echo(tx, ticks ? ticks : 1);
+        if (rc)
+            return rc;
+    }
+}
 
 /**
  * @brief Put one message on the wire and watch it go.
@@ -916,19 +1054,16 @@ static void wait_before_tx(bool p3_only) {
  *                5.1.5.3 requires to follow the wake up pattern immediately.
  * @param flags   BUS_TX_* flags for the quiet wait and receive boundary.
  *
- * Each byte is read back as it is driven. The transceiver's loopback makes
- * that free, and it is the only way to tell a message that was transmitted
- * from one that was transmitted into somebody else. A byte that comes back
- * changed is a corrupted transmission, which both standards ask a tester to
- * detect; a byte that does not come back at all on the very first attempt is
- * a transceiver without loopback, which is a property of the board rather
- * than a fault, so it is noted once and the checking is dropped for the rest
- * of the session.
+ * OpenDIAG's transceiver echoes transmitted bytes in order. Track that prefix
+ * independently of UART delivery batches and P4 pacing. The borrowed payload
+ * remains owned by this synchronous operation until echo collection finishes;
+ * any following response bytes stay in the shared receive buffer.
  */
 static int tx_once(const uint8_t *buf, size_t len, bool wait, uint32_t flags) {
-    uint32_t echo_us = byte_time_us() * 2 + 2000;
-    bool collision = false;
     int rc = 0;
+
+    if (__atomic_load_n(&g.uart_tx_unresolved, __ATOMIC_ACQUIRE))
+        return BUS_ERR_NOT_READY;
 
     if (wait) {
         wait_before_tx((flags & BUS_TX_WAIT_P3_MIN_ONLY) != 0);
@@ -945,62 +1080,48 @@ static int tx_once(const uint8_t *buf, size_t len, bool wait, uint32_t flags) {
      * the bytes that were just thrown away. Carrying a break raised by a
      * 5 baud address word into the first reply of the session that followed
      * it is not a warning, it is noise. */
+    uart_events();
     rx_discard();
     g.pending_status = 0;
+    kline_tx_t tx = {
+        .data = buf,
+        .len = len,
+    };
+    g.tx = &tx;
 
     for (size_t i = 0; i < len; i++) {
-        int64_t sent_us;
+        rc = tx_collect_echo(&tx, 0);
+        if (rc)
+            break;
 
         if (uart_write_bytes(KLINE_UART, &buf[i], 1) != 1) {
+            rc = BUS_ERR_TX_FAILED;
+            break;
+        }
+        if (uart_wait_tx_done(KLINE_UART,
+                              pdMS_TO_TICKS(KLINE_UART_TIMEOUT_MS)) != ESP_OK) {
+            __atomic_store_n(&g.uart_tx_unresolved, true, __ATOMIC_RELEASE);
+            g.tx = NULL;
             return BUS_ERR_TX_FAILED;
         }
-        if (uart_wait_tx_done(KLINE_UART, pdMS_TO_TICKS(100)) != ESP_OK) {
-            return BUS_ERR_TX_FAILED;
-        }
 
-        sent_us = now_us();
-        g.last_bus_us = sent_us;
-
-        if (g.echo != ECHO_ABSENT) {
-            uint8_t back;
-
-            /* The echo window is a couple of character times: well inside
-             * P2min, so a byte arriving in it cannot be an answer. */
-            if (rx_raw_byte(sent_us + echo_us, &back)) {
-                g.echo = ECHO_PRESENT;
-                if (back == buf[i]) {
-                    g.stats.tx_echo_ok++;
-                } else {
-                    g.stats.tx_echo_bad++;
-                    collision = true;
-                }
-            } else {
-                g.stats.tx_echo_missing++;
-                if (g.echo == ECHO_UNKNOWN) {
-                    ESP_LOGW(TAG, "transceiver does not echo; corrupted "
-                                  "transmissions will go unnoticed");
-                    g.echo = ECHO_ABSENT;
-                }
-            }
-        }
-
+        g.tx_end_us = now_us();
+        g.last_bus_us = g.tx_end_us;
+        tx.sent++;
         g.stats.tx_bytes++;
-
         if (i + 1 < len) {
-            /* P4min, measured from the end of the byte just sent. */
-            delay_until_us(sent_us + P_TO_US(g.cfg.p4_min));
+            delay_until_us(g.tx_end_us + P_TO_US(g.cfg.p4_min));
         }
     }
 
-    g.tx_end_us = now_us();
-    g.last_bus_us = g.tx_end_us;
-    g.p2_pending = true;
+    if (!rc)
+        rc = tx_finish_echo(&tx);
+    g.tx = NULL;
+    if (rc)
+        rx_discard();
+
+    g.p2_pending = rc == 0;
     g.tx_answered = false;
-
-    if (collision) {
-        rc = BUS_ERR_ECHO;
-    }
-
     return rc;
 }
 
@@ -1020,6 +1141,8 @@ static int tx_message(const uint8_t *buf, size_t len, bool wait,
 
     if (rc == 0 || rc == BUS_ERR_ECHO) {
         g.stats.tx_msgs++;
+    }
+    if (rc == 0) {
         publish_loopback(buf, len);
     }
 
@@ -1210,9 +1333,9 @@ static int init_5baud(const bus_init_t *in) {
         delay_until_us(kb2_at + W_TO_US(g.cfg.w4_min));
 
         b = (uint8_t)~kb2;
-        if (tx_once(&b, 1, false, 0) == BUS_ERR_TX_FAILED) {
-            return BUS_ERR_TX_FAILED;
-        }
+        int rc = tx_once(&b, 1, false, 0);
+        if (rc)
+            return rc;
     }
 
     /* W4 again, this time for the ECU's inverted address. */
@@ -1259,7 +1382,8 @@ static int init_5baud(const bus_init_t *in) {
  * counted in ticks.
  *
  * J2534 clause 7.4.6 allows the request to be any message the application
- * likes, or none at all - so @c msg_len of zero drives the pattern and stops.
+ * likes, or none at all. Raw callers choose independently whether to wait
+ * for a response.
  */
 static int init_fast(bus_init_t *io) {
     uint8_t msg[BUS_INIT_MSG_MAX + 1];
@@ -1269,7 +1393,9 @@ static int init_fast(bus_init_t *io) {
     size_t hdr, n;
     int rc;
 
-    if (io->msg_len > BUS_INIT_MSG_MAX) {
+    if (io->msg_len > BUS_INIT_MSG_MAX ||
+        (io->msg_len &&
+         !frame_for_tx(io->msg, io->msg_len, io->tx_flags, msg))) {
         return BUS_ERR_BAD_ARG;
     }
 
@@ -1297,33 +1423,44 @@ static int init_fast(bus_init_t *io) {
     rx_discard();
     g.pending_status = 0;
 
-    if (io->msg_len == 0) {
-        /* Pattern only. The application will send its own request. */
-        g.link.address = io->address;
+    io->reply_len = 0;
+    if (io->msg_len) {
+        n = frame_for_tx(io->msg, io->msg_len, io->tx_flags, msg);
+        /* Raw initialization does not generate a normal TX indication. */
+        rc = io->raw_response ? tx_once(msg, n, false, io->tx_flags)
+                              : tx_message(msg, n, false, io->tx_flags);
+        if (rc) {
+            return rc;
+        }
+        if (io->raw_response)
+            g.stats.tx_msgs++;
+    }
+    g.link.address = io->address;
+    if (io->no_response || (!io->raw_response && !io->msg_len)) {
         return 0;
     }
 
-    n = frame_for_tx(io->msg, io->msg_len, 0, msg);
-    if (n == 0) {
-        return BUS_ERR_BAD_ARG;
+    int64_t deadline = (io->msg_len ? g.tx_end_us : now_us()) +
+                       (io->raw_response ? P_TO_US(g.cfg.p2_max)
+                                         : W_TO_US(KLINE_FAST_RESP_MS));
+    bool received = wait_frame(deadline, &f);
+    /* P2 bounds response start; a started message completes under P1. */
+    while (!received && g.asm_len) {
+        received = wait_frame(g.asm_last_us + P_TO_US(g.cfg.p1_max), &f);
     }
-
-    rc = tx_message(msg, n, false, 0);
-    if (rc == BUS_ERR_TX_FAILED) {
-        return rc;
-    }
-
-    if (!wait_frame(now_us() + W_TO_US(KLINE_FAST_RESP_MS), &f)) {
-        ESP_LOGW(TAG, "no StartCommunication response");
+    if (!received) {
         g.stats.init_no_keys++;
         return BUS_ERR_INIT;
     }
-
     if (f.len > sizeof(io->reply)) {
         return BUS_ERR_NO_SPACE;
     }
     memcpy(io->reply, f.data, f.len);
-    io->reply_len = (uint8_t)f.len;
+    io->reply_len = f.len;
+    io->reply_timestamp_us = (uint32_t)f.end_us;
+    if (io->raw_response) {
+        return 0;
+    }
 
     hdr = kline_header_len(f.data[0]);
     if ((f.data[0] & 0x3Fu) == 0 && f.len > hdr) {
@@ -1401,10 +1538,12 @@ static void link_established(void) {
 static int do_init(kline_cmd_t which, bus_init_t *io) {
     int rc;
 
+    if (__atomic_load_n(&g.uart_tx_unresolved, __ATOMIC_ACQUIRE))
+        return BUS_ERR_NOT_READY;
+
     g.stats.init_attempts++;
     memset(&g.link, 0, sizeof(g.link));
     memset(&g.keys, 0, sizeof(g.keys));
-    g.echo = ECHO_UNKNOWN;
 
     rc = (which == CMD_FIVE_BAUD) ? init_5baud(io) : init_fast(io);
 
@@ -1421,7 +1560,9 @@ static int do_init(kline_cmd_t which, bus_init_t *io) {
     io->key[1] = g.link.key[1];
 
     link_established();
-    rx_discard();
+    if (which != CMD_FAST_INIT || !io->raw_response) {
+        rx_discard();
+    }
     g.pending_status = 0;
     return 0;
 }
@@ -1459,7 +1600,7 @@ static int do_stop_comm(void) {
  * ------------------------------------------------------------------ */
 
 static bool periodic_due(int64_t now) {
-    return g.cfg.periodic_ms && g.cfg.periodic_len &&
+    return !command_blocked() && g.cfg.periodic_ms && g.cfg.periodic_len &&
            now - g.last_bus_us >= (int64_t)g.cfg.periodic_ms * 1000;
 }
 
@@ -1494,7 +1635,7 @@ static void send_periodic(void) {
  * ------------------------------------------------------------------ */
 
 static bool wait_frame(int64_t deadline_us, kline_frame_t *out) {
-    return rx_service(deadline_us, out) == 1;
+    return rx_service(deadline_us, out, false) == 1;
 }
 
 static void kline_task(void *arg) {
@@ -1517,14 +1658,14 @@ static void kline_task(void *arg) {
         }
 
         deadline = now_us() + 200000;
-        if (g.cfg.periodic_ms && g.cfg.periodic_len) {
+        if (!command_blocked() && g.cfg.periodic_ms && g.cfg.periodic_len) {
             int64_t at = g.last_bus_us + (int64_t)g.cfg.periodic_ms * 1000;
             if (at < deadline) {
                 deadline = at;
             }
         }
 
-        r = rx_service(deadline, &f);
+        r = rx_service(deadline, &f, true);
 
         if (r == 1) {
             publish(&f);
@@ -1535,6 +1676,7 @@ static void kline_task(void *arg) {
         }
 
         /* A command. The caller is blocked on cmd_done until we answer. */
+        g.command_pending = false;
         switch (g.cmd) {
         case CMD_TX:
             g.result = tx_message(g.req, g.req_len, true, g.req_flags);
@@ -1555,6 +1697,9 @@ static void kline_task(void *arg) {
 
 /** @brief Hand one command to the task and wait for its answer. */
 static int run_cmd(kline_cmd_t c, TickType_t wait) {
+    if (command_blocked()) {
+        return BUS_ERR_NOT_READY;
+    }
     bool initializing = c == CMD_FIVE_BAUD || c == CMD_FAST_INIT;
     if (initializing) {
         __atomic_fetch_add(&g.pending_inits, 1, __ATOMIC_RELEASE);
@@ -1567,6 +1712,7 @@ static int run_cmd(kline_cmd_t c, TickType_t wait) {
     }
 
     if (xSemaphoreTake(g.cmd_done, wait) != pdTRUE) {
+        __atomic_store_n(&g.command_timed_out, true, __ATOMIC_RELEASE);
         ESP_LOGE(TAG, "command %d did not complete", (int)c);
         return BUS_ERR_TIMEOUT;
     }
@@ -1696,9 +1842,13 @@ static esp_err_t kline_open(const bus_cfg_t *cfg) {
 
     cfg_defaults(&g.cfg);
     __atomic_store_n(&g.pending_inits, 0, __ATOMIC_RELEASE);
+    g.command_pending = false;
+    __atomic_store_n(&g.command_timed_out, false, __ATOMIC_RELEASE);
+    __atomic_store_n(&g.uart_tx_unresolved, false, __ATOMIC_RELEASE);
     g.active_baud = g.cfg.baud;
-    g.echo = ECHO_UNKNOWN;
+    g.tx = NULL;
     g.asm_len = 0;
+    g.rx_invalid = false;
     g.suppress_until_us = 0;
     g.pending_status = 0;
     g.tx_answered = true;
@@ -1714,6 +1864,11 @@ static esp_err_t kline_open(const bus_cfg_t *cfg) {
     if (err != ESP_OK)
         goto fail;
     tx_pin_to_uart();
+
+    /* Echo and immediate ECU replies must not wait for a FIFO-sized burst. */
+    err = uart_set_rx_full_threshold(KLINE_UART, 1);
+    if (err != ESP_OK)
+        goto fail;
 
     /* Report a lull after two character times rather than after the default
      * ten, so the framer learns about the end of a message while its P1max
@@ -1835,6 +1990,10 @@ static int kline_tx(const bus_msg_t *msg, uint32_t flags) {
 
     xSemaphoreTake(g.api_lock, portMAX_DELAY);
 
+    if (command_blocked()) {
+        xSemaphoreGive(g.api_lock);
+        return BUS_ERR_NOT_READY;
+    }
     n = frame_for_tx(data, len, flags, g.req);
     if (n == 0) {
         xSemaphoreGive(g.api_lock);
@@ -1936,6 +2095,9 @@ static uint32_t *cfg_slot(bus_param_t p, uint32_t *lo, uint32_t *hi) {
     case BUS_P_TX_RETRIES:
         *hi = 8;
         return &g.cfg.tx_retries;
+    case BUS_P_KLINE_FRAME_MODE:
+        *hi = BUS_KLINE_FRAME_ISO14230;
+        return &g.cfg.frame_mode;
     case BUS_P_PERIODIC_MS:
         *hi = 0xFFFFFF;
         return &g.cfg.periodic_ms;
@@ -1976,6 +2138,10 @@ static int kline_set_param(bus_param_t p, uint32_t value) {
     xSemaphoreTake(g.api_lock, portMAX_DELAY);
     LOCK();
 
+    if (command_blocked()) {
+        rc = BUS_ERR_BUS_BUSY;
+        goto done;
+    }
     flag = cfg_flag(p);
     if (flag) {
         if (p == BUS_P_K_LINE_ONLY && *flag != (value != 0)) {
@@ -2054,6 +2220,13 @@ static int kline_ioctl(bus_ioctl_t id, const void *in, void *out) {
         return BUS_ERR_NOT_READY;
     }
 
+    if (id != BUS_IOCTL_GET_LINK) {
+        if (command_blocked())
+            return BUS_ERR_NOT_READY;
+        if (__atomic_load_n(&g.pending_inits, __ATOMIC_ACQUIRE))
+            return BUS_ERR_BUS_BUSY;
+    }
+
     switch (id) {
     case BUS_IOCTL_FIVE_BAUD_INIT:
     case BUS_IOCTL_FAST_INIT: {
@@ -2069,12 +2242,16 @@ static int kline_ioctl(bus_ioctl_t id, const void *in, void *out) {
         }
 
         xSemaphoreTake(g.api_lock, portMAX_DELAY);
+        if (command_blocked()) {
+            xSemaphoreGive(g.api_lock);
+            return BUS_ERR_NOT_READY;
+        }
         g.req_init = io;
         /* Two seconds of address word, W0 before it, W1 after, and margin. */
         rc = run_cmd(id == BUS_IOCTL_FIVE_BAUD_INIT ? CMD_FIVE_BAUD
                                                     : CMD_FAST_INIT,
                      pdMS_TO_TICKS(8000));
-        if (out) {
+        if (out && !__atomic_load_n(&g.command_timed_out, __ATOMIC_ACQUIRE)) {
             *(bus_init_t *)out = g.req_init;
         }
         xSemaphoreGive(g.api_lock);

@@ -23,6 +23,7 @@ struct Device {
     Settings settings;
     J2534_ULONG id;
     J2534_ULONG remote;
+    J2534_ULONG fastInitMaxData;
     bool disconnected;
     bool programmingVoltage;
     platform::Lease lease;
@@ -31,6 +32,7 @@ struct Device {
     Device()
         : id(0),
           remote(0),
+          fastInitMaxData(0),
           disconnected(false),
           programmingVoltage(false) {
     }
@@ -166,7 +168,7 @@ static J2534_LONG rpc(const opendiag_Request &request, opendiag_Response &respon
     }
 }
 
-static bool compatible(Link &link) {
+static bool compatible(Link &link, J2534_ULONG *fastInitMaxData = NULL) {
     opendiag_Request request = {};
     opendiag_Response response = {};
     request.which_command = opendiag_Request_capabilities_tag;
@@ -176,6 +178,9 @@ static bool compatible(Link &link) {
         // Only the side-effect-free startup probe is retried.
         link.selectFrontend(true);
         link.rpc(request, response);
+    }
+    if (fastInitMaxData) {
+        *fastInitMaxData = response.capabilities.fast_init_max_data;
     }
     return !response.status && response.has_capabilities &&
            response.capabilities.wire_version == 1 && response.capabilities.api_version == 0x0500 &&
@@ -262,7 +267,7 @@ J2534_LONG PassThruOpen(const char *name, J2534_ULONG *id) {
         }
         failure = ERR_DEVICE_NOT_CONNECTED;
         candidate->link.open(candidate->settings);
-        if (!compatible(candidate->link)) {
+        if (!compatible(candidate->link, &candidate->fastInitMaxData)) {
             delete candidate;
             return ERR_OPEN_FAILED;
         }
@@ -1025,52 +1030,48 @@ static J2534_LONG fiveBaudInitIoctl(Channel &channel, void *input, void *output)
 }
 
 static J2534_LONG fastInitIoctl(Channel &channel, void *input, void *output) {
-    opendiag_Request request = {};
-    opendiag_Response response = {};
-    request.which_command = opendiag_Request_ioctl_tag;
-    opendiag_Ioctl &io = request.command.ioctl;
-    io.id = FAST_INIT;
-    io.target = channel.remote;
-    J2534_LONG status = STATUS_NOERROR;
-
     if (channel.protocol != ISO9141 && channel.protocol != ISO14230) {
         return ERR_IOCTL_ID_NOT_SUPPORTED;
     }
-
-    if (!input || !output || channel.protocol == ISO9141) {
+    if (!device->fastInitMaxData) {
         return ERR_NOT_SUPPORTED;
     }
-
-    PASSTHRU_MSG &in = *(PASSTHRU_MSG *)input;
-    PASSTHRU_MSG &out = *(PASSTHRU_MSG *)output;
-    if (!out.DataBuffer) {
+    PASSTHRU_MSG *out = (PASSTHRU_MSG *)output;
+    if (out && !out->DataBuffer) {
         return ERR_NULL_PARAMETER;
     }
 
-    opendiag_Message message = {};
-    status = encodeMessage(in, channel, message);
-    if (status) {
-        return status;
+    opendiag_Request request = {};
+    opendiag_Response response = {};
+    request.which_command = opendiag_Request_fast_init_tag;
+    opendiag_FastInit &init = request.command.fast_init;
+    init.channel = channel.remote;
+    init.no_response = !output;
+    if (input) {
+        opendiag_Message message = {};
+        J2534_LONG status = encodeMessage(*(PASSTHRU_MSG *)input, channel, message);
+        if (status) {
+            return status;
+        }
+        if (message.data.size > device->fastInitMaxData ||
+            message.data.size > sizeof(init.data.bytes)) {
+            return ERR_INVALID_MSG;
+        }
+        init.tx_flags = message.tx_flags;
+        init.data.size = message.data.size;
+        memcpy(init.data.bytes, message.data.bytes, init.data.size);
     }
 
-    if (message.data.size > sizeof(io.data.bytes)) {
-        return ERR_INVALID_MSG;
-    }
-
-    io.data.size = message.data.size;
-    memcpy(io.data.bytes, message.data.bytes, io.data.size);
-    status = rpc(request, response);
-    if (!status) {
-        memset(&message, 0, sizeof(message));
-        message.protocol = channel.protocol;
-        message.data.size = response.data.size;
-        message.extra_data_index = response.data.size;
-        memcpy(message.data.bytes, response.data.bytes, response.data.size);
-        if (!copyMessage(message, out)) {
+    J2534_LONG status = rpc(request, response);
+    if (!status && out) {
+        if (!response.has_message || response.message.protocol != channel.protocol ||
+            !response.message.data.size) {
+            return ERR_FAILED;
+        }
+        if (!copyMessage(response.message, *out)) {
             return ERR_BUFFER_TOO_SMALL;
         }
     }
-
     return status;
 }
 

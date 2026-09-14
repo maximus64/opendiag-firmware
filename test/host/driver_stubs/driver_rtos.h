@@ -9,3 +9,5 @@ extern bool driver_fail_task, driver_exit_on_wait;
 extern int driver_task_starts, driver_task_exits, driver_notifications;
 void driver_rtos_reset(void);
 void driver_run_worker(void);
+
+extern int driver_queue_set_waits;

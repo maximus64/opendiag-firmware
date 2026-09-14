@@ -39,6 +39,7 @@ esp_err_t uart_driver_delete(uart_port_t port);
 esp_err_t uart_param_config(uart_port_t port, const uart_config_t *cfg);
 esp_err_t uart_set_pin(uart_port_t port, int tx, int rx, int rts, int cts);
 esp_err_t uart_set_rx_timeout(uart_port_t port, uint8_t threshold);
+esp_err_t uart_set_rx_full_threshold(uart_port_t port, int threshold);
 esp_err_t uart_set_baudrate(uart_port_t port, uint32_t baud);
 esp_err_t uart_set_word_length(uart_port_t port, uart_word_length_t bits);
 esp_err_t uart_set_parity(uart_port_t port, uart_parity_t parity);
