@@ -51,6 +51,7 @@ struct Channel {
     bool overflow;
     J2534_ULONG receiveError;
     J2534_ULONG receiveBytes;
+    J2534_ULONG lastReadEndpoint;
     std::deque<PASSTHRU_MSG> received;
     std::map<J2534_ULONG, Filter> filters;
     std::map<J2534_ULONG, Transmission> transmissions;
@@ -64,7 +65,8 @@ struct Channel {
           loopback(false),
           overflow(false),
           receiveError(0),
-          receiveBytes(0) {
+          receiveBytes(0),
+          lastReadEndpoint(0) {
         isoConfig[ISO15765_BS] = 0;
         isoConfig[ISO15765_STMIN] = 0;
         isoConfig[ISO15765_WFT_MAX] = 0;
@@ -291,38 +293,74 @@ static std::vector<J2534_ULONG> endpoints(const Channel &channel) {
     return result;
 }
 
-static J2534_LONG pump(Channel &channel) {
-    std::vector<J2534_ULONG> ready = endpoints(channel);
-    native::SCHANNELSET set = {};
-    set.ChannelCount = (J2534_ULONG)ready.size();
-    set.ChannelList = &ready[0];
-    J2534_LONG status = backend.select(&set, READABLE_TYPE, 0);
+static J2534_LONG readNative(Channel &channel, J2534_ULONG endpoint, bool &received) {
+    received = false;
+    unsigned char data[4128];
+    native::PASSTHRU_MSG message = {};
+    message.DataBuffer = data;
+    message.DataBufferSize = sizeof(data);
+    J2534_ULONG count = 1;
+    J2534_LONG status = backend.readMsgs(endpoint, &message, &count, 0);
     if (status == ERR_BUFFER_EMPTY) {
         return STATUS_NOERROR;
     }
-    if (status) {
+    if (status == ERR_BUFFER_OVERFLOW) {
+        channel.overflow = true;
+    } else if (status) {
         return translate(status);
     }
+    if (count) {
+        receiveNative(channel, message);
+        channel.lastReadEndpoint = endpoint;
+        received = true;
+    }
+    return STATUS_NOERROR;
+}
 
-    for (unsigned index = 0; index < set.ChannelCount; ++index) {
-        // Bound each drain so continuous traffic cannot prevent an API timeout from being checked.
+static J2534_LONG pump(Channel &channel,
+                       J2534_ULONG wantedMessages = 0,
+                       uint32_t start = 0,
+                       J2534_ULONG timeout = 0) {
+    std::vector<J2534_ULONG> ready = endpoints(channel);
+    if (ready.size() > 1) {
+        native::SCHANNELSET set = {};
+        set.ChannelCount = (J2534_ULONG)ready.size();
+        set.ChannelList = &ready[0];
+        J2534_LONG status = backend.select(&set, READABLE_TYPE, 0);
+        if (status == ERR_BUFFER_EMPTY) {
+            return STATUS_NOERROR;
+        }
+        if (status) {
+            return translate(status);
+        }
+        ready.resize(set.ChannelCount);
+    }
+
+    // Resume after the last serviced endpoint when several ISO-TP peers are readable.
+    std::vector<J2534_ULONG>::iterator previous =
+        std::find(ready.begin(), ready.end(), channel.lastReadEndpoint);
+    if (previous != ready.end()) {
+        std::rotate(ready.begin(), previous + 1, ready.end());
+    }
+    for (size_t index = 0; index < ready.size(); ++index) {
         for (unsigned drained = 0; drained < 32; ++drained) {
-            unsigned char data[4128];
-            native::PASSTHRU_MSG message = {};
-            message.DataBuffer = data;
-            message.DataBufferSize = sizeof(data);
-            J2534_ULONG count = 1;
-            status = backend.readMsgs(ready[index], &message, &count, 0);
-            if (status == ERR_BUFFER_EMPTY) {
+            if (timeout && platform::milliseconds() - start >= timeout) {
+                return STATUS_NOERROR;
+            }
+            bool received = false;
+            J2534_LONG status = readNative(channel, ready[index], received);
+            if (status) {
+                return status;
+            }
+            if (wantedMessages && (channel.received.size() >= wantedMessages ||
+                                   channel.overflow || channel.receiveError)) {
+                return STATUS_NOERROR;
+            }
+            if (!wantedMessages && channel.transmissions.size() < MAX_TX_MESSAGES) {
+                return STATUS_NOERROR;
+            }
+            if (!received) {
                 break;
-            }
-            if (status == ERR_BUFFER_OVERFLOW) {
-                channel.overflow = true;
-            } else if (status) {
-                return translate(status);
-            }
-            if (count) {
-                receiveNative(channel, message);
             }
         }
     }
@@ -581,11 +619,6 @@ J2534_LONG PassThruWriteMsgs(J2534_ULONG id,
         transmission.waiting = timeout != 0;
         channel->transmissions[token] = transmission;
         for (;;) {
-            status = pump(*channel);
-            if (status) {
-                channel->transmissions.erase(token);
-                return status;
-            }
             J2534_ULONG queued = 1;
             status = backend.queueMsgs(endpoint, &encoded, &queued);
             if (status != ERR_BUFFER_FULL || !timeout) {
@@ -594,6 +627,11 @@ J2534_LONG PassThruWriteMsgs(J2534_ULONG id,
             if (platform::milliseconds() - start >= timeout) {
                 channel->transmissions.erase(token);
                 return ERR_TIMEOUT;
+            }
+            status = pump(*channel, 0, start, timeout);
+            if (status) {
+                channel->transmissions.erase(token);
+                return status;
             }
             platform::sleepMs(1);
         }
@@ -608,7 +646,8 @@ J2534_LONG PassThruWriteMsgs(J2534_ULONG id,
 
         // Count a blocking write only after firmware reports confirmed transmission.
         for (;;) {
-            status = pump(*channel);
+            bool received = false;
+            status = readNative(*channel, endpoint, received);
             Transmission &pending = channel->transmissions[token];
             if (status) {
                 pending.waiting = false;
@@ -627,7 +666,9 @@ J2534_LONG PassThruWriteMsgs(J2534_ULONG id,
                 pending.waiting = false;
                 return ERR_TIMEOUT;
             }
-            platform::sleepMs(1);
+            if (!received) {
+                platform::sleepMs(1);
+            }
         }
         if (*count < requested && platform::milliseconds() - start >= timeout) {
             return ERR_TIMEOUT;
@@ -661,11 +702,8 @@ J2534_LONG PassThruReadMsgs(J2534_ULONG id,
     }
 
     uint32_t start = platform::milliseconds();
+    bool pumped = false;
     for (;;) {
-        status = pump(*channel);
-        if (status) {
-            return status;
-        }
         while (*count < requested && !channel->received.empty()) {
             messages[*count] = channel->received.front();
             channel->receiveBytes -= channel->received.front().DataSize + 24;
@@ -684,7 +722,7 @@ J2534_LONG PassThruReadMsgs(J2534_ULONG id,
         if (*count == requested) {
             return STATUS_NOERROR;
         }
-        if (!timeout || platform::milliseconds() - start >= timeout) {
+        if (pumped && (!timeout || platform::milliseconds() - start >= timeout)) {
             if (!*count) {
                 return ERR_BUFFER_EMPTY;
             }
@@ -693,7 +731,14 @@ J2534_LONG PassThruReadMsgs(J2534_ULONG id,
             }
             return STATUS_NOERROR;
         }
-        platform::sleepMs(1);
+        status = pump(*channel, requested - *count, start, timeout);
+        if (status) {
+            return status;
+        }
+        pumped = true;
+        if (timeout && channel->received.empty() && !channel->overflow && !channel->receiveError) {
+            platform::sleepMs(1);
+        }
     }
 }
 

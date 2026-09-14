@@ -179,6 +179,8 @@ def main():
                 if not logs or not any("END status=" in path.read_text() for path in logs):
                     raise RuntimeError("API logging produced no return records")
     test_ownership(build, peer)
+    subprocess.run([sys.executable, str(project / "tests/test_legacy_io.py"), "--build", str(build)],
+                   check=True, timeout=90)
     print(f"PASS {len(cases)} native API scenarios and both C headers")
 
 
