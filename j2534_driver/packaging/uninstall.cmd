@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
 set "INSTALL_DIR=C:\OpenDIAG"
-set "PACKAGE_FILES=opendiag32.dll odg40432.dll opendiag_config.exe install.cmd uninstall.cmd README.txt COPYING nanopb-LICENSE.txt"
+set "PACKAGE_FILES=opendiag32.dll odg40432.dll opendiag_config.exe install.cmd uninstall.cmd opendiag-cdc-xp.inf README.txt COPYING nanopb-LICENSE.txt"
 set "REGEXE=%SystemRoot%\System32\reg.exe"
 if exist "%SystemRoot%\SysWOW64\reg.exe" set "REGEXE=%SystemRoot%\SysWOW64\reg.exe"
 for %%F in (%PACKAGE_FILES%) do (

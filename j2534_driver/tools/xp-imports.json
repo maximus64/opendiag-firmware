@@ -3,6 +3,9 @@
   "scope": "Curated import allowlist for this driver and the Bookworm MSVCRT toolchain, not a complete XP export database. Review additions against XP documentation or a clean XP system; never regenerate the policy from build output.",
   "references": [
     "https://learn.microsoft.com/en-us/windows/win32/api/",
+    "https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getcommmodemstatus",
+    "https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getcommproperties",
+    "https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getcommtimeouts",
     "https://learn.microsoft.com/en-us/cpp/c-runtime-library/internal-crt-globals-and-functions",
     "https://sources.debian.org/src/mingw-w64/10.0.0-3/mingw-w64-crt/lib32/"
   ],
@@ -19,7 +22,10 @@
       "DeleteFileA",
       "EnterCriticalSection",
       "FreeLibrary",
+      "GetCommModemStatus",
+      "GetCommProperties",
       "GetCommState",
+      "GetCommTimeouts",
       "GetCurrentProcess",
       "GetCurrentProcessId",
       "GetCurrentThreadId",

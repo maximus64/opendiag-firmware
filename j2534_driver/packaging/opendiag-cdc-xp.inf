@@ -1,0 +1,43 @@
+; SPDX-License-Identifier: GPL-3.0-only
+; Windows XP SP3 x86: bind the two OpenDIAG CDC functions to Windows usbser.sys.
+
+[Version]
+Signature="$Windows NT$"
+Class=Ports
+ClassGuid={4D36E978-E325-11CE-BFC1-08002BE10318}
+Provider=%Manufacturer%
+DriverVer=09/14/2026,1.0.0.0
+
+[Manufacturer]
+%Manufacturer%=OpenDIAG,NTx86
+
+[OpenDIAG.NTx86]
+%DataPort%=CDC_Install,USB\VID_303A&PID_4002&MI_00
+%DebugPort%=CDC_Install,USB\VID_303A&PID_4002&MI_02
+
+[DestinationDirs]
+FakeModemCopyFileSection=12
+
+[CDC_Install.NT]
+Include=mdmcpq.inf
+CopyFiles=FakeModemCopyFileSection
+AddReg=SerialPort.AddReg
+
+[SerialPort.AddReg]
+HKR,,EnumPropPages32,,"MsPorts.dll,SerialPortPropPageProvider"
+
+[CDC_Install.NT.Services]
+AddService=usbser,0x00000002,UsbSer.Service
+
+[UsbSer.Service]
+DisplayName=%ServiceName%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%12%\usbser.sys
+
+[Strings]
+Manufacturer="OpenDIAG"
+DataPort="OpenDIAG Diagnostic Data Port"
+DebugPort="OpenDIAG Debug Console Port"
+ServiceName="Microsoft USB Serial Driver"

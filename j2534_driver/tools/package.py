@@ -28,8 +28,7 @@ def main():
     # A release always ships the template, never a developer's local endpoint configuration.
     files["opendiag.ini"] = (project / "opendiag.ini").read_bytes()
     files["wincompat.json"] = (directory / "wincompat.json").read_bytes()
-    files["README.txt"] = (project / "packaging/README.txt").read_bytes()
-    for name in ("install.cmd", "uninstall.cmd"):
+    for name in ("README.txt", "install.cmd", "uninstall.cmd", "opendiag-cdc-xp.inf"):
         text = (project / "packaging" / name).read_text()
         files[name] = text.replace("\n", "\r\n").encode("ascii")
     for name in ("j2534.h", "j2534_0404.h", "j2534_types.h"):
