@@ -2,6 +2,7 @@
 #include <string.h>
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "fake_board.h"
 #include "fake_bus.h"
 #include "fake_can_bus.h"
 #include "fake_clock.h"
@@ -438,6 +439,95 @@ TEST(voltage_request_cannot_drive_active_can_pins) {
     TEST_ASSERT_EQUAL_INT(J2534_VALUE, call());
     TEST_ASSERT_FALSE(vif_any_pin_active());
 }
+
+#if OPENDIAG_HW_LS_OBD_9
+TEST(pin_9_ground_works_during_kline_and_is_released_on_close) {
+    command(opendiag_Request_connect_tag);
+    req.command.connect = (opendiag_Connect){.device = dev,
+                                             .protocol = J2534_ISO9141,
+                                             .baudrate = 10400,
+                                             .connector = 1,
+                                             .pins_count = 2,
+                                             .pins = {7, 15}};
+    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
+    command(opendiag_Request_voltage_tag);
+    req.command.voltage = (opendiag_Voltage){dev, 1, 9, UINT32_MAX - 1};
+    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
+    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
+    TEST_ASSERT_EQUAL_INT(1, fake_board_ls_state(9));
+    req.command.voltage.millivolts = UINT32_MAX;
+    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
+    TEST_ASSERT_EQUAL_INT(0, fake_board_ls_state(9));
+    req.command.voltage.millivolts = UINT32_MAX - 1;
+    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
+    command(opendiag_Request_close_tag);
+    req.command.close.id = dev;
+    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
+    TEST_ASSERT_EQUAL_INT(0, fake_board_ls_state(9));
+    TEST_ASSERT_FALSE(vif_any_pin_active());
+}
+
+TEST(programming_voltage_keeps_pin_9_modes_interlocked) {
+    command(opendiag_Request_voltage_tag);
+    req.command.voltage = (opendiag_Voltage){dev, 1, 9, UINT32_MAX - 1};
+    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
+    req.command.voltage.millivolts = 12000;
+    TEST_ASSERT_EQUAL_INT(J2534_PIN_IN_USE, call());
+    TEST_ASSERT_EQUAL_INT(1, fake_board_ls_state(9));
+    req.command.voltage.millivolts = UINT32_MAX;
+    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
+    req.command.voltage.millivolts = 12000;
+    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
+    req.command.voltage.millivolts = UINT32_MAX - 1;
+    TEST_ASSERT_EQUAL_INT(J2534_PIN_IN_USE, call());
+    TEST_ASSERT_EQUAL_INT(1, fake_board_hs_state(9));
+    TEST_ASSERT_EQUAL_INT(0, fake_board_ls_state(9));
+    req.command.voltage.millivolts = UINT32_MAX;
+    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
+    req.command.voltage.pin = 12;
+    req.command.voltage.millivolts = 12000;
+    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
+    req.command.voltage.pin = 9;
+    req.command.voltage.millivolts = UINT32_MAX - 1;
+    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
+    req.command.voltage.millivolts = UINT32_MAX;
+    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
+    TEST_ASSERT_EQUAL_INT(0, fake_board_ls_state(9));
+    TEST_ASSERT_EQUAL_INT(1, fake_board_hs_state(12));
+    req.command.voltage.millivolts = 12000;
+    TEST_ASSERT_EQUAL_INT(J2534_VOLTAGE_IN_USE, call());
+}
+#else
+TEST(programming_voltage_rejects_pin_9_ground_without_the_hardware_mod) {
+    command(opendiag_Request_voltage_tag);
+    req.command.voltage = (opendiag_Voltage){dev, 1, 9, UINT32_MAX - 1};
+    TEST_ASSERT_EQUAL_INT(J2534_VALUE, call());
+    TEST_ASSERT_EQUAL_INT(-1, fake_board_ls_state(9));
+    TEST_ASSERT_FALSE(vif_any_pin_active());
+}
+#endif
+
+TEST(programming_voltage_validates_each_pins_supported_modes) {
+    command(opendiag_Request_voltage_tag);
+    req.command.voltage = (opendiag_Voltage){dev, 1, 6, UINT32_MAX - 1};
+    TEST_ASSERT_EQUAL_INT(J2534_VALUE, call());
+    req.command.voltage.pin = 15;
+    req.command.voltage.millivolts = 12000;
+    TEST_ASSERT_EQUAL_INT(J2534_VALUE, call());
+    req.command.voltage.millivolts = UINT32_MAX - 1;
+    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
+    TEST_ASSERT_EQUAL_INT(1, fake_board_ls_state(15));
+    req.command.voltage.millivolts = UINT32_MAX;
+    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
+    TEST_ASSERT_EQUAL_INT(0, fake_board_ls_state(15));
+    req.command.voltage.pin = 9;
+    req.command.voltage.millivolts = 4999;
+    TEST_ASSERT_EQUAL_INT(J2534_VALUE, call());
+    req.command.voltage.millivolts = 20001;
+    TEST_ASSERT_EQUAL_INT(J2534_VALUE, call());
+    TEST_ASSERT_FALSE(vif_any_pin_active());
+}
+
 static uint32_t crc(const uint8_t *p, size_t n) {
     uint32_t v = 0xffffffff;
     while (n--) {

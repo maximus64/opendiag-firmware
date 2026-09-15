@@ -23,6 +23,14 @@ set(FW_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../main)
 
 option(COVERAGE "Instrument the firmware sources for coverage reporting" OFF)
 
+# Pin 9 low side switching needs a board rework, so the firmware leaves it out
+# by default and the tests follow suit. Configure with -DHW_LS_OBD_9=ON to
+# exercise a reworked board instead.
+option(HW_LS_OBD_9 "Build with OBD-II pin 9 low side switching enabled" OFF)
+if(HW_LS_OBD_9)
+    add_compile_definitions(OPENDIAG_HW_LS_OBD_9=1)
+endif()
+
 add_compile_options(
     -g
     -O0

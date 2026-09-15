@@ -2,6 +2,7 @@
 #pragma once
 
 #include "esp_err.h"
+#include "pinout.h"
 
 enum hs_pin {
     HS_OBD_PIN_6 = 6,
@@ -13,6 +14,9 @@ enum hs_pin {
 };
 
 enum ls_pin {
+#if OPENDIAG_HW_LS_OBD_9
+    LS_OBD_PIN_9 = 9,
+#endif
     LS_OBD_PIN_15 = 15,
 };
 

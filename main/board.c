@@ -24,6 +24,12 @@
 /* Maximum duty for the LEDC_TIMER_12_BIT high side PWM timer */
 #define HS_DUTY_MAX ((1 << 12) - 1)
 
+#if OPENDIAG_HW_LS_OBD_9
+#define LOW_SIDE_PIN_MASK ((1ULL << PIN_LS_OBD_9) | (1ULL << PIN_LS_OBD_15))
+#else
+#define LOW_SIDE_PIN_MASK (1ULL << PIN_LS_OBD_15)
+#endif
+
 static adc_oneshot_unit_handle_t adc1_handle;
 static adc_cali_handle_t adc1_cal_handle;
 static uint8_t board_id;
@@ -136,10 +142,19 @@ void board_setup(void) {
                                              .hpoint = 0};
     ESP_ERROR_CHECK(ledc_channel_config(&hs_vadj_channel));
 
-    /* Low side driver */
-    gpio_reset_pin(PIN_LS_OBD_15);
+    /* Start low-side drivers off without gpio_reset_pin's pull-up. */
+#if OPENDIAG_HW_LS_OBD_9
+    gpio_set_level(PIN_LS_OBD_9, 0);
+#endif
     gpio_set_level(PIN_LS_OBD_15, 0);
-    gpio_set_direction(PIN_LS_OBD_15, GPIO_MODE_OUTPUT);
+    gpio_config_t low_side = {
+        .pin_bit_mask = LOW_SIDE_PIN_MASK,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_ENABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&low_side));
 
     esp_err_t gpio_isr_err = ESP_OK;
     /* Keep shared GPIO timing interrupts away from Bluetooth on core 0. */
@@ -484,6 +499,11 @@ void board_set_hs_state(enum hs_pin pin, int state) {
 
 void board_set_ls_state(enum ls_pin pin, int state) {
     switch (pin) {
+#if OPENDIAG_HW_LS_OBD_9
+    case LS_OBD_PIN_9:
+        gpio_set_level(PIN_LS_OBD_9, state);
+        break;
+#endif
     case LS_OBD_PIN_15:
         gpio_set_level(PIN_LS_OBD_15, state);
         break;
@@ -503,6 +523,9 @@ void board_hs_ls_reset_state(void) {
     gpio_set_level(PIN_HS_OBD_12, 0);
     gpio_set_level(PIN_HS_OBD_13, 0);
     gpio_set_level(PIN_HS_OBD_14, 0);
+#if OPENDIAG_HW_LS_OBD_9
+    gpio_set_level(PIN_LS_OBD_9, 0);
+#endif
     gpio_set_level(PIN_LS_OBD_15, 0);
 }
 

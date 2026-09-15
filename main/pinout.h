@@ -38,7 +38,18 @@
 #define PIN_HS_BOOST_EN 46
 #define PIN_HS_VOLTAGE_ADJUST 10 /* PWM signal */
 
-/* Low Side Driver */
+/* Low Side Drivers (active high) */
+/* Pin 9 low side switching (Honda SCS) is not on the stock board: it needs a
+ * hardware rework that fits a low side driver on GPIO16. Without the mod the
+ * firmware must not offer the pin, so it stays off unless the build defines
+ * OPENDIAG_HW_LS_OBD_9=1. */
+#ifndef OPENDIAG_HW_LS_OBD_9
+#define OPENDIAG_HW_LS_OBD_9 0
+#endif
+
+#if OPENDIAG_HW_LS_OBD_9
+#define PIN_LS_OBD_9 16
+#endif
 #define PIN_LS_OBD_15 3
 
 /* Status LED + Button */

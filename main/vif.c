@@ -888,7 +888,7 @@ static int kline_set_only_with_pin_claim(const bus_ops_t *ops, uint32_t value) {
 
     LOCK();
     bool was_reserved = g.claim[VIF_RES_KLINE].l_line_reserved;
-    if (enable_l_line && (g.ls_pin != -1 || g.pins_calibrating)) {
+    if (enable_l_line && (g.ls_pin == LS_OBD_PIN_15 || g.pins_calibrating)) {
         UNLOCK();
         return BUS_ERR_BUS_BUSY;
     }
@@ -985,6 +985,9 @@ esp_err_t vif_pin_set(vif_owner_t owner, int obd_pin, vif_pin_mode_t m,
                       obd_pin == HS_OBD_PIN_11 || obd_pin == HS_OBD_PIN_12 ||
                       obd_pin == HS_OBD_PIN_13 || obd_pin == HS_OBD_PIN_14);
     bool low_side = (obd_pin == LS_OBD_PIN_15);
+#if OPENDIAG_HW_LS_OBD_9
+    low_side = low_side || (obd_pin == LS_OBD_PIN_9);
+#endif
 
     if (owner >= VIF_OWNER_COUNT) {
         return ESP_ERR_INVALID_ARG;
@@ -992,8 +995,6 @@ esp_err_t vif_pin_set(vif_owner_t owner, int obd_pin, vif_pin_mode_t m,
     if (!high_side && !low_side) {
         return ESP_ERR_INVALID_ARG;
     }
-    /* The board drives voltage from the high side switches and ground from the
-     * low side one; neither pin group can do the other's job. */
     if ((m == VIF_PIN_VOLTAGE && !high_side) ||
         (m == VIF_PIN_GROUND && !low_side)) {
         return ESP_ERR_INVALID_ARG;
@@ -1003,23 +1004,15 @@ esp_err_t vif_pin_set(vif_owner_t owner, int obd_pin, vif_pin_mode_t m,
 
     switch (m) {
     case VIF_PIN_OFF:
-        if (high_side) {
-            if (g.hs_pin != obd_pin) {
-                break; /* nobody is driving it; nothing to switch off */
-            }
-            if (g.hs_owner != owner) {
-                UNLOCK();
-                return ESP_ERR_INVALID_STATE;
-            }
+        if ((g.hs_pin == obd_pin && g.hs_owner != owner) ||
+            (g.ls_pin == obd_pin && g.ls_owner != owner)) {
+            UNLOCK();
+            return ESP_ERR_INVALID_STATE;
+        }
+        if (g.hs_pin == obd_pin) {
             hs_release_locked();
-        } else {
-            if (g.ls_pin != obd_pin) {
-                break;
-            }
-            if (g.ls_owner != owner) {
-                UNLOCK();
-                return ESP_ERR_INVALID_STATE;
-            }
+        }
+        if (g.ls_pin == obd_pin) {
             ls_release_locked();
         }
         break;
@@ -1043,7 +1036,8 @@ esp_err_t vif_pin_set(vif_owner_t owner, int obd_pin, vif_pin_mode_t m,
         break;
 
     case VIF_PIN_GROUND:
-        if (g.claim[VIF_RES_KLINE].l_line_reserved) {
+        if (obd_pin == LS_OBD_PIN_15 &&
+            g.claim[VIF_RES_KLINE].l_line_reserved) {
             UNLOCK();
             return ESP_ERR_INVALID_STATE;
         }

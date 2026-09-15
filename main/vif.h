@@ -339,14 +339,15 @@ int vif_bus_reset_stats(vif_bus_t bus);
 /**
  * @brief Drive an OBD-II connector pin, or release it.
  *
- * @param obd_pin Connector pin number: 6, 9, 11-14 high side, 15 low side.
- * @param m       VIF_PIN_VOLTAGE on a high side pin, VIF_PIN_GROUND on the low
+ * @param obd_pin Connector pin number: 6, 9, 11-14 high side; 15 low side, and
+ *                9 as well on boards built with OPENDIAG_HW_LS_OBD_9.
+ * @param m       VIF_PIN_VOLTAGE on a high side pin, VIF_PIN_GROUND on a low
  *                side pin, VIF_PIN_OFF on either.
  * @param mv      Millivolts, for VIF_PIN_VOLTAGE.
  *
  * Releasing a pin nobody drives succeeds and does nothing. Anything that would
  * break the one-high-one-low rule, or touch a pin the other owner claimed,
- * fails with ESP_ERR_INVALID_STATE.
+ * fails with ESP_ERR_INVALID_STATE. Release pin 9 before changing drive mode.
  */
 esp_err_t vif_pin_set(vif_owner_t owner, int obd_pin, vif_pin_mode_t m,
                       uint32_t mv);

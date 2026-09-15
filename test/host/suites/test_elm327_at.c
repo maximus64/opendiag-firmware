@@ -535,6 +535,25 @@ TEST(at_progv_releases_the_low_side_pin) {
     TEST_ASSERT_EQUAL_INT(0, fake_board_ls_state(15));
 }
 
+#if OPENDIAG_HW_LS_OBD_9
+TEST(at_progv_grounds_and_releases_pin_9) {
+    elm_echo_off();
+    elm_ok("ATPROGV9FFFFFFFE\r");
+    TEST_ASSERT_EQUAL_INT(1, fake_board_ls_state(9));
+    elm_ok("ATPROGV9FFFFFFFF\r");
+    TEST_ASSERT_EQUAL_INT(0, fake_board_ls_state(9));
+    TEST_ASSERT_FALSE(vif_any_pin_active());
+}
+#else
+TEST(at_progv_refuses_to_ground_pin_9_without_the_hardware_mod) {
+    elm_echo_off();
+
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATPROGV9FFFFFFFE\r"));
+    TEST_ASSERT_EQUAL_INT(-1, fake_board_ls_state(9));
+    TEST_ASSERT_FALSE(vif_any_pin_active());
+}
+#endif
+
 TEST(switching_off_an_idle_low_side_pin_is_accepted_and_does_nothing) {
     elm_echo_off();
 

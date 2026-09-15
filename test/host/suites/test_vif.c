@@ -786,6 +786,73 @@ TEST(the_low_side_pin_grounds_and_releases_independently) {
     TEST_ASSERT_EQUAL_INT(1, fake_board_hs_state(OBD_PIN_HS));
 }
 
+#if OPENDIAG_HW_LS_OBD_9
+TEST(pin_9_requires_release_before_changing_drive_mode) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+                          vif_pin_set(VIF_OWNER_LINK, 9, VIF_PIN_GROUND, 0));
+    for (unsigned owner = 0; owner < VIF_OWNER_COUNT; owner++) {
+        TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_STATE,
+                              vif_pin_set(owner, 9, VIF_PIN_VOLTAGE, 12000));
+    }
+    TEST_ASSERT_EQUAL_INT(1, fake_board_ls_state(9));
+    TEST_ASSERT_EQUAL_INT(-1, fake_board_hs_state(9));
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+                          vif_pin_set(VIF_OWNER_LINK, 9, VIF_PIN_OFF, 0));
+    TEST_ASSERT_EQUAL_INT(0, fake_board_ls_state(9));
+
+    TEST_ASSERT_EQUAL_INT(
+        ESP_OK, vif_pin_set(VIF_OWNER_LINK, 9, VIF_PIN_VOLTAGE, 12000));
+    for (unsigned owner = 0; owner < VIF_OWNER_COUNT; owner++) {
+        TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_STATE,
+                              vif_pin_set(owner, 9, VIF_PIN_GROUND, 0));
+    }
+    TEST_ASSERT_EQUAL_INT(1, fake_board_hs_state(9));
+    TEST_ASSERT_EQUAL_INT(0, fake_board_ls_state(9));
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+                          vif_pin_set(VIF_OWNER_LINK, 9, VIF_PIN_OFF, 0));
+    TEST_ASSERT_EQUAL_INT(0, fake_board_hs_state(9));
+    TEST_ASSERT_FALSE(vif_any_pin_active());
+}
+
+TEST(pin_9_ground_retains_ownership_and_releases_independently) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+                          vif_pin_set(VIF_OWNER_LINK, 9, VIF_PIN_GROUND, 0));
+    TEST_ASSERT_EQUAL_INT(
+        ESP_OK, vif_pin_set(VIF_OWNER_SHELL, 6, VIF_PIN_VOLTAGE, 12000));
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_STATE,
+                          vif_pin_set(VIF_OWNER_SHELL, 9, VIF_PIN_OFF, 0));
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_STATE,
+                          vif_pin_set(VIF_OWNER_SHELL, 9, VIF_PIN_GROUND, 0));
+    for (unsigned owner = 0; owner < VIF_OWNER_COUNT; owner++) {
+        TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_STATE,
+                              vif_pin_set(owner, 15, VIF_PIN_GROUND, 0));
+    }
+    TEST_ASSERT_EQUAL_INT(1, fake_board_ls_state(9));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, vif_pin_release_all(VIF_OWNER_LINK));
+    TEST_ASSERT_EQUAL_INT(0, fake_board_ls_state(9));
+    TEST_ASSERT_EQUAL_INT(1, fake_board_hs_state(6));
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+                          vif_pin_set(VIF_OWNER_LINK, 15, VIF_PIN_GROUND, 0));
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_STATE,
+                          vif_pin_set(VIF_OWNER_LINK, 9, VIF_PIN_GROUND, 0));
+}
+#else
+TEST(pin_9_has_no_low_side_driver_without_the_hardware_mod) {
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG,
+                          vif_pin_set(VIF_OWNER_LINK, 9, VIF_PIN_GROUND, 0));
+    TEST_ASSERT_EQUAL_INT(-1, fake_board_ls_state(9));
+    TEST_ASSERT_FALSE(vif_any_pin_active());
+
+    /* The high side driver on the same pin is unaffected. */
+    TEST_ASSERT_EQUAL_INT(
+        ESP_OK, vif_pin_set(VIF_OWNER_LINK, 9, VIF_PIN_VOLTAGE, 12000));
+    TEST_ASSERT_EQUAL_INT(1, fake_board_hs_state(9));
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+                          vif_pin_set(VIF_OWNER_LINK, 9, VIF_PIN_OFF, 0));
+}
+#endif
+
 TEST(a_pin_group_cannot_do_the_other_groups_job) {
     TEST_ASSERT_EQUAL_INT(
         ESP_ERR_INVALID_ARG,
@@ -1317,6 +1384,31 @@ TEST(k_only_leaves_pin_15_available) {
     TEST_ASSERT_EQUAL_INT(ESP_OK, vif_bus_close(VIF_OWNER_LINK, VIF_BUS_KLINE));
     TEST_ASSERT_EQUAL_INT(1, fake_board_ls_state(OBD_PIN_LS));
 }
+
+#if OPENDIAG_HW_LS_OBD_9
+TEST(pin_9_ground_and_l_line_can_be_enabled_in_either_order) {
+    for (unsigned ground_first = 0; ground_first < 2; ground_first++) {
+        if (ground_first) {
+            TEST_ASSERT_EQUAL_INT(
+                ESP_OK, vif_pin_set(VIF_OWNER_SHELL, 9, VIF_PIN_GROUND, 0));
+        }
+        TEST_ASSERT_EQUAL_INT(
+            ESP_OK, vif_bus_open(VIF_OWNER_LINK, VIF_BUS_KLINE, NULL));
+        TEST_ASSERT_EQUAL_INT(0,
+                              vif_bus_param_set(VIF_OWNER_LINK, VIF_BUS_KLINE,
+                                                BUS_P_K_LINE_ONLY, 0));
+        TEST_ASSERT_EQUAL_INT(
+            ESP_OK, vif_pin_set(VIF_OWNER_SHELL, 9, VIF_PIN_GROUND, 0));
+        TEST_ASSERT_EQUAL_INT(1, fake_board_ls_state(9));
+        TEST_ASSERT_EQUAL_INT(ESP_OK,
+                              vif_bus_close(VIF_OWNER_LINK, VIF_BUS_KLINE));
+        TEST_ASSERT_EQUAL_INT(1, fake_board_ls_state(9));
+        TEST_ASSERT_EQUAL_INT(ESP_OK,
+                              vif_pin_set(VIF_OWNER_SHELL, 9, VIF_PIN_OFF, 0));
+        TEST_ASSERT_EQUAL_INT(0, fake_board_ls_state(9));
+    }
+}
+#endif
 
 TEST(l_line_reservation_survives_failed_teardown) {
     TEST_ASSERT_EQUAL_INT(ESP_OK,

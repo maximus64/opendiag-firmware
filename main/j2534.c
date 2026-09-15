@@ -5,6 +5,7 @@
 #include <string.h>
 #include "esp_app_desc.h"
 #include "esp_timer.h"
+#include "board.h"
 #include "isotp.h"
 #include "j2534.pb.h"
 #include "kline_codec.h"
@@ -1072,7 +1073,9 @@ static uint32_t set_programming_voltage(const opendiag_Voltage *req) {
     if (req->connector != 1)
         return J2534_PIN;
 
-    uint32_t pin = req->pin, mv = req->millivolts;
+    uint32_t pin = req->pin;
+    uint32_t mv = req->millivolts;
+    vif_pin_mode_t mode;
 
     if (pin != 6 && pin != 9 && pin != 11 && pin != 12 && pin != 13 &&
         pin != 14 && pin != 15)
@@ -1093,24 +1096,31 @@ static uint32_t set_programming_voltage(const opendiag_Voltage *req) {
             (claims[i].bus == VIF_BUS_KLINE && pin == 15))
             return J2534_PIN_IN_USE;
 
-    if (pin == 15) {
-        if (mv != UINT32_MAX - 1)
+    if (mv == UINT32_MAX - 1) {
+        bool groundable = (pin == 15);
+#if OPENDIAG_HW_LS_OBD_9
+        groundable = groundable || (pin == 9);
+#endif
+        if (!groundable)
             return J2534_VALUE;
 
-        if (vif_pin_set(VIF_OWNER_LINK, pin, VIF_PIN_GROUND, 0) != ESP_OK)
-            return J2534_PIN_IN_USE;
+        mode = VIF_PIN_GROUND;
+        mv = 0;
     } else {
-        if (mv < 5000 || mv > 20000)
+        if (pin == 15 || mv < 5000 || mv > 20000)
             return J2534_VALUE;
 
         if (voltage_pin >= 0 && voltage_pin != (int)pin)
             return J2534_VOLTAGE_IN_USE;
 
-        if (vif_pin_set(VIF_OWNER_LINK, pin, VIF_PIN_VOLTAGE, mv) != ESP_OK)
-            return J2534_PIN_IN_USE;
-
-        voltage_pin = pin;
+        mode = VIF_PIN_VOLTAGE;
     }
+    if (vif_pin_set(VIF_OWNER_LINK, pin, mode, mv) != ESP_OK)
+        return J2534_PIN_IN_USE;
+
+    if (mode == VIF_PIN_VOLTAGE)
+        voltage_pin = pin;
+
     return J2534_OK;
 }
 
