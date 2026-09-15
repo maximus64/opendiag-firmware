@@ -12,6 +12,7 @@
 #include "esp_timer.h"
 #include "esp_twai.h"
 #include "esp_twai_onchip.h"
+#include "bus_tx.h"
 #include "driver/gpio.h"
 #include "pinout.h"
 
@@ -45,12 +46,14 @@ typedef struct {
     struct can_frame frame;
     uint32_t timestamp_us;
     uint16_t status;
+    uint32_t sequence;
 } can_rx_record_t;
+static bus_rx_epoch_t rx_epoch;
 static QueueHandle_t rx_frame_queue;
 static bool rx_overflow_pending;
 static TaskHandle_t can_bus_task_handle;
 static bool task_should_exit;
-static bool can_started;
+static _Atomic bool can_started;
 static bool manual_recovery;
 static bool link_down_pending;
 static portMUX_TYPE task_notify_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -63,6 +66,7 @@ static unsigned tx_pool_next;
 /** Frames received with nowhere to put them. Nothing else counts these. */
 static volatile uint32_t rx_dropped;
 static uint32_t tx_failed;
+static uint32_t tx_completed_us;
 static uint32_t bus_errors;
 static uint32_t arbitration_lost;
 static uint32_t bit_errors;
@@ -97,6 +101,8 @@ static bool can_error(twai_node_handle_t node,
 
 static bool can_tx_done(twai_node_handle_t node,
                         const twai_tx_done_event_data_t *event, void *ctx) {
+    __atomic_store_n(&tx_completed_us, (uint32_t)esp_timer_get_time(),
+                     __ATOMIC_RELEASE);
     if (!event->is_tx_success)
         __atomic_fetch_add(&tx_failed, 1, __ATOMIC_RELAXED);
     return false;
@@ -260,7 +266,9 @@ static bool can_rx_done(twai_node_handle_t node,
 
     /* No waiting here, and nothing that could wait: a client that has stopped
      * draining the queue must cost frames, not the interrupt. */
+    record.sequence = bus_rx_next(&rx_epoch);
     if (xQueueSendFromISR(rx_frame_queue, &record, &task_woken) != pdTRUE) {
+        bus_rx_lost(&rx_epoch, record.sequence);
         rx_dropped++;
         rx_overflow_pending = true;
     } else {
@@ -486,6 +494,7 @@ static esp_err_t can_setup(int baud_rate, bool manual) {
      * and a bus of back-to-back minimum length frames produces about 21 in
      * that time. */
     rx_overflow_pending = false;
+    memset(&rx_epoch, 0, sizeof(rx_epoch));
     rx_frame_queue = xQueueCreate(CAN_RX_QUEUE_LEN, sizeof(can_rx_record_t));
     task_exit_semaphore = xSemaphoreCreateBinary();
     if (rx_frame_queue == NULL || task_exit_semaphore == NULL) {
@@ -607,7 +616,8 @@ static esp_err_t can_ops_open(const bus_cfg_t *cfg) {
 
 static esp_err_t can_ops_close(void) { return can_bus_teardown(); }
 
-static int can_ops_send(const bus_msg_t *msg, uint32_t flags) {
+static int can_ops_send_controlled(const bus_msg_t *msg, uint32_t flags,
+                                   bus_tx_control_t *control) {
     struct can_frame f = {0};
 
     f.id = msg->id;
@@ -620,19 +630,26 @@ static int can_ops_send(const bus_msg_t *msg, uint32_t flags) {
         memcpy(f.data, msg->data, msg->len > 8 ? 8 : msg->len);
     }
 
+    int admission = bus_tx_admit(control, bus_rx_sequence(&rx_epoch),
+                                 (uint32_t)esp_timer_get_time());
+    if (admission)
+        return admission;
     uint32_t failures = __atomic_load_n(&tx_failed, __ATOMIC_RELAXED);
     if (can_send(&f) != 0)
         return BUS_ERR_TX_FAILED;
-    if (flags & BUS_TX_WAIT_DONE) {
+    if (control || (flags & BUS_TX_WAIT_DONE)) {
         esp_err_t err =
             twai_node_transmit_wait_all_done(can_node, CAN_TX_TIMEOUT_MS);
         /* Completion may race the end of the blocking wait. */
         if (err != ESP_OK)
             err = twai_node_transmit_wait_all_done(can_node, 0);
         if (err != ESP_OK) {
-            /* Disable alone retains queued frames. Silence now, then delete
-             * the node; failed cleanup keeps sends blocked until close. */
-            esp_err_t cleanup = can_bus_teardown();
+            /* Silence queued frames now. Managed TX leaves RX storage alive
+             * until the owner joins this worker and closes the node. */
+            can_started = false;
+            gpio_set_level(PIN_CAN0_SILENT, 1);
+            esp_err_t cleanup =
+                control ? twai_node_disable(can_node) : can_bus_teardown();
             if (cleanup != ESP_OK)
                 ESP_LOGE(TAG, "TX abort cleanup failed: %s",
                          esp_err_to_name(cleanup));
@@ -640,8 +657,14 @@ static int can_ops_send(const bus_msg_t *msg, uint32_t flags) {
         }
         if (__atomic_load_n(&tx_failed, __ATOMIC_RELAXED) != failures)
             return BUS_ERR_TX_FAILED;
+        bus_tx_end(control,
+                   __atomic_load_n(&tx_completed_us, __ATOMIC_ACQUIRE));
     }
     return 0;
+}
+
+static int can_ops_send(const bus_msg_t *msg, uint32_t flags) {
+    return can_ops_send_controlled(msg, flags, NULL);
 }
 
 static int can_ops_recv(bus_msg_t *msg, TickType_t wait) {
@@ -656,6 +679,10 @@ static int can_ops_recv(bus_msg_t *msg, TickType_t wait) {
     }
 
     if (receive_record(&record, wait) != 0) {
+        if (bus_rx_take_loss(&rx_epoch, msg)) {
+            msg->timestamp_us = (uint32_t)esp_timer_get_time();
+            return 0;
+        }
         return BUS_ERR_TIMEOUT;
     }
     const struct can_frame f = record.frame;
@@ -672,6 +699,7 @@ static int can_ops_recv(bus_msg_t *msg, TickType_t wait) {
     msg->id = f.id;
     msg->len = f.dlc;
     msg->timestamp_us = record.timestamp_us;
+    msg->sequence = record.sequence;
     msg->status = record.status;
 
     return (int)len;
@@ -707,6 +735,7 @@ const bus_ops_t can_bus_ops = {
     .open = can_ops_open,
     .close = can_ops_close,
     .send = can_ops_send,
+    .send_controlled = can_ops_send_controlled,
     .recv = can_ops_recv,
     .ioctl = can_ops_ioctl,
 };

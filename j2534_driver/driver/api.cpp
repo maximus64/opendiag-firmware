@@ -16,6 +16,7 @@ struct Channel {
     J2534_ULONG parent;
     std::map<J2534_ULONG, J2534_ULONG> filters;
     std::map<J2534_ULONG, J2534_ULONG> periodic;
+    std::map<J2534_ULONG, J2534_ULONG> repeats;
 };
 
 struct Device {
@@ -23,7 +24,7 @@ struct Device {
     Settings settings;
     J2534_ULONG id;
     J2534_ULONG remote;
-    J2534_ULONG fastInitMaxData;
+    opendiag_Capabilities capabilities;
     bool disconnected;
     bool programmingVoltage;
     platform::Lease lease;
@@ -32,7 +33,7 @@ struct Device {
     Device()
         : id(0),
           remote(0),
-          fastInitMaxData(0),
+          capabilities(),
           disconnected(false),
           programmingVoltage(false) {
     }
@@ -168,7 +169,7 @@ static J2534_LONG rpc(const opendiag_Request &request, opendiag_Response &respon
     }
 }
 
-static bool compatible(Link &link, J2534_ULONG *fastInitMaxData = NULL) {
+static bool compatible(Link &link, opendiag_Capabilities *capabilities = NULL) {
     opendiag_Request request = {};
     opendiag_Response response = {};
     request.which_command = opendiag_Request_capabilities_tag;
@@ -179,8 +180,8 @@ static bool compatible(Link &link, J2534_ULONG *fastInitMaxData = NULL) {
         link.selectFrontend(true);
         link.rpc(request, response);
     }
-    if (fastInitMaxData) {
-        *fastInitMaxData = response.capabilities.fast_init_max_data;
+    if (capabilities) {
+        *capabilities = response.capabilities;
     }
     return !response.status && response.has_capabilities &&
            response.capabilities.wire_version == 1 && response.capabilities.api_version == 0x0500 &&
@@ -267,7 +268,7 @@ J2534_LONG PassThruOpen(const char *name, J2534_ULONG *id) {
         }
         failure = ERR_DEVICE_NOT_CONNECTED;
         candidate->link.open(candidate->settings);
-        if (!compatible(candidate->link, &candidate->fastInitMaxData)) {
+        if (!compatible(candidate->link, &candidate->capabilities)) {
             delete candidate;
             return ERR_OPEN_FAILED;
         }
@@ -369,7 +370,8 @@ J2534_LONG PassThruLogicalConnect(J2534_ULONG physical,
                                   J2534_ULONG protocol,
                                   J2534_ULONG flags,
                                   void *descriptor,
-                                  J2534_ULONG *channelId) {
+                                  J2534_ULONG *channelId,
+                                  bool legacyChannel) {
     Channel *parent = NULL;
     J2534_LONG status = checkChannel(physical, parent);
     if (status) {
@@ -392,6 +394,7 @@ J2534_LONG PassThruLogicalConnect(J2534_ULONG physical,
     connect.physical = parent->remote;
     connect.protocol = protocol;
     connect.flags = flags;
+    connect.legacy_channel = legacyChannel;
     connect.local_flags = desc.LocalTxFlags;
     connect.remote_flags = desc.RemoteTxFlags;
     connect.local_address.size = desc.LocalTxFlags & ISO15765_ADDR_TYPE ? 5 : 4;
@@ -1033,7 +1036,7 @@ static J2534_LONG fastInitIoctl(Channel &channel, void *input, void *output) {
     if (channel.protocol != ISO9141 && channel.protocol != ISO14230) {
         return ERR_IOCTL_ID_NOT_SUPPORTED;
     }
-    if (!device->fastInitMaxData) {
+    if (!device->capabilities.fast_init_max_data) {
         return ERR_NOT_SUPPORTED;
     }
     PASSTHRU_MSG *out = (PASSTHRU_MSG *)output;
@@ -1053,7 +1056,7 @@ static J2534_LONG fastInitIoctl(Channel &channel, void *input, void *output) {
         if (status) {
             return status;
         }
-        if (message.data.size > device->fastInitMaxData ||
+        if (message.data.size > device->capabilities.fast_init_max_data ||
             message.data.size > sizeof(init.data.bytes)) {
             return ERR_INVALID_MSG;
         }
@@ -1139,13 +1142,188 @@ static J2534_LONG clearChannelIoctl(Channel &channel, J2534_ULONG id, void *inpu
     return status;
 }
 
+static const opendiag_ProtocolLimit *protocolLimit(J2534_ULONG protocol) {
+    const opendiag_Capabilities &caps = device->capabilities;
+    for (pb_size_t index = 0; index < caps.protocols_count; ++index) {
+        if (caps.protocols[index].protocol == protocol) {
+            return &caps.protocols[index];
+        }
+    }
+    return NULL;
+}
+
+static J2534_LONG discoveryIoctl(J2534_ULONG target,
+                                 J2534_ULONG operation,
+                                 void *input,
+                                 void *output) {
+    J2534_LONG status = checkDevice(target);
+    if (status) {
+        return status;
+    }
+    if (!output || (operation == GET_PROTOCOL_INFO && !input)) {
+        return ERR_NULL_PARAMETER;
+    }
+    if (operation == GET_DEVICE_INFO && input) {
+        return ERR_NULL_REQUIRED;
+    }
+    SPARAM_LIST &list = *(SPARAM_LIST *)output;
+    if (list.NumOfParams && !list.ParamPtr) {
+        return ERR_NULL_PARAMETER;
+    }
+    const opendiag_ProtocolLimit *limit = NULL;
+    if (operation == GET_PROTOCOL_INFO) {
+        limit = protocolLimit(*(J2534_ULONG *)input);
+        if (!limit) {
+            return ERR_PROTOCOL_ID_NOT_SUPPORTED;
+        }
+    }
+    for (J2534_ULONG index = 0; index < list.NumOfParams; ++index) {
+        SPARAM &parameter = list.ParamPtr[index];
+        parameter.Supported = 0;
+        if (operation == GET_DEVICE_INFO &&
+            (parameter.Value == ENTIRE_DEVICE || parameter.Value == 1)) {
+            J2534_ULONG protocol = 0;
+            switch (parameter.Parameter) {
+            case J1850PWM_SUPPORTED:
+                protocol = J1850PWM;
+                break;
+            case J1850VPW_SUPPORTED:
+                protocol = J1850VPW;
+                break;
+            case ISO9141_SUPPORTED:
+                protocol = ISO9141;
+                break;
+            case ISO14230_SUPPORTED:
+                protocol = ISO14230;
+                break;
+            case CAN_SUPPORTED:
+                protocol = CAN;
+                break;
+            default:
+                break;
+            }
+            if (protocol && protocolLimit(protocol)) {
+                parameter.Supported = 1;
+                parameter.Value = 0x00010001; // One channel, also one simultaneous channel.
+            }
+        }
+        if (limit && (parameter.Parameter == MAX_REPEAT_MESSAGING ||
+                      parameter.Parameter == MAX_REPEAT_MESSAGING_LENGTH)) {
+            parameter.Supported = 1;
+            bool supported = device->capabilities.repeat_per_channel && limit->max_repeat_data;
+            if (!supported) {
+                parameter.Value = 0;
+            } else if (parameter.Parameter == MAX_REPEAT_MESSAGING) {
+                parameter.Value = device->capabilities.repeat_per_channel;
+            } else {
+                parameter.Value = limit->max_repeat_data;
+            }
+        }
+    }
+    return STATUS_NOERROR;
+}
+
+static J2534_LONG encodeRepeatMessage(const PASSTHRU_MSG &source,
+                                      const Channel &channel,
+                                      J2534_ULONG maximum,
+                                      opendiag_RepeatMessage &message) {
+    if (source.ProtocolID != channel.protocol) {
+        return ERR_MSG_PROTOCOL_ID;
+    }
+    if (!source.DataBuffer) {
+        return ERR_NULL_PARAMETER;
+    }
+    if (!source.DataLength || source.DataLength > source.DataBufferSize ||
+        source.DataLength > maximum || source.DataLength > sizeof(message.data.bytes)) {
+        return ERR_INVALID_MSG;
+    }
+    message.protocol = source.ProtocolID;
+    message.handle = source.MsgHandle;
+    message.tx_flags = source.TxFlags;
+    message.data.size = (pb_size_t)source.DataLength;
+    memcpy(message.data.bytes, source.DataBuffer, source.DataLength);
+    return STATUS_NOERROR;
+}
+
+static J2534_LONG repeatIoctl(Channel &channel, J2534_ULONG operation, void *input, void *output) {
+    if (!input || (operation != STOP_REPEAT_MESSAGE && !output)) {
+        return ERR_NULL_PARAMETER;
+    }
+    if (operation == STOP_REPEAT_MESSAGE && output) {
+        return ERR_NULL_REQUIRED;
+    }
+    const opendiag_ProtocolLimit *limit = protocolLimit(channel.protocol);
+    if (!device->capabilities.repeat_per_channel || !limit || !limit->max_repeat_data) {
+        return ERR_NOT_SUPPORTED;
+    }
+    opendiag_Request request = {};
+    opendiag_Response response = {};
+    if (operation == START_REPEAT_MESSAGE) {
+        const REPEAT_MSG_SETUP &setup = *(REPEAT_MSG_SETUP *)input;
+        request.which_command = opendiag_Request_start_repeat_tag;
+        opendiag_Repeat &repeat = request.command.start_repeat;
+        repeat.channel = channel.remote;
+        repeat.interval_ms = setup.TimeInterval;
+        repeat.condition = setup.Condition;
+        repeat.has_message = repeat.has_mask = repeat.has_pattern = true;
+        opendiag_RepeatMessage *messages[] = {&repeat.message, &repeat.mask, &repeat.pattern};
+        for (unsigned index = 0; index < 3; ++index) {
+            J2534_LONG status = encodeRepeatMessage(setup.RepeatMsgData[index],
+                                                    channel,
+                                                    limit->max_repeat_data,
+                                                    *messages[index]);
+            if (status) {
+                return status;
+            }
+        }
+        // Reserve host storage before creating state on the adapter.
+        J2534_ULONG handle = newHandle();
+        channel.repeats.insert(std::make_pair(handle, 0));
+        J2534_LONG status = rpc(request, response);
+        if (status) {
+            channel.repeats.erase(handle);
+            return status;
+        }
+        channel.repeats[handle] = response.id;
+        *(J2534_ULONG *)output = handle;
+        return STATUS_NOERROR;
+    }
+    J2534_ULONG handle = *(J2534_ULONG *)input;
+    std::map<J2534_ULONG, J2534_ULONG>::iterator found = channel.repeats.find(handle);
+    if (found == channel.repeats.end()) {
+        return ERR_INVALID_MSG_ID;
+    }
+    if (operation == QUERY_REPEAT_MESSAGE) {
+        request.which_command = opendiag_Request_query_repeat_tag;
+        request.command.query_repeat.channel = channel.remote;
+        request.command.query_repeat.id = found->second;
+    } else {
+        request.which_command = opendiag_Request_stop_repeat_tag;
+        request.command.stop_repeat.channel = channel.remote;
+        request.command.stop_repeat.id = found->second;
+    }
+    J2534_LONG status = rpc(request, response);
+    if (!status) {
+        if (operation == QUERY_REPEAT_MESSAGE) {
+            *(J2534_ULONG *)output = response.repeat_active ? 1 : 0;
+        } else {
+            channel.repeats.erase(found);
+        }
+    }
+    return status;
+}
+
 J2534_LONG PassThruIoctl(J2534_ULONG target, J2534_ULONG id, void *input, void *output) {
     J2534_LONG status = checkDevice();
     if (status) {
         return status;
     }
 
-    // Voltage requests use a device handle; the remaining IOCTLs use a channel handle.
+    if (id == GET_DEVICE_INFO || id == GET_PROTOCOL_INFO) {
+        return discoveryIoctl(target, id, input, output);
+    }
+
+    // Voltage and discovery requests use a device handle.
     if (id == READ_PIN_VOLTAGE || id == READ_PROG_VOLTAGE) {
         return readVoltageIoctl(target, id, input, output);
     }
@@ -1157,6 +1335,10 @@ J2534_LONG PassThruIoctl(J2534_ULONG target, J2534_ULONG id, void *input, void *
     }
 
     switch (id) {
+    case START_REPEAT_MESSAGE:
+    case QUERY_REPEAT_MESSAGE:
+    case STOP_REPEAT_MESSAGE:
+        return repeatIoctl(*channel, id, input, output);
     case GET_CONFIG:
     case SET_CONFIG:
         return configureChannelIoctl(*channel, id, input, output);

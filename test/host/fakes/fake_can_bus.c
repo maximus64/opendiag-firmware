@@ -5,6 +5,8 @@
  */
 
 #include "fake_can_bus.h"
+#include "esp_timer.h"
+#include "bus_tx.h"
 
 #include <string.h>
 
@@ -20,12 +22,14 @@ typedef struct {
     struct can_frame frame;
     uint32_t delay_ms;
     uint64_t ready_ms;
+    uint32_t timestamp_us;
     int release_at; /* Transmit count that frees this frame */
 } staged_t;
 
 static struct {
     bool up;
     uint32_t rx_timestamp_us;
+    uint32_t rx_sequence;
     int baud;
     int setup_count;
     int teardown_count;
@@ -64,6 +68,7 @@ static void stage(staged_t *slot, uint32_t id, uint8_t dlc, const uint8_t *data,
     }
     slot->delay_ms = delay_ms;
     slot->ready_ms = fake_clock_ms();
+    slot->timestamp_us = (uint32_t)esp_timer_get_time();
 }
 
 void fake_can_stage_response_at(uint32_t id, uint8_t dlc, const uint8_t *data,
@@ -180,6 +185,9 @@ int can_send(const struct can_frame *frame) {
 
         ready_ms += g.pending[i].delay_ms;
         g.pending[i].ready_ms = ready_ms;
+        g.pending[i].timestamp_us =
+            (uint32_t)esp_timer_get_time() +
+            (uint32_t)(ready_ms - fake_clock_ms()) * 1000u;
         g.live[(g.live_head + g.live_count) % MAX_FRAMES] = g.pending[i];
         g.live_count++;
     }
@@ -212,7 +220,7 @@ int can_receive(struct can_frame *frame, TickType_t ticks_to_wait) {
     }
 
     fake_clock_advance_ms(delay_ms);
-    g.rx_timestamp_us = (uint32_t)(s->ready_ms * 1000u);
+    g.rx_timestamp_us = s->timestamp_us;
 
     g.live_head = (g.live_head + 1) % MAX_FRAMES;
     g.live_count--;
@@ -256,6 +264,20 @@ static int can_ops_send(const bus_msg_t *msg, uint32_t flags) {
     return can_send(&f) == 0 ? 0 : BUS_ERR_TX_FAILED;
 }
 
+static int can_ops_controlled(const bus_msg_t *msg, uint32_t flags,
+                              bus_tx_control_t *control) {
+    uint32_t sequence = g.rx_sequence;
+    for (int i = 0; i < g.live_count; i++)
+        if (g.live[(g.live_head + i) % MAX_FRAMES].ready_ms <= fake_clock_ms())
+            sequence++;
+    int rc = bus_tx_admit(control, sequence, (uint32_t)esp_timer_get_time());
+    if (rc)
+        return rc;
+    rc = can_ops_send(msg, flags);
+    bus_tx_end(control, (uint32_t)esp_timer_get_time());
+    return rc;
+}
+
 static int can_ops_recv(bus_msg_t *msg, TickType_t wait) {
     struct can_frame f;
     size_t len;
@@ -276,6 +298,7 @@ static int can_ops_recv(bus_msg_t *msg, TickType_t wait) {
     msg->id = f.id;
     msg->len = f.dlc;
     msg->timestamp_us = g.rx_timestamp_us;
+    msg->sequence = ++g.rx_sequence;
     msg->status = 0;
 
     return (int)len;
@@ -286,5 +309,6 @@ const bus_ops_t can_bus_ops = {
     .open = can_ops_open,
     .close = can_ops_close,
     .send = can_ops_send,
+    .send_controlled = can_ops_controlled,
     .recv = can_ops_recv,
 };

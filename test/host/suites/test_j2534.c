@@ -4,6 +4,7 @@
 #include "freertos/task.h"
 #include "fake_board.h"
 #include "fake_bus.h"
+#include "fake_bus_tx_worker.h"
 #include "fake_can_bus.h"
 #include "fake_clock.h"
 #include "fake_port.h"
@@ -95,6 +96,8 @@ void td_setup(void) {
     }
     j2534_core_stop();
     TEST_ASSERT_EQUAL_INT(ESP_OK, vif_init());
+    fake_bus_tx_hold(false);
+    fake_bus_tx_hold_completion(false);
     fake_clock_reset();
     fake_can_reset();
     fake_bus_reset_all();
@@ -810,4 +813,414 @@ TEST(j2534_native_filter_still_rejects_hds_legacy_tx_flags) {
     req.command.start_filter.mask.size = req.command.start_filter.pattern.size =
         1;
     TEST_ASSERT_EQUAL_INT(J2534_MSG, call());
+}
+
+static j2534_repeat_setup_t repeat_setup(uint32_t protocol,
+                                         uint32_t condition) {
+    j2534_repeat_setup_t setup = {
+        .interval_ms = 20,
+        .condition = condition,
+        .message = {.protocol = protocol,
+                    .len = 5,
+                    .data = {0x68, 0x6a, 0xf1, 1, 0}},
+        .mask = {.protocol = protocol, .len = 1, .data = {0xff}},
+        .pattern = {.protocol = protocol, .len = 1, .data = {0x48}},
+    };
+    return setup;
+}
+
+static uint32_t start_repeat(uint32_t channel, j2534_repeat_setup_t *setup) {
+    uint32_t id = 0;
+    TEST_ASSERT_EQUAL_INT(0, j2534_core_repeat_start(channel, setup, &id));
+    TEST_ASSERT_TRUE(id != 0);
+    return id;
+}
+
+static bool repeat_active(uint32_t channel, uint32_t id) {
+    bool active = false;
+    TEST_ASSERT_EQUAL_INT(0, j2534_core_repeat_query(channel, id, &active));
+    return active;
+}
+
+TEST(repeat_matching_precedes_filters_and_preserves_terminating_response) {
+    uint32_t channel = hds_channel(true);
+    j2534_repeat_setup_t setup = repeat_setup(J2534_ISO9141, 0);
+    uint32_t id = start_repeat(channel, &setup);
+    j2534_core_poll();
+    filter(channel, 1, 0, 0);
+    fake_clock_advance_ms(1);
+    const uint8_t data[] = {0x48, 0x6b, 0x10, 0x41, 0, 4};
+    fake_bus_stage_stale(FAKE_BUS_KLINE, data, sizeof(data));
+    j2534_core_poll();
+    TEST_ASSERT_FALSE(repeat_active(channel, id));
+    TEST_ASSERT_EQUAL_INT(0, read_message(channel));
+    TEST_ASSERT_EQUAL_INT(sizeof(data) - 1, res.message.data.size);
+    TEST_ASSERT_EQUAL_MEM(data, res.message.data.bytes, sizeof(data) - 1);
+    fake_clock_advance_ms(100);
+    j2534_core_poll();
+    TEST_ASSERT_EQUAL_INT(1, fake_bus_sent_count(FAKE_BUS_KLINE));
+    TEST_ASSERT_EQUAL_INT(0, j2534_core_repeat_stop(channel, id));
+    TEST_ASSERT_EQUAL_INT(J2534_MSG_ID, j2534_core_repeat_stop(channel, id));
+}
+
+TEST(repeat_works_without_pass_filters_and_while_stops_in_silence) {
+    uint32_t channel = hds_channel(false);
+    j2534_repeat_setup_t setup = repeat_setup(J2534_ISO9141, 1);
+    uint32_t id = start_repeat(channel, &setup);
+    j2534_core_poll();
+    fake_clock_advance_ms(21);
+    j2534_core_poll();
+    TEST_ASSERT_FALSE(repeat_active(channel, id));
+    TEST_ASSERT_EQUAL_INT(1, fake_bus_sent_count(FAKE_BUS_KLINE));
+    setup.condition = 0;
+    id = start_repeat(channel, &setup);
+    j2534_core_poll();
+    fake_clock_advance_ms(1);
+    const uint8_t response[] = {0x48, 0x6b, 0x10, 0xc3};
+    fake_bus_stage_stale(FAKE_BUS_KLINE, response, sizeof(response));
+    j2534_core_poll();
+    TEST_ASSERT_FALSE(repeat_active(channel, id));
+    TEST_ASSERT_EQUAL_INT(J2534_EMPTY, read_message(channel));
+}
+
+TEST(repeat_uses_end_relative_interval_and_copies_caller_storage) {
+    uint32_t channel = hds_channel(false);
+    j2534_repeat_setup_t setup = repeat_setup(J2534_ISO9141, 0);
+    start_repeat(channel, &setup);
+    memset(&setup, 0, sizeof(setup));
+    fake_bus_send_duration(FAKE_BUS_KLINE, 7);
+    j2534_core_poll();
+    fake_clock_advance_ms(19);
+    j2534_core_poll();
+    TEST_ASSERT_EQUAL_INT(1, fake_bus_sent_count(FAKE_BUS_KLINE));
+    fake_clock_advance_ms(2);
+    j2534_core_poll();
+    TEST_ASSERT_EQUAL_INT(2, fake_bus_sent_count(FAKE_BUS_KLINE));
+    size_t len = 0;
+    const uint8_t *sent = fake_bus_sent(FAKE_BUS_KLINE, 1, &len);
+    TEST_ASSERT_EQUAL_INT(0x68, sent[0]);
+    TEST_ASSERT_EQUAL_INT(5, len);
+}
+
+TEST(repeat_ignores_tx_loopback_for_both_conditions) {
+    uint32_t channel = hds_channel(false);
+    j2534_repeat_setup_t setup = repeat_setup(J2534_ISO9141, 0);
+    uint32_t until = start_repeat(channel, &setup);
+    setup.condition = 1;
+    uint32_t while_id = start_repeat(channel, &setup);
+    const uint8_t response[] = {0x48, 0x6b, 0x10, 0xc3};
+    fake_bus_stage_response_status(FAKE_BUS_KLINE, response, sizeof(response),
+                                   1, BUS_RX_TX_MSG_TYPE);
+    j2534_core_poll();
+    fake_clock_advance_ms(1);
+    j2534_core_poll();
+    TEST_ASSERT_TRUE(repeat_active(channel, until));
+    fake_clock_advance_ms(21);
+    j2534_core_poll();
+    TEST_ASSERT_FALSE(repeat_active(channel, while_id));
+}
+
+TEST(pending_repeat_can_be_stopped_without_transmitting) {
+    uint32_t channel = hds_channel(false);
+    j2534_repeat_setup_t setup = repeat_setup(J2534_ISO9141, 0);
+    uint32_t id = start_repeat(channel, &setup);
+    fake_bus_tx_hold(true);
+    j2534_core_poll();
+    TEST_ASSERT_EQUAL_INT(0, j2534_core_repeat_stop(channel, id));
+    fake_bus_tx_hold(false);
+    j2534_core_poll();
+    TEST_ASSERT_EQUAL_INT(0, fake_bus_sent_count(FAKE_BUS_KLINE));
+}
+
+TEST(response_cancels_a_repeat_waiting_for_bus_admission) {
+    uint32_t channel = hds_channel(false);
+    j2534_repeat_setup_t setup = repeat_setup(J2534_ISO9141, 0);
+    uint32_t id = start_repeat(channel, &setup);
+    fake_bus_tx_hold(true);
+    j2534_core_poll();
+    fake_clock_advance_ms(1);
+    const uint8_t response[] = {0x48, 0x6b, 0x10, 0xc3};
+    fake_bus_stage_stale(FAKE_BUS_KLINE, response, sizeof(response));
+    /* Let admission race the core's next receive drain. */
+    fake_bus_tx_hold(false);
+    j2534_core_poll();
+    TEST_ASSERT_FALSE(repeat_active(channel, id));
+    TEST_ASSERT_EQUAL_INT(0, fake_bus_sent_count(FAKE_BUS_KLINE));
+}
+
+TEST(repeat_prioritizes_due_jobs_over_ordinary_messages_without_starvation) {
+    uint32_t channel = hds_channel(false);
+    j2534_repeat_setup_t setup = repeat_setup(J2534_ISO9141, 0);
+    uint32_t first = start_repeat(channel, &setup);
+    setup.message.data[4] = 1;
+    uint32_t second = start_repeat(channel, &setup);
+    const uint8_t ordinary[] = {0x68, 0x6a, 0xf1, 1, 2};
+    queue(channel, J2534_ISO9141, 0, ordinary, sizeof(ordinary));
+    TEST_ASSERT_EQUAL_INT(0, call());
+    fake_bus_send_duration(FAKE_BUS_KLINE, 25);
+    j2534_core_poll();
+    j2534_core_poll();
+    size_t len;
+    TEST_ASSERT_EQUAL_INT(0, fake_bus_sent(FAKE_BUS_KLINE, 0, &len)[4]);
+    TEST_ASSERT_EQUAL_INT(1, fake_bus_sent(FAKE_BUS_KLINE, 1, &len)[4]);
+    TEST_ASSERT_EQUAL_INT(0, j2534_core_repeat_stop(channel, first));
+    TEST_ASSERT_EQUAL_INT(0, j2534_core_repeat_stop(channel, second));
+    j2534_core_poll();
+    TEST_ASSERT_EQUAL_INT(2, fake_bus_sent(FAKE_BUS_KLINE, 2, &len)[4]);
+}
+
+TEST(clear_periodics_does_not_clear_repeat_ids_or_pending_repeat) {
+    uint32_t channel = hds_channel(false);
+    j2534_repeat_setup_t setup = repeat_setup(J2534_ISO9141, 0);
+    uint32_t id = start_repeat(channel, &setup);
+    fake_bus_tx_hold(true);
+    j2534_core_poll();
+    command(opendiag_Request_ioctl_tag);
+    req.command.ioctl =
+        (opendiag_Ioctl){.target = channel, .id = BUS_IOCTL_CLEAR_PERIODIC};
+    TEST_ASSERT_EQUAL_INT(0, call());
+    fake_bus_tx_hold(false);
+    j2534_core_poll();
+    TEST_ASSERT_TRUE(repeat_active(channel, id));
+    TEST_ASSERT_EQUAL_INT(1, fake_bus_sent_count(FAKE_BUS_KLINE));
+}
+
+TEST(repeat_can_and_isotp_use_independent_jobs_and_native_framing) {
+    uint32_t physical = connect_can(0);
+    uint32_t channel = logical(physical, false);
+    j2534_repeat_setup_t setup = repeat_setup(J2534_ISOTP, 0);
+    memcpy(setup.message.data, "\0\0\x07\xe0\x01", 5);
+    setup.mask.data[0] = 0;
+    setup.pattern.data[0] = 0;
+    uint32_t logical_id = start_repeat(channel, &setup);
+    setup.message.protocol = setup.mask.protocol = setup.pattern.protocol =
+        J2534_CAN;
+    uint32_t physical_id = start_repeat(physical, &setup);
+    j2534_core_poll();
+    j2534_core_poll();
+    const struct can_frame *frame = fake_can_sent(0);
+    TEST_ASSERT_NOT_NULL(frame);
+    TEST_ASSERT_EQUAL_INT(0x7e0, frame->id);
+    TEST_ASSERT_EQUAL_INT(1, frame->data[0]);
+    fake_clock_advance_ms(1);
+    const uint8_t response[] = {1, 0x41};
+    fake_can_stage_stale(0x7e8, sizeof(response), response);
+    j2534_core_poll();
+    TEST_ASSERT_FALSE(repeat_active(channel, logical_id));
+    TEST_ASSERT_FALSE(repeat_active(physical, physical_id));
+}
+
+TEST(repeat_validates_shapes_and_retains_quota_until_stop) {
+    uint32_t channel = hds_channel(false);
+    j2534_repeat_setup_t setup = repeat_setup(J2534_ISO9141, 0);
+    uint32_t id = 0;
+    setup.interval_ms = 4;
+    TEST_ASSERT_EQUAL_INT(J2534_INTERVAL,
+                          j2534_core_repeat_start(channel, &setup, &id));
+    setup.interval_ms = 20;
+    setup.condition = 2;
+    TEST_ASSERT_EQUAL_INT(J2534_VALUE,
+                          j2534_core_repeat_start(channel, &setup, &id));
+    setup.condition = 0;
+    setup.pattern.len = 2;
+    TEST_ASSERT_EQUAL_INT(J2534_MSG,
+                          j2534_core_repeat_start(channel, &setup, &id));
+    setup.pattern.len = 1;
+    for (unsigned i = 0; i < J2534_REPEAT_MAX; i++)
+        id = start_repeat(channel, &setup);
+    TEST_ASSERT_EQUAL_INT(J2534_LIMIT,
+                          j2534_core_repeat_start(channel, &setup, &id));
+    TEST_ASSERT_EQUAL_INT(0, j2534_core_repeat_stop(channel, id));
+    start_repeat(channel, &setup);
+}
+
+TEST(isotp_accepts_flow_control_after_tx_end_before_worker_returns) {
+    uint32_t physical = connect_can(0);
+    uint32_t channel = logical(physical, false);
+    const uint8_t request[] = {0, 0, 7, 0xe0, 1, 2, 3, 4, 5, 6, 7, 8};
+    queue(channel, J2534_ISOTP, J2534_PAD, request, sizeof(request));
+    TEST_ASSERT_EQUAL_INT(0, call());
+    fake_bus_tx_hold_completion(true);
+    j2534_core_poll();
+    const uint8_t flow[] = {0x30, 0, 0};
+    fake_can_stage_stale(0x7e8, sizeof(flow), flow);
+    j2534_core_poll();
+    fake_bus_tx_hold_completion(false);
+    j2534_core_poll();
+    TEST_ASSERT_EQUAL_INT(2, fake_can_sent_count());
+    TEST_ASSERT_EQUAL_INT(0x21, fake_can_sent(1)->data[0]);
+}
+
+TEST(while_response_window_is_preserved_across_delayed_worker_completion) {
+    uint32_t channel = hds_channel(false);
+    j2534_repeat_setup_t setup = repeat_setup(J2534_ISO9141, 1);
+    uint32_t id = start_repeat(channel, &setup);
+    fake_bus_tx_hold_completion(true);
+    j2534_core_poll();
+    fake_clock_advance_ms(10);
+    const uint8_t response[] = {0x48, 0x6b, 0x10, 0xc3};
+    fake_bus_stage_stale(FAKE_BUS_KLINE, response, sizeof(response));
+    j2534_core_poll();
+    fake_clock_advance_ms(15);
+    fake_bus_stage_stale(FAKE_BUS_KLINE, response, sizeof(response));
+    j2534_core_poll();
+    TEST_ASSERT_TRUE(repeat_active(channel, id));
+    fake_bus_tx_hold_completion(false);
+    j2534_core_poll();
+    TEST_ASSERT_EQUAL_INT(2, fake_bus_sent_count(FAKE_BUS_KLINE));
+}
+
+TEST(stopped_repeat_completion_cannot_change_a_new_job_in_the_reused_slot) {
+    uint32_t channel = hds_channel(false);
+    j2534_repeat_setup_t setup = repeat_setup(J2534_ISO9141, 0);
+    uint32_t old_id = start_repeat(channel, &setup);
+    fake_bus_tx_hold_completion(true);
+    j2534_core_poll();
+    TEST_ASSERT_EQUAL_INT(0, j2534_core_repeat_stop(channel, old_id));
+    uint32_t new_id = start_repeat(channel, &setup);
+    TEST_ASSERT_TRUE(old_id != new_id);
+    fake_bus_tx_hold_completion(false);
+    j2534_core_poll();
+    TEST_ASSERT_TRUE(repeat_active(channel, new_id));
+    TEST_ASSERT_EQUAL_INT(2, fake_bus_sent_count(FAKE_BUS_KLINE));
+}
+
+TEST(clear_tx_keeps_a_late_completion_from_clearing_new_ordinary_data) {
+    uint32_t channel = hds_channel(false);
+    const uint8_t first[] = {0x68, 0x6a, 0xf1, 1, 0};
+    queue(channel, J2534_ISO9141, 0, first, sizeof(first));
+    TEST_ASSERT_EQUAL_INT(0, call());
+    fake_bus_tx_hold_completion(true);
+    j2534_core_poll();
+    command(opendiag_Request_ioctl_tag);
+    req.command.ioctl =
+        (opendiag_Ioctl){.target = channel, .id = BUS_IOCTL_CLEAR_TX_QUEUE};
+    TEST_ASSERT_EQUAL_INT(0, call());
+    const uint8_t second[] = {0x68, 0x6a, 0xf1, 1, 1};
+    queue(channel, J2534_ISO9141, 0, second, sizeof(second));
+    TEST_ASSERT_EQUAL_INT(0, call());
+    fake_bus_tx_hold_completion(false);
+    j2534_core_poll();
+    TEST_ASSERT_EQUAL_INT(2, fake_bus_sent_count(FAKE_BUS_KLINE));
+    size_t len;
+    TEST_ASSERT_EQUAL_MEM(second, fake_bus_sent(FAKE_BUS_KLINE, 1, &len),
+                          sizeof(second));
+}
+
+TEST(fast_init_joins_an_already_submitted_packet_without_sending_it_twice) {
+    uint32_t channel = hds_channel(false);
+    const uint8_t data[] = {0x68, 0x6a, 0xf1, 1, 0};
+    queue(channel, J2534_ISO9141, 0, data, sizeof(data));
+    TEST_ASSERT_EQUAL_INT(0, call());
+    fake_bus_tx_hold_completion(true);
+    j2534_core_poll();
+    fake_bus_tx_hold_completion(false);
+    hds_init(channel, 0, true);
+    TEST_ASSERT_EQUAL_INT(0, call());
+    TEST_ASSERT_EQUAL_INT(1, fake_bus_sent_count(FAKE_BUS_KLINE));
+    TEST_ASSERT_EQUAL_INT(1, fake_bus_sync_count());
+}
+
+TEST(clear_rx_still_applies_repeat_conditions_to_removed_responses) {
+    uint32_t channel = hds_channel(false);
+    j2534_repeat_setup_t setup = repeat_setup(J2534_ISO9141, 0);
+    uint32_t id = start_repeat(channel, &setup);
+    j2534_core_poll();
+    fake_clock_advance_ms(1);
+    const uint8_t data[] = {0x48, 0x6b, 0x10, 0xc3};
+    fake_bus_stage_stale(FAKE_BUS_KLINE, data, sizeof(data));
+    command(opendiag_Request_ioctl_tag);
+    req.command.ioctl =
+        (opendiag_Ioctl){.target = channel, .id = BUS_IOCTL_CLEAR_RX_QUEUE};
+    TEST_ASSERT_EQUAL_INT(0, call());
+    TEST_ASSERT_FALSE(repeat_active(channel, id));
+    TEST_ASSERT_EQUAL_INT(J2534_EMPTY, read_message(channel));
+}
+
+TEST(rx_loss_and_tx_failure_stop_repeats_without_releasing_ids) {
+    uint32_t channel = hds_channel(false);
+    j2534_repeat_setup_t setup = repeat_setup(J2534_ISO9141, 0);
+    uint32_t failed = start_repeat(channel, &setup);
+    fake_bus_fail_next_send(FAKE_BUS_KLINE);
+    j2534_core_poll();
+    TEST_ASSERT_FALSE(repeat_active(channel, failed));
+    uint32_t lost = start_repeat(channel, &setup);
+    const uint8_t data[] = {0x49, 0x6b, 0x10, 0xc4};
+    fake_bus_stage_response_status(FAKE_BUS_KLINE, data, sizeof(data), 1,
+                                   BUS_RX_BUFFER_OVERFLOW);
+    j2534_core_poll();
+    fake_clock_advance_ms(1);
+    j2534_core_poll();
+    TEST_ASSERT_FALSE(repeat_active(channel, lost));
+    TEST_ASSERT_EQUAL_INT(0, j2534_core_repeat_stop(channel, failed));
+    TEST_ASSERT_EQUAL_INT(0, j2534_core_repeat_stop(channel, lost));
+}
+
+TEST(repeat_j1850_uses_the_same_scheduler_and_receive_conditions) {
+    for (unsigned protocol = J2534_VPW; protocol <= J2534_PWM; protocol++) {
+        command(opendiag_Request_connect_tag);
+        req.command.connect = (opendiag_Connect){
+            .device = dev,
+            .protocol = protocol,
+            .baudrate = protocol == J2534_PWM ? 41600 : 10400,
+            .connector = 1,
+            .pins_count = protocol == J2534_PWM ? 2 : 1,
+            .pins = {2, 10},
+        };
+        TEST_ASSERT_EQUAL_INT(0, call());
+        uint32_t channel = res.id;
+        j2534_repeat_setup_t setup = repeat_setup(protocol, 0);
+        uint32_t id = start_repeat(channel, &setup);
+        j2534_core_poll();
+        fake_clock_advance_ms(1);
+        const uint8_t response[] = {0x48, 0x6b, 0x10, 0xc3};
+        fake_bus_id_t bus =
+            protocol == J2534_PWM ? FAKE_BUS_J1850_PWM : FAKE_BUS_J1850_VPW;
+        fake_bus_stage_stale(bus, response, sizeof(response));
+        j2534_core_poll();
+        TEST_ASSERT_FALSE(repeat_active(channel, id));
+        TEST_ASSERT_EQUAL_INT(1, fake_bus_sent_count(bus));
+        command(opendiag_Request_disconnect_tag);
+        req.command.disconnect.id = channel;
+        TEST_ASSERT_EQUAL_INT(0, call());
+    }
+}
+
+TEST(repeat_can_29bit_masks_are_bit_patterns_not_transmit_identifiers) {
+    uint32_t channel = connect_can(J2534_29BIT);
+    j2534_repeat_setup_t setup = repeat_setup(J2534_CAN, 0);
+    setup.message.flags = setup.mask.flags = setup.pattern.flags = J2534_29BIT;
+    memcpy(setup.message.data, "\x18\xdb\x33\xf1\x01", 5);
+    setup.mask.len = setup.pattern.len = 4;
+    memset(setup.mask.data, 0xff, 4);
+    memcpy(setup.pattern.data, "\x18\xda\xf1\x10", 4);
+    uint32_t id = start_repeat(channel, &setup);
+    j2534_core_poll();
+    fake_clock_advance_ms(1);
+    const uint8_t response[] = {0x41};
+    fake_can_stage_stale(CAN_EFF_FLAG | 0x18daf110, sizeof(response), response);
+    j2534_core_poll();
+    TEST_ASSERT_FALSE(repeat_active(channel, id));
+}
+
+TEST(
+    repeat_isotp_extended_address_uses_single_frame_without_mutating_channel_tx) {
+    uint32_t physical = connect_can(0);
+    uint32_t channel = logical(physical, true);
+    j2534_repeat_setup_t setup = repeat_setup(J2534_ISOTP, 0);
+    setup.message.flags = J2534_ADDR | J2534_PAD;
+    setup.mask.flags = setup.pattern.flags = J2534_ADDR;
+    setup.message.len = 6;
+    memcpy(setup.message.data, "\0\0\x07\xe0\x10\x01", 6);
+    setup.mask.data[0] = setup.pattern.data[0] = 0;
+    uint32_t id = start_repeat(channel, &setup);
+    j2534_core_poll();
+    const struct can_frame *frame = fake_can_sent(0);
+    TEST_ASSERT_EQUAL_INT(0x10, frame->data[0]);
+    TEST_ASSERT_EQUAL_INT(1, frame->data[1]);
+    fake_clock_advance_ms(1);
+    const uint8_t response[] = {0xf1, 1, 0x41};
+    fake_can_stage_stale(0x7e8, sizeof(response), response);
+    j2534_core_poll();
+    TEST_ASSERT_FALSE(repeat_active(channel, id));
 }

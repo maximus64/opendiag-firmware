@@ -3,6 +3,7 @@
 #include <string.h>
 #include <unistd.h>
 #include "esp_twai_onchip.h"
+#include "bus_tx.h"
 #include "can_bus.h"
 #include "driver/gpio.h"
 #include "driver_rtos.h"
@@ -519,4 +520,42 @@ TEST(j2534_bus_off_is_reported_and_bus_on_recovers) {
     TEST_ASSERT_EQUAL_INT(1, recover_calls);
     TEST_ASSERT_EQUAL_INT(0, can_bus_ops.ioctl(BUS_IOCTL_BUS_ON, NULL, NULL));
     TEST_ASSERT_EQUAL_INT(1, recover_calls);
+}
+
+TEST(controlled_can_timeout_silences_tx_but_retains_rx_resources_until_close) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    uint8_t data[] = {1};
+    bus_msg_t message;
+    bus_msg_tx(&message, data, sizeof(data), 0x7e0);
+    bus_tx_control_t control;
+    bus_tx_prepare(&control, 0);
+    result[WAIT_TX] = ESP_ERR_TIMEOUT;
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_TX_ABORTED,
+                          can_bus_ops.send_controlled(&message, 0, &control));
+    TEST_ASSERT_TRUE(node_live);
+    TEST_ASSERT_TRUE(silent);
+    complete_pending_tx();
+    TEST_ASSERT_EQUAL_INT(0, wire_count);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_teardown());
+    TEST_ASSERT_FALSE(node_live);
+    TEST_ASSERT_EQUAL_INT(0, pending_count);
+}
+
+TEST(
+    controlled_can_receive_guard_prevents_an_unobserved_frame_being_overtaken) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    callbacks.on_rx_done(NODE, NULL, NULL);
+    uint8_t data[] = {1};
+    bus_msg_t message;
+    bus_msg_tx(&message, data, sizeof(data), 0x7e0);
+    bus_tx_control_t control;
+    bus_tx_prepare(&control, 0);
+    control.check_rx = true;
+    TEST_ASSERT_EQUAL_INT(
+        BUS_ERR_RX_PENDING,
+        can_bus_ops.send_controlled(&message, BUS_TX_WAIT_DONE, &control));
+    TEST_ASSERT_EQUAL_INT(0, wire_count);
+    bus_msg_init(&message, data, sizeof(data));
+    TEST_ASSERT_EQUAL_INT(1, can_bus_ops.recv(&message, 0));
+    TEST_ASSERT_EQUAL_INT(1, message.sequence);
 }

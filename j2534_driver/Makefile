@@ -92,14 +92,14 @@ $(CONFIG_STAMP): FORCE
 	@mkdir -p "$(@D)"
 	@$(PYTHON) tools/build_config.py "$@" "$(CC)" "$(CXX)" "$(RC)" "$(CPPFLAGS)" "$(CFLAGS)" "$(CXXFLAGS)" "$(LDFLAGS)" "$(LDLIBS)"
 
-$(sort $(CORE_OBJECTS) $(LEGACY_OBJECTS) $(GUI_OBJECTS)): $(CONFIG_STAMP) Makefile
+$(sort $(CORE_OBJECTS) $(LEGACY_OBJECTS) $(GUI_OBJECTS)) $(BUILD_DIR)/tests/abi0404.o $(BUILD_DIR)/tests/abi0500.o: $(CONFIG_STAMP) Makefile
 $(call objects,$(CORE)): $(GENERATED_DIR)/j2534.pb.h
 ifeq ($(BUILD_PLATFORM),win32)
 $(BUILD_DIR)/driver/version.res $(BUILD_DIR)/legacy/version.res $(BUILD_DIR)/config/config.res: $(CONFIG_STAMP) Makefile
 $(BUILD_DIR)/config/config.res: config/resource.h
 endif
 
-.PHONY: all clean test check-toolchain check-wincompat package
+.PHONY: all clean test repeat-test check-toolchain check-wincompat package
 all: $(PRODUCTS) $(BUILD_DIR)/opendiag.ini
 
 $(addprefix $(NANOPB_DIR)/,$(NANOPB_SOURCES) pb.h) $(NANOPB_GENERATOR_DEPS):
@@ -152,14 +152,25 @@ $(BUILD_DIR)/opendiag.ini:
 	cp opendiag.ini "$@"
 
 ifeq ($(BUILD_PLATFORM),host)
-test: all
+test: all repeat-test
 	$(PYTHON) tests/run_tests.py --build "$(abspath $(BUILD_DIR))" --cxx "$(CXX)" --cc "$(CC)"
+HOST_TEST_BUILD ?= ../test/host/build
+$(GENERATED_DIR)/j2534_pb2.py: $(PROTOCOL_DIR)/j2534.proto
+	@mkdir -p "$(@D)"
+	protoc -I "$(PROTOCOL_DIR)" --python_out="$(GENERATED_DIR)" "$<"
+
+repeat-test: all $(GENERATED_DIR)/j2534_pb2.py
+	cmake -S ../test/host -B "$(HOST_TEST_BUILD)"
+	cmake --build "$(HOST_TEST_BUILD)" --target j2534_contract_firmware
+	OPENDIAG_TEST_PROTO_DIR="$(abspath $(GENERATED_DIR))" \
+		$(PYTHON) tests/test_repeat_messages.py --build "$(abspath $(BUILD_DIR))" \
+		--firmware "$(abspath $(HOST_TEST_BUILD))/libj2534_contract_firmware.so"
 check-wincompat package:
 	@echo "$@ requires Windows artifacts; use: docker compose run --rm --build j2534-driver" >&2; exit 2
 else
-test:
+test repeat-test:
 	@echo "Unit tests are native host only: make test" >&2; exit 2
-check-wincompat: all
+check-wincompat: all $(BUILD_DIR)/tests/abi0404.o $(BUILD_DIR)/tests/abi0500.o
 	$(PYTHON) tools/check_wincompat.py "$(BUILD_DIR)"
 package: check-wincompat
 	$(PYTHON) tools/package.py "$(BUILD_DIR)"

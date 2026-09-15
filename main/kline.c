@@ -36,6 +36,7 @@
 #include "driver/uart.h"
 
 #include "bus.h"
+#include "bus_tx.h"
 #include "kline.h"
 #include "pinout.h"
 #include "utility.h"
@@ -111,6 +112,7 @@ typedef struct {
     uint16_t status;
     int64_t start_us; /* When its first byte landed. */
     int64_t end_us;   /* And its last: the J2534 timestamp. */
+    uint32_t sequence;
 } kline_frame_t;
 
 typedef enum {
@@ -235,6 +237,9 @@ static struct {
     uint8_t req[KLINE_MAX_MSG];
     size_t req_len;
     uint32_t req_flags;
+    bus_tx_control_t *req_control;
+    bus_tx_control_t *active_control;
+    bus_rx_epoch_t rx_epoch;
     bus_init_t req_init;
     int result;
 
@@ -774,6 +779,7 @@ static void uart_event(const uart_event_t *ev) {
          * clause 6.10 puts a buffer overflow: on the first message after it,
          * so the application knows a gap preceded what it is holding. */
         g.stats.rx_overrun++;
+        bus_rx_lost(&g.rx_epoch, bus_rx_next(&g.rx_epoch));
         g.pending_status |= BUS_RX_BUFFER_OVERFLOW;
         rx_discard();
         rx_fault();
@@ -918,7 +924,9 @@ static void publish(kline_frame_t *f) {
         f->status |= BUS_RX_PERIODIC_REPLY;
     }
 
+    f->sequence = bus_rx_next(&g.rx_epoch);
     if (xQueueSend(g.rx_q, f, 0) != pdTRUE) {
+        bus_rx_lost(&g.rx_epoch, f->sequence);
         g.stats.rx_dropped++;
         /* The next one that does fit says data was lost before it. */
         g.pending_status |= BUS_RX_BUFFER_OVERFLOW;
@@ -948,7 +956,9 @@ static void publish_loopback(const uint8_t *data, size_t len) {
     f.start_us = g.tx_end_us;
     f.end_us = g.tx_end_us;
 
+    f.sequence = bus_rx_next(&g.rx_epoch);
     if (xQueueSend(g.rx_q, &f, 0) != pdTRUE) {
+        bus_rx_lost(&g.rx_epoch, f.sequence);
         g.stats.rx_dropped++;
     }
 }
@@ -973,23 +983,34 @@ static void publish_loopback(const uint8_t *data, size_t len) {
  *
  * @param p3_only J2534 WAIT_P3_MIN_ONLY: wait P3min whatever happened.
  */
-static void wait_before_tx(bool p3_only) {
+static int wait_before_tx(bool p3_only) {
     for (;;) {
+        kline_frame_t frame;
+        if (bus_tx_cancelled(g.active_control))
+            return BUS_ERR_CANCELLED;
+        if (rx_drain(&frame)) {
+            publish(&frame);
+            continue;
+        }
+        if (g.active_control && g.active_control->check_rx &&
+            bus_rx_sequence(&g.rx_epoch) != g.active_control->rx_sequence)
+            return BUS_ERR_RX_PENDING;
+
         int64_t owed = (g.tx_answered || p3_only) ? P_TO_US(g.cfg.p3_min)
                                                   : P_TO_US(g.cfg.p2_max);
         int64_t deadline = g.last_bus_us + owed;
-        kline_frame_t f;
-        int r;
-
-        if (now_us() >= deadline) {
-            return;
+        if (g.asm_len) {
+            int64_t gap = g.asm_last_us + P_TO_US(g.cfg.p1_max);
+            if (deadline < gap)
+                deadline = gap;
         }
-
-        r = rx_service(deadline, &f, false);
-
-        if (r == 1) {
-            publish(&f);
-        }
+        int64_t now = now_us();
+        if (now >= deadline && !g.asm_len)
+            return 0;
+        if (g.active_control && deadline > now + 5000)
+            deadline = now + 5000;
+        if (rx_service(deadline, &frame, false) == 1)
+            publish(&frame);
     }
 }
 
@@ -1066,8 +1087,14 @@ static int tx_once(const uint8_t *buf, size_t len, bool wait, uint32_t flags) {
         return BUS_ERR_NOT_READY;
 
     if (wait) {
-        wait_before_tx((flags & BUS_TX_WAIT_P3_MIN_ONLY) != 0);
+        rc = wait_before_tx((flags & BUS_TX_WAIT_P3_MIN_ONLY) != 0);
+        if (rc)
+            return rc;
     }
+
+    rc = bus_tx_admit(g.active_control, bus_rx_sequence(&g.rx_epoch), now_us());
+    if (rc)
+        return rc;
 
     /* The wait can publish replies to the previous request. Only the worker
      * can clear them at the transmit boundary without losing a new reply. */
@@ -1114,6 +1141,7 @@ static int tx_once(const uint8_t *buf, size_t len, bool wait, uint32_t flags) {
         }
     }
 
+    bus_tx_end(g.active_control, (uint32_t)g.tx_end_us);
     if (!rc)
         rc = tx_finish_echo(&tx);
     g.tx = NULL;
@@ -1679,7 +1707,9 @@ static void kline_task(void *arg) {
         g.command_pending = false;
         switch (g.cmd) {
         case CMD_TX:
+            g.active_control = g.req_control;
             g.result = tx_message(g.req, g.req_len, true, g.req_flags);
+            g.active_control = NULL;
             break;
         case CMD_FIVE_BAUD:
         case CMD_FAST_INIT:
@@ -1852,6 +1882,8 @@ static esp_err_t kline_open(const bus_cfg_t *cfg) {
     g.suppress_until_us = 0;
     g.pending_status = 0;
     g.tx_answered = true;
+    memset(&g.rx_epoch, 0, sizeof(g.rx_epoch));
+    g.req_control = g.active_control = NULL;
     memset(&g.link, 0, sizeof(g.link));
     memset(&g.keys, 0, sizeof(g.keys));
 
@@ -1972,7 +2004,8 @@ static esp_err_t kline_close(void) {
     return ESP_OK;
 }
 
-static int kline_tx(const bus_msg_t *msg, uint32_t flags) {
+static int kline_tx_controlled(const bus_msg_t *msg, uint32_t flags,
+                               bus_tx_control_t *control) {
     /* Addressing rides in the bytes on this bus, so msg->id is not
      * ours to look at. */
     const uint8_t *data = msg->data;
@@ -2002,13 +2035,18 @@ static int kline_tx(const bus_msg_t *msg, uint32_t flags) {
 
     g.req_len = n;
     g.req_flags = flags;
+    g.req_control = control;
 
     /* The quiet time owed plus the message itself, with room for a
      * retransmission and the collision wait in front of it. */
-    rc = run_cmd(CMD_TX, pdMS_TO_TICKS(3000));
+    rc = run_cmd(CMD_TX, control ? portMAX_DELAY : pdMS_TO_TICKS(3000));
 
     xSemaphoreGive(g.api_lock);
     return rc;
+}
+
+static int kline_tx(const bus_msg_t *msg, uint32_t flags) {
+    return kline_tx_controlled(msg, flags, NULL);
 }
 
 static int kline_rx(bus_msg_t *msg, TickType_t wait) {
@@ -2022,6 +2060,10 @@ static int kline_rx(bus_msg_t *msg, TickType_t wait) {
     }
 
     if (xQueueReceive(g.rx_q, &f, wait) != pdTRUE) {
+        if (bus_rx_take_loss(&g.rx_epoch, msg)) {
+            msg->timestamp_us = (uint32_t)now_us();
+            return 0;
+        }
         return BUS_ERR_TIMEOUT;
     }
 
@@ -2033,6 +2075,7 @@ static int kline_rx(bus_msg_t *msg, TickType_t wait) {
     msg->len = f.len;
     msg->status = f.status;
     msg->timestamp_us = (uint32_t)f.end_us;
+    msg->sequence = f.sequence;
 
     return (int)f.len;
 }
@@ -2361,6 +2404,7 @@ const bus_ops_t kline_bus_ops = {
     .open = kline_open,
     .close = kline_close,
     .send = kline_tx,
+    .send_controlled = kline_tx_controlled,
     .recv = kline_rx,
     .set_param = kline_set_param,
     .get_param = kline_get_param,

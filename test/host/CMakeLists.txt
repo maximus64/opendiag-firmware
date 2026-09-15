@@ -58,16 +58,21 @@ add_library(td_framework STATIC
     stubs/idf_stub.c
 )
 
+add_library(bus_tx_control STATIC ${FW_DIR}/bus_tx.c)
+
 add_library(td_fakes STATIC
     fakes/fake_ble_uart.c
     fakes/fake_board.c
     fakes/fake_bus.c
+    fakes/fake_bus_tx_worker.c
     fakes/fake_can_bus.c
     fakes/fake_gpio.c
     fakes/fake_led.c
     fakes/fake_port.c
 )
-target_link_libraries(td_fakes PUBLIC td_framework)
+target_link_libraries(td_fakes PUBLIC td_framework bus_tx_control)
+set_target_properties(td_framework td_fakes bus_tx_control
+    PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # ------------------------------------------------------------------ #
 # Suites
@@ -103,6 +108,8 @@ set(SUITES
     test_vif_ctrl
     test_slcan
     test_j2534
+    test_j2534_scheduler
+    test_bus_tx_worker
     test_button
     test_can_driver
     test_kline_driver
@@ -113,6 +120,8 @@ set(SUITES
 )
 
 set(test_elm327_at_FW      ${ELM327_FW})
+set(test_bus_tx_worker_FW driver_stubs/driver_rtos.c)
+set(test_j2534_scheduler_FW ${FW_DIR}/j2534_scheduler.c)
 set(test_isotp_FW          ${FW_DIR}/isotp.c)
 set(test_bus_params_FW    ${FW_DIR}/bus.c)
 set(test_elm327_can_FW     ${ELM327_FW})
@@ -163,8 +172,15 @@ if(NOT EXISTS "${NANOPB_DIR}/pb.h")
 endif()
 include_directories(${NANOPB_DIR})
 set(test_j2534_FW ${test_slcan_FW} ${FW_DIR}/j2534.c
+    ${FW_DIR}/j2534_scheduler.c
     ${FW_DIR}/j2534_wire.c ${FW_DIR}/j2534.pb.c ${FW_DIR}/isotp.c
     ${NANOPB_DIR}/pb_common.c ${NANOPB_DIR}/pb_encode.c ${NANOPB_DIR}/pb_decode.c)
+
+# Public-API contracts load the real firmware core behind a loopback wire peer.
+add_library(j2534_contract_firmware SHARED EXCLUDE_FROM_ALL
+    fakes/j2534_contract_firmware.c ${test_j2534_FW})
+target_link_libraries(j2534_contract_firmware PRIVATE td_fakes td_framework)
+target_link_options(j2534_contract_firmware PRIVATE -Wl,--no-undefined)
 
 if(COVERAGE)
     if(CMAKE_C_COMPILER_ID MATCHES "Clang")
@@ -177,7 +193,8 @@ endif()
 foreach(suite ${SUITES})
     add_executable(${suite} suites/${suite}.c ${${suite}_FW})
     target_link_libraries(${suite} PRIVATE td_fakes td_framework)
-    if(suite STREQUAL "test_can_driver" OR suite STREQUAL "test_kline_driver")
+    if(suite STREQUAL "test_can_driver" OR suite STREQUAL "test_kline_driver"
+       OR suite STREQUAL "test_bus_tx_worker")
         target_include_directories(${suite} BEFORE PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/driver_stubs)
     endif()

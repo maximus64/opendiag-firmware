@@ -44,6 +44,7 @@
 
 #include <inttypes.h>
 #include <string.h>
+#include "bus_tx.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -179,11 +180,12 @@ struct rx_frame {
     uint8_t len;
     uint16_t status; /**< BUS_RX_* flags. */
     uint32_t timestamp_us;
+    uint32_t sequence;
     uint8_t data[J1850_PWM_MAX_FRAME];
 };
 
 static struct {
-    bool started;
+    _Atomic bool started;
     bool initialized;
     bool tx_enabled;
     bool rx_enabled;
@@ -212,6 +214,7 @@ static struct {
     rmt_encoder_handle_t copy_encoder;
     rmt_symbol_word_t *rx_buf; /**< DMA capable, RX_BUFFER_SYMBOLS. */
     QueueHandle_t rx_queue;
+    bus_rx_epoch_t rx_epoch;
     SemaphoreHandle_t tx_lock;
 
     /** Cycles per microsecond, read once: the in-ISR response is clocked
@@ -715,7 +718,9 @@ static bool IRAM_ATTR receive_done(rmt_channel_handle_t channel,
             g.pending_status = 0;
             memcpy(f.data, rx.data, rx.len);
 
+            f.sequence = bus_rx_next(&g.rx_epoch);
             if (xQueueSendFromISR(g.rx_queue, &f, &woken) != pdTRUE) {
+                bus_rx_lost(&g.rx_epoch, f.sequence);
                 g.stats.rx_dropped++;
                 g.pending_status |= BUS_RX_BUFFER_OVERFLOW;
             }
@@ -997,7 +1002,8 @@ static bool wait_bus_idle(uint32_t timeout_ms) {
 }
 
 /** @brief One transmit attempt: idle wait, encode, hand to the peripheral. */
-static int tx_once(const rmt_symbol_word_t *sym, size_t n) {
+static int tx_once(const rmt_symbol_word_t *sym, size_t n,
+                   bus_tx_control_t *control) {
     static const rmt_transmit_config_t cfg = {
         .loop_count = 0,
         .flags.eot_level = J1850_PWM_PASSIVE, /* leave the bus released */
@@ -1009,6 +1015,12 @@ static int tx_once(const rmt_symbol_word_t *sym, size_t n) {
         return BUS_ERR_BUS_BUSY;
     }
 
+    int admission = bus_tx_admit(control, bus_rx_sequence(&g.rx_epoch),
+                                 (uint32_t)esp_timer_get_time());
+    if (admission)
+        return admission;
+
+    __atomic_store_n(&g.echo_armed, true, __ATOMIC_RELEASE);
     err = rmt_transmit(g.tx_chan, g.copy_encoder, sym,
                        n * sizeof(rmt_symbol_word_t), &cfg);
     if (err != ESP_OK) {
@@ -1027,11 +1039,13 @@ static int tx_once(const rmt_symbol_word_t *sym, size_t n) {
         return BUS_ERR_TX_FAILED;
     }
 
+    bus_tx_end(control, (uint32_t)esp_timer_get_time());
     g.stats.tx_frames++;
     return 0;
 }
 
-static int j1850_pwm_tx(const bus_msg_t *msg, uint32_t flags) {
+static int j1850_pwm_tx_controlled(const bus_msg_t *msg, uint32_t flags,
+                                   bus_tx_control_t *control) {
     /* Addressing rides in the bytes on this bus, so msg->id is not
      * ours to look at. */
     const uint8_t *data = msg->data;
@@ -1089,13 +1103,12 @@ static int j1850_pwm_tx(const bus_msg_t *msg, uint32_t flags) {
     for (uint8_t attempt = 0;; attempt++) {
         uint32_t events_before = g.rx_events;
 
-        /* Arm echo suppression before the frame goes out: the receive ISR
-         * can run before rmt_transmit() has even returned. */
+        /* Prepare the expected echo; arm it only after bus admission. */
+        __atomic_store_n(&g.echo_armed, false, __ATOMIC_RELEASE);
         memcpy(g.echo, frame, len + 1u);
         g.echo_len = len + 1u;
-        __atomic_store_n(&g.echo_armed, true, __ATOMIC_RELEASE);
 
-        rc = tx_once(g.tx_symbols, n);
+        rc = tx_once(g.tx_symbols, n, control);
         if (rc != 0) {
             break;
         }
@@ -1150,13 +1163,19 @@ static int j1850_pwm_tx(const bus_msg_t *msg, uint32_t flags) {
         f.timestamp_us = (uint32_t)esp_timer_get_time();
         memcpy(f.data, frame, f.len);
 
+        f.sequence = bus_rx_next(&g.rx_epoch);
         if (xQueueSend(g.rx_queue, &f, 0) != pdTRUE) {
+            bus_rx_lost(&g.rx_epoch, f.sequence);
             g.stats.rx_dropped++;
         }
     }
 
     xSemaphoreGive(g.tx_lock);
     return rc;
+}
+
+static int j1850_pwm_tx(const bus_msg_t *msg, uint32_t flags) {
+    return j1850_pwm_tx_controlled(msg, flags, NULL);
 }
 
 static int j1850_pwm_rx(bus_msg_t *msg, TickType_t xTicksToWait) {
@@ -1170,6 +1189,10 @@ static int j1850_pwm_rx(bus_msg_t *msg, TickType_t xTicksToWait) {
     }
 
     if (xQueueReceive(g.rx_queue, &f, xTicksToWait) != pdPASS) {
+        if (bus_rx_take_loss(&g.rx_epoch, msg)) {
+            msg->timestamp_us = (uint32_t)esp_timer_get_time();
+            return 0;
+        }
         return BUS_ERR_TIMEOUT;
     }
 
@@ -1181,6 +1204,7 @@ static int j1850_pwm_rx(bus_msg_t *msg, TickType_t xTicksToWait) {
     msg->len = f.len;
     msg->status = f.status;
     msg->timestamp_us = f.timestamp_us;
+    msg->sequence = f.sequence;
     return f.len;
 }
 
@@ -1667,6 +1691,7 @@ const bus_ops_t j1850_pwm_bus_ops = {
     .open = j1850_pwm_open,
     .close = j1850_pwm_close,
     .send = j1850_pwm_tx,
+    .send_controlled = j1850_pwm_tx_controlled,
     .recv = j1850_pwm_rx,
     .set_param = j1850_pwm_set_param,
     .get_param = j1850_pwm_get_param,

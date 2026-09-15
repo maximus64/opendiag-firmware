@@ -31,12 +31,27 @@ message LogicalConnect {
   uint32 remote_flags = 5;
   bytes local_address = 6;
   bytes remote_address = 7;
+  bool legacy_channel = 8;
 }
 message Queue { uint32 channel = 1; Message message = 2; }
 message Periodic {
   uint32 channel = 1;
   uint32 interval_ms = 2;
   Message message = 3;
+}
+message RepeatMessage {
+  uint32 protocol = 1;
+  uint32 handle = 2;
+  uint32 tx_flags = 3;
+  bytes data = 4;
+}
+message Repeat {
+  uint32 channel = 1;
+  uint32 interval_ms = 2;
+  uint32 condition = 3;
+  RepeatMessage message = 4;
+  RepeatMessage mask = 5;
+  RepeatMessage pattern = 6;
 }
 message Filter {
   uint32 channel = 1;
@@ -87,12 +102,16 @@ message Request {
     Target logical_disconnect = 20;
     Select select = 21;
     FastInit fast_init = 22;
+    Repeat start_repeat = 23;
+    Object query_repeat = 24;
+    Object stop_repeat = 25;
   }
 }
 message ProtocolLimit {
   uint32 protocol = 1;
   uint32 max_tx_data = 2;
   uint32 max_rx_data = 3;
+  uint32 max_repeat_data = 4;
 }
 message Capabilities {
   uint32 wire_version = 1;
@@ -108,6 +127,7 @@ message Capabilities {
   repeated ProtocolLimit protocols = 11;
   bool full_j2534_compliance = 12;
   uint32 fast_init_max_data = 13;
+  uint32 repeat_per_channel = 14;
 }
 message Response {
   uint32 status = 1;
@@ -120,4 +140,5 @@ message Response {
   string text = 8;
   Capabilities capabilities = 9;
   uint32 millivolts = 10;
+  bool repeat_active = 11;
 }

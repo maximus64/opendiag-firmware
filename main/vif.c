@@ -7,6 +7,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "board.h"
+#include "bus_tx.h"
 #include "can_bus.h"
 #include "j1850_pwm.h"
 #include "j1850_vpw.h"
@@ -74,6 +75,7 @@ static struct {
         bool l_line_reserved;
         uint32_t bitrate;
         vif_owner_t owner;
+        bus_tx_worker_t *tx_worker;
     } claim[VIF_RES_COUNT];
 
     /* SAE J2534: one high side and one low side driver at a time. -1 when the
@@ -215,7 +217,14 @@ static esp_err_t bus_driver_up(vif_bus_t bus, const vif_bus_cfg_t *cfg) {
 static esp_err_t bus_driver_down(vif_bus_t bus) {
     const bus_ops_t *ops = bus_for(bus);
 
-    return ops ? ops->close() : ESP_ERR_INVALID_ARG;
+    if (!ops)
+        return ESP_ERR_INVALID_ARG;
+    int group = bus_group(bus);
+    esp_err_t rc = bus_tx_worker_close(g.claim[group].tx_worker);
+    if (rc != ESP_OK)
+        return rc;
+    g.claim[group].tx_worker = NULL;
+    return ops->close();
 }
 
 /* ------------------------------------------------------------------ *
@@ -866,7 +875,40 @@ int vif_bus_send(vif_owner_t owner, vif_bus_t bus, const bus_msg_t *msg,
     /* What counts as an empty message is the bus's own business: nothing to
      * say on a byte bus, but a legal frame on CAN, where the length code can
      * be zero. Each driver refuses its own. */
-    return ops->send(msg, flags);
+    int rc = bus_tx_worker_wait(g.claim[bus_group(bus)].tx_worker);
+    return rc ? rc : ops->send(msg, flags);
+}
+
+int vif_bus_submit(vif_owner_t owner, vif_bus_t bus, const bus_msg_t *msg,
+                   uint32_t flags, uint32_t rx_sequence) {
+    const bus_ops_t *ops = bus_for(bus);
+    if (!ops || !bus_owned_by(owner, bus))
+        return VIF_ERR_NO_CLAIM;
+    int group = bus_group(bus);
+    if (!g.claim[group].tx_worker) {
+        g.claim[group].tx_worker = bus_tx_worker_create(ops);
+        if (!g.claim[group].tx_worker)
+            return BUS_ERR_NO_SPACE;
+    }
+    return bus_tx_worker_submit(g.claim[group].tx_worker, msg, flags,
+                                rx_sequence);
+}
+
+bool vif_bus_tx_poll(vif_owner_t owner, vif_bus_t bus,
+                     bus_tx_result_t *result) {
+    return result && bus_owned_by(owner, bus) &&
+           bus_tx_worker_poll(g.claim[bus_group(bus)].tx_worker, result);
+}
+
+int vif_bus_tx_wait(vif_owner_t owner, vif_bus_t bus) {
+    if (!bus_owned_by(owner, bus))
+        return VIF_ERR_NO_CLAIM;
+    return bus_tx_worker_wait(g.claim[bus_group(bus)].tx_worker);
+}
+
+void vif_bus_tx_cancel(vif_owner_t owner, vif_bus_t bus) {
+    if (bus_owned_by(owner, bus))
+        bus_tx_worker_cancel(g.claim[bus_group(bus)].tx_worker);
 }
 
 int vif_bus_recv(vif_owner_t owner, vif_bus_t bus, bus_msg_t *msg,
@@ -913,6 +955,9 @@ int vif_bus_param_set(vif_owner_t owner, vif_bus_t bus, bus_param_t p,
     if (!ops || !bus_owned_by(owner, bus)) {
         return VIF_ERR_NO_CLAIM;
     }
+    int pending = bus_tx_worker_wait(g.claim[bus_group(bus)].tx_worker);
+    if (pending)
+        return pending;
     if (!ops->set_param) {
         return BUS_ERR_UNSUPPORTED;
     }
@@ -930,6 +975,9 @@ int vif_bus_param_get(vif_owner_t owner, vif_bus_t bus, bus_param_t p,
     if (!ops || !out || !bus_owned_by(owner, bus)) {
         return VIF_ERR_NO_CLAIM;
     }
+    int pending = bus_tx_worker_wait(g.claim[bus_group(bus)].tx_worker);
+    if (pending)
+        return pending;
     if (!ops->get_param) {
         return BUS_ERR_UNSUPPORTED;
     }
@@ -944,6 +992,9 @@ int vif_bus_ioctl(vif_owner_t owner, vif_bus_t bus, bus_ioctl_t id,
     if (!ops || !bus_owned_by(owner, bus)) {
         return VIF_ERR_NO_CLAIM;
     }
+    int pending = bus_tx_worker_wait(g.claim[bus_group(bus)].tx_worker);
+    if (pending)
+        return pending;
     if (!ops->ioctl) {
         return BUS_ERR_UNSUPPORTED;
     }

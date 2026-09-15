@@ -28,6 +28,7 @@ typedef struct {
      * Out: when the last bit of the message was on the wire, microseconds.
      */
     uint32_t timestamp_us;
+    uint32_t sequence; /* Driver receive order; acknowledges processed input. */
     /*
      * The CAN arbitration id, carrying CAN_EFF_FLAG and CAN_RTR_FLAG, and
      * on a remote frame @c len is the length code with no payload behind it.
@@ -64,6 +65,8 @@ typedef struct {
 #define BUS_TX_WAIT_DONE (1u << 2)
 /* K-Line: clear queued RX after the quiet wait, immediately before TX. */
 #define BUS_TX_CLEAR_RX_QUEUE (1u << 3)
+#define BUS_TX_CHECK_RX                                                        \
+    (1u << 4) /* Admit only after newer RX has been processed. */
 
 #define BUS_ERR_TIMEOUT (-1)   /* Timeout error */
 #define BUS_ERR_NO_SPACE (-2)  /* Message is longer than the buffer. */
@@ -78,6 +81,9 @@ typedef struct {
 #define BUS_ERR_ARBITRATION (-11)
 /* CAN was stopped to cancel unresolved TX; close/reopen before retrying. */
 #define BUS_ERR_TX_ABORTED (-12)
+#define BUS_ERR_CANCELLED (-13) /* Cancelled before bus admission. */
+#define BUS_ERR_RX_PENDING                                                     \
+    (-14) /* Process newer receive records, then retry. */
 
 /* ------------------------------------------------------------------ *
  * Parameters
@@ -394,8 +400,9 @@ typedef struct {
 /**
  * @brief What a bus driver has to provide.
  *
- * VIF serializes lifecycle and I/O on the owning session task. Direct users
- * must also finish all I/O before close; drivers do not cancel blocked reads.
+ * VIF serializes lifecycle and configuration on the owning session task.
+ * Managed TX runs in a joined worker while that task receives. Direct users
+ * must finish all I/O before close; drivers do not cancel blocked reads.
  *
  * Every bus this firmware carries - CAN included - is reached through this
  * one vtable, so vif.c arbitrates all four the same way and no caller learns
@@ -407,6 +414,8 @@ typedef struct {
  * helpers below answer for a driver that does not implement one, so a bus
  * with no initialisation sequence does not carry an empty ioctl().
  */
+typedef struct bus_tx_control bus_tx_control_t;
+
 typedef struct bus_ops {
     const char *name;
 
@@ -426,6 +435,9 @@ typedef struct bus_ops {
      * @return 0, or a BUS_ERR_* code.
      */
     int (*send)(const bus_msg_t *msg, uint32_t flags);
+    /* Same send, with cancellable admission and observed TX boundaries. */
+    int (*send_controlled)(const bus_msg_t *msg, uint32_t flags,
+                           bus_tx_control_t *control);
 
     /**
      * Take the next message off the receive queue.
@@ -451,6 +463,7 @@ static inline void bus_msg_init(bus_msg_t *msg, uint8_t *buf, size_t cap) {
     msg->len = 0;
     msg->status = 0;
     msg->timestamp_us = 0;
+    msg->sequence = 0;
     msg->id = 0;
 }
 
@@ -470,6 +483,7 @@ static inline void bus_msg_tx(bus_msg_t *msg, const uint8_t *data, size_t len,
     msg->len = (uint16_t)len;
     msg->status = 0;
     msg->timestamp_us = 0;
+    msg->sequence = 0;
     msg->id = id;
 }
 

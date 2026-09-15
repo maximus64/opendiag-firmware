@@ -33,6 +33,12 @@ PB_BIND(opendiag_Queue, opendiag_Queue, 4)
 PB_BIND(opendiag_Periodic, opendiag_Periodic, 4)
 
 
+PB_BIND(opendiag_RepeatMessage, opendiag_RepeatMessage, AUTO)
+
+
+PB_BIND(opendiag_Repeat, opendiag_Repeat, AUTO)
+
+
 PB_BIND(opendiag_Filter, opendiag_Filter, AUTO)
 
 

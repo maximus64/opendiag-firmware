@@ -24,7 +24,8 @@ J2534_LONG PassThruLogicalConnect(J2534_ULONG PhysicalChannelID,
                                   J2534_ULONG ProtocolID,
                                   J2534_ULONG Flags,
                                   void *pChannelDescriptor,
-                                  J2534_ULONG *pChannelID);
+                                  J2534_ULONG *pChannelID,
+                                  bool legacyChannel);
 J2534_LONG PassThruLogicalDisconnect(J2534_ULONG ChannelID);
 J2534_LONG PassThruSelect(SCHANNELSET *ChannelSetPtr, J2534_ULONG SelectType, J2534_ULONG Timeout);
 J2534_LONG PassThruReadMsgs(J2534_ULONG ChannelID,
@@ -224,14 +225,16 @@ extern "C" J2534_LONG J2534_CALL PassThruDisconnect(J2534_ULONG ChannelID) {
     }
 }
 
-extern "C" J2534_LONG J2534_CALL PassThruLogicalConnect(J2534_ULONG PhysicalChannelID,
-                                                        J2534_ULONG ProtocolID,
-                                                        J2534_ULONG Flags,
-                                                        void *pChannelDescriptor,
-                                                        J2534_ULONG *pChannelID) {
+static J2534_LONG logicalConnect(J2534_ULONG PhysicalChannelID,
+                                 J2534_ULONG ProtocolID,
+                                 J2534_ULONG Flags,
+                                 void *pChannelDescriptor,
+                                 J2534_ULONG *pChannelID,
+                                 bool legacyChannel) {
     diagnostics::ApiTrace trace(moduleAnchor,
                                 "05.00",
-                                "PassThruLogicalConnect",
+                                legacyChannel ? "OpenDiagLogicalConnect0404"
+                                              : "PassThruLogicalConnect",
                                 "physical=0x%08" J2534_PRIX " protocol=0x%08" J2534_PRIX
                                 " flags=0x%08" J2534_PRIX " descriptor=%p",
                                 PhysicalChannelID,
@@ -250,12 +253,30 @@ extern "C" J2534_LONG J2534_CALL PassThruLogicalConnect(J2534_ULONG PhysicalChan
                                                                          ProtocolID,
                                                                          Flags,
                                                                          pChannelDescriptor,
-                                                                         pChannelID)));
+                                                                         pChannelID,
+                                                                         legacyChannel)));
     } catch (const std::exception &error) {
         return trace.result(host::finishApi(ERR_FAILED, error.what()));
     } catch (...) {
         return trace.result(host::finishApi(ERR_FAILED, "Unexpected host exception"));
     }
+}
+
+extern "C" J2534_LONG J2534_CALL PassThruLogicalConnect(J2534_ULONG physical,
+                                                        J2534_ULONG protocol,
+                                                        J2534_ULONG flags,
+                                                        void *descriptor,
+                                                        J2534_ULONG *channel) {
+    return logicalConnect(physical, protocol, flags, descriptor, channel, false);
+}
+
+// Private bridge: all 04.04 ISO-TP peers belong to one public receive channel.
+extern "C" J2534_EXPORT J2534_LONG J2534_CALL OpenDiagLogicalConnect0404(J2534_ULONG physical,
+                                                                         J2534_ULONG protocol,
+                                                                         J2534_ULONG flags,
+                                                                         void *descriptor,
+                                                                         J2534_ULONG *channel) {
+    return logicalConnect(physical, protocol, flags, descriptor, channel, true);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruLogicalDisconnect(J2534_ULONG ChannelID) {

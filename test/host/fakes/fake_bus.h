@@ -80,6 +80,9 @@ void fake_bus_fail_next_send(fake_bus_id_t bus);
 
 int fake_bus_sent_count(fake_bus_id_t bus);
 
+/** Charge this duration to the fake clock for each successful transmission. */
+void fake_bus_send_duration(fake_bus_id_t bus, uint32_t duration_ms);
+
 /** Bytes of transmit @p idx, with its length in @p out_len. NULL if absent. */
 const uint8_t *fake_bus_sent(fake_bus_id_t bus, int idx, size_t *out_len);
 

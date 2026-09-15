@@ -22,22 +22,33 @@ struct Filter {
     PASSTHRU_MSG flow;
 };
 
+struct IsoEndpoint {
+    PASSTHRU_MSG pattern;
+    PASSTHRU_MSG flow;
+};
+
+enum TransmissionKind {
+    TRANSMISSION_ONCE,
+    TRANSMISSION_PERIODIC,
+    TRANSMISSION_REPEAT
+};
+
 struct Transmission {
     PASSTHRU_MSG message;
     J2534_ULONG endpoint;
     bool waiting;
     bool complete;
     bool failed;
-    bool periodic;
-    J2534_ULONG nativePeriodicId;
+    TransmissionKind kind;
+    J2534_ULONG nativeId;
 
     Transmission()
         : endpoint(0),
           waiting(false),
           complete(false),
           failed(false),
-          periodic(false),
-          nativePeriodicId(0) {
+          kind(TRANSMISSION_ONCE),
+          nativeId(0) {
         memset(&message, 0, sizeof(message));
     }
 };
@@ -54,6 +65,7 @@ struct Channel {
     J2534_ULONG lastReadEndpoint;
     std::deque<PASSTHRU_MSG> received;
     std::map<J2534_ULONG, Filter> filters;
+    std::map<J2534_ULONG, IsoEndpoint> logicalEndpoints;
     std::map<J2534_ULONG, Transmission> transmissions;
     std::map<J2534_ULONG, J2534_ULONG> isoConfig;
 
@@ -180,6 +192,47 @@ static J2534_LONG findChannel(J2534_ULONG id, Channel *&channel) {
     return translate(backend.readMsgs(channel->physical, &unused, &count, 0));
 }
 
+static bool endpointHasFilter(const Channel &channel, J2534_ULONG endpoint) {
+    for (std::map<J2534_ULONG, Filter>::const_iterator entry = channel.filters.begin();
+         entry != channel.filters.end();
+         ++entry) {
+        if (entry->second.endpoint == endpoint) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool endpointNeededByTransmissions(const Channel &channel, J2534_ULONG endpoint) {
+    for (std::map<J2534_ULONG, Transmission>::const_iterator entry = channel.transmissions.begin();
+         entry != channel.transmissions.end();
+         ++entry) {
+        // Repeat receive conditions span every ISO-TP peer on the 04.04 channel.
+        if (entry->second.endpoint == endpoint ||
+            (channel.protocol == ISO15765 && entry->second.kind == TRANSMISSION_REPEAT)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static J2534_LONG releaseUnusedEndpoints(Channel &channel) {
+    std::map<J2534_ULONG, IsoEndpoint>::iterator entry = channel.logicalEndpoints.begin();
+    while (entry != channel.logicalEndpoints.end()) {
+        if (endpointHasFilter(channel, entry->first) ||
+            endpointNeededByTransmissions(channel, entry->first)) {
+            ++entry;
+            continue;
+        }
+        J2534_LONG status = translate(backend.logicalDisconnect(entry->first));
+        if (status) {
+            return status;
+        }
+        channel.logicalEndpoints.erase(entry++);
+    }
+    return STATUS_NOERROR;
+}
+
 static unsigned addressSize(const PASSTHRU_MSG &message) {
     if (message.TxFlags & ISO15765_ADDR_TYPE) {
         return 5;
@@ -232,7 +285,9 @@ static void transmitIndications(Channel &channel,
     }
 }
 
-static void receiveNative(Channel &channel, const native::PASSTHRU_MSG &message) {
+static void receiveNative(Channel &channel,
+                          J2534_ULONG endpoint,
+                          const native::PASSTHRU_MSG &message) {
     if (message.RxStatus & BUFFER_OVERFLOW) {
         channel.overflow = true;
     }
@@ -251,7 +306,7 @@ static void receiveNative(Channel &channel, const native::PASSTHRU_MSG &message)
         } else if (!transmission.waiting) {
             channel.receiveError = ERR_FAILED;
         }
-        if (!transmission.waiting && !transmission.periodic) {
+        if (!transmission.waiting && transmission.kind == TRANSMISSION_ONCE) {
             channel.transmissions.erase(found);
         }
         return;
@@ -263,7 +318,8 @@ static void receiveNative(Channel &channel, const native::PASSTHRU_MSG &message)
     if (message.RxStatus & TX_MSG_TYPE) {
         return;
     }
-    if (channel.protocol == ISO15765 && message.ProtocolID != ISO15765_LOGICAL) {
+    if (channel.protocol == ISO15765 &&
+        (message.ProtocolID != ISO15765_LOGICAL || !endpointHasFilter(channel, endpoint))) {
         return;
     }
 
@@ -283,12 +339,11 @@ static void receiveNative(Channel &channel, const native::PASSTHRU_MSG &message)
 static std::vector<J2534_ULONG> endpoints(const Channel &channel) {
     std::vector<J2534_ULONG> result;
     result.push_back(channel.physical);
-    for (std::map<J2534_ULONG, Filter>::const_iterator entry = channel.filters.begin();
-         entry != channel.filters.end();
+    for (std::map<J2534_ULONG, IsoEndpoint>::const_iterator entry =
+             channel.logicalEndpoints.begin();
+         entry != channel.logicalEndpoints.end();
          ++entry) {
-        if (entry->second.type == FLOW_CONTROL_FILTER) {
-            result.push_back(entry->second.endpoint);
-        }
+        result.push_back(entry->first);
     }
     return result;
 }
@@ -310,9 +365,13 @@ static J2534_LONG readNative(Channel &channel, J2534_ULONG endpoint, bool &recei
         return translate(status);
     }
     if (count) {
-        receiveNative(channel, message);
+        receiveNative(channel, endpoint, message);
         channel.lastReadEndpoint = endpoint;
-        received = true;
+        status = releaseUnusedEndpoints(channel);
+        if (status) {
+            return status;
+        }
+        received = endpoint == channel.physical || channel.logicalEndpoints.count(endpoint);
     }
     return STATUS_NOERROR;
 }
@@ -352,8 +411,8 @@ static J2534_LONG pump(Channel &channel,
             if (status) {
                 return status;
             }
-            if (wantedMessages && (channel.received.size() >= wantedMessages ||
-                                   channel.overflow || channel.receiveError)) {
+            if (wantedMessages && (channel.received.size() >= wantedMessages || channel.overflow ||
+                                   channel.receiveError)) {
                 return STATUS_NOERROR;
             }
             if (!wantedMessages && channel.transmissions.size() < MAX_TX_MESSAGES) {
@@ -748,6 +807,21 @@ static J2534_LONG setNativeConfig(J2534_ULONG endpoint, J2534_ULONG parameter, J
     return translate(backend.ioctl(endpoint, SET_CONFIG, &list, NULL));
 }
 
+static J2534_LONG drainEndpoint(Channel &channel, J2534_ULONG endpoint) {
+    for (J2534_ULONG count = 0; count < MAX_RX_MESSAGES; ++count) {
+        bool received = false;
+        J2534_LONG status = readNative(channel, endpoint, received);
+        if (status || !received) {
+            return status;
+        }
+        if (channel.overflow) {
+            return STATUS_NOERROR;
+        }
+    }
+    channel.overflow = true;
+    return STATUS_NOERROR;
+}
+
 J2534_LONG PassThruStartMsgFilter(J2534_ULONG id,
                                   J2534_ULONG type,
                                   PASSTHRU_MSG *mask,
@@ -829,27 +903,66 @@ J2534_LONG PassThruStartMsgFilter(J2534_ULONG id,
             }
         }
 
-        native::ISO15765_CHANNEL_DESCRIPTOR descriptor = {};
-        descriptor.LocalTxFlags = pattern->TxFlags & ADDRESS_FLAGS;
-        descriptor.RemoteTxFlags = flow->TxFlags;
-        memcpy(descriptor.LocalAddress, pattern->Data, pattern->DataSize);
-        memcpy(descriptor.RemoteAddress, flow->Data, flow->DataSize);
-        status = translate(backend.logicalConnect(channel->physical,
-                                                  ISO15765_LOGICAL,
-                                                  0,
-                                                  &descriptor,
-                                                  &filter.endpoint));
+        status = releaseUnusedEndpoints(*channel);
         if (status) {
             return status;
         }
-        for (std::map<J2534_ULONG, J2534_ULONG>::const_iterator config = channel->isoConfig.begin();
-             config != channel->isoConfig.end();
-             ++config) {
-            status = setNativeConfig(filter.endpoint, config->first, config->second);
+        unsigned length = addressSize(*flow);
+        for (std::map<J2534_ULONG, IsoEndpoint>::const_iterator entry =
+                 channel->logicalEndpoints.begin();
+             entry != channel->logicalEndpoints.end();
+             ++entry) {
+            const IsoEndpoint &existing = entry->second;
+            if ((existing.flow.TxFlags & ADDRESS_FLAGS) != (flow->TxFlags & ADDRESS_FLAGS)) {
+                continue;
+            }
+            bool same = existing.flow.TxFlags == flow->TxFlags &&
+                        existing.pattern.TxFlags == pattern->TxFlags &&
+                        !memcmp(existing.flow.Data, flow->Data, length) &&
+                        !memcmp(existing.pattern.Data, pattern->Data, length);
+            if (same) {
+                filter.endpoint = entry->first;
+                break;
+            }
+            if (!memcmp(existing.pattern.Data, pattern->Data, length) ||
+                !memcmp(existing.flow.Data, flow->Data, length) ||
+                !memcmp(existing.pattern.Data, flow->Data, length) ||
+                !memcmp(existing.flow.Data, pattern->Data, length)) {
+                return ERR_NOT_UNIQUE;
+            }
+        }
+        if (filter.endpoint) {
+            // Frames received while no application filter existed must stay hidden.
+            status = translate(backend.ioctl(filter.endpoint, CLEAR_RX_BUFFER, NULL, NULL));
             if (status) {
-                backend.logicalDisconnect(filter.endpoint);
                 return status;
             }
+        } else {
+            native::ISO15765_CHANNEL_DESCRIPTOR descriptor = {};
+            descriptor.LocalTxFlags = pattern->TxFlags & ADDRESS_FLAGS;
+            descriptor.RemoteTxFlags = flow->TxFlags;
+            memcpy(descriptor.LocalAddress, pattern->Data, pattern->DataSize);
+            memcpy(descriptor.RemoteAddress, flow->Data, flow->DataSize);
+            status = translate(backend.logicalConnect(channel->physical,
+                                                      ISO15765_LOGICAL,
+                                                      0,
+                                                      &descriptor,
+                                                      &filter.endpoint));
+            if (status) {
+                return status;
+            }
+            for (std::map<J2534_ULONG, J2534_ULONG>::const_iterator config =
+                     channel->isoConfig.begin();
+                 config != channel->isoConfig.end();
+                 ++config) {
+                status = setNativeConfig(filter.endpoint, config->first, config->second);
+                if (status) {
+                    backend.logicalDisconnect(filter.endpoint);
+                    return status;
+                }
+            }
+            IsoEndpoint endpoint = {*pattern, *flow};
+            channel->logicalEndpoints[filter.endpoint] = endpoint;
         }
         filter.flow = *flow;
     }
@@ -874,18 +987,14 @@ J2534_LONG PassThruStopMsgFilter(J2534_ULONG id, J2534_ULONG filterId) {
     }
     Filter &filter = found->second;
     if (filter.type == FLOW_CONTROL_FILTER) {
-        status = translate(backend.logicalDisconnect(filter.endpoint));
-        if (!status) {
-            std::map<J2534_ULONG, Transmission>::iterator transmission =
-                channel->transmissions.begin();
-            while (transmission != channel->transmissions.end()) {
-                if (transmission->second.endpoint == filter.endpoint) {
-                    std::map<J2534_ULONG, Transmission>::iterator removed = transmission;
-                    ++transmission;
-                    channel->transmissions.erase(removed);
-                } else {
-                    ++transmission;
-                }
+        status = drainEndpoint(*channel, filter.endpoint);
+        if (status) {
+            return status;
+        }
+        if (!endpointNeededByTransmissions(*channel, filter.endpoint)) {
+            status = translate(backend.logicalDisconnect(filter.endpoint));
+            if (!status) {
+                channel->logicalEndpoints.erase(filter.endpoint);
             }
         }
     } else {
@@ -927,9 +1036,9 @@ J2534_LONG PassThruStartPeriodicMsg(J2534_ULONG id,
     Transmission transmission;
     transmission.message = *message;
     transmission.endpoint = endpoint;
-    transmission.periodic = true;
-    status = translate(
-        backend.startPeriodicMsg(endpoint, &encoded, &transmission.nativePeriodicId, interval));
+    transmission.kind = TRANSMISSION_PERIODIC;
+    status =
+        translate(backend.startPeriodicMsg(endpoint, &encoded, &transmission.nativeId, interval));
     if (status) {
         return status;
     }
@@ -945,13 +1054,13 @@ J2534_LONG PassThruStopPeriodicMsg(J2534_ULONG id, J2534_ULONG messageId) {
         return status;
     }
     std::map<J2534_ULONG, Transmission>::iterator found = channel->transmissions.find(messageId);
-    if (found == channel->transmissions.end() || !found->second.periodic) {
+    if (found == channel->transmissions.end() || found->second.kind != TRANSMISSION_PERIODIC) {
         return ERR_INVALID_MSG_ID;
     }
-    status =
-        translate(backend.stopPeriodicMsg(found->second.endpoint, found->second.nativePeriodicId));
+    status = translate(backend.stopPeriodicMsg(found->second.endpoint, found->second.nativeId));
     if (!status) {
         channel->transmissions.erase(found);
+        status = releaseUnusedEndpoints(*channel);
     }
     return status;
 }
@@ -1038,11 +1147,12 @@ static J2534_LONG configurationIoctl(Channel &channel, J2534_ULONG id, void *inp
                      (config.Value < 0xf1 || config.Value > 0xf9))) {
                     return ERR_INVALID_IOCTL_VALUE;
                 }
-                for (std::map<J2534_ULONG, Filter>::const_iterator filter = channel.filters.begin();
-                     filter != channel.filters.end();
-                     ++filter) {
+                for (std::map<J2534_ULONG, IsoEndpoint>::const_iterator endpoint =
+                         channel.logicalEndpoints.begin();
+                     endpoint != channel.logicalEndpoints.end();
+                     ++endpoint) {
                     J2534_LONG status =
-                        setNativeConfig(filter->second.endpoint, config.Parameter, config.Value);
+                        setNativeConfig(endpoint->first, config.Parameter, config.Value);
                     if (status) {
                         return status;
                     }
@@ -1100,9 +1210,9 @@ static J2534_LONG clearIoctl(J2534_ULONG id, Channel &channel, J2534_ULONG opera
     if (operation == CLEAR_TX_BUFFER || operation == CLEAR_PERIODIC_MSGS) {
         std::map<J2534_ULONG, Transmission>::iterator entry = channel.transmissions.begin();
         while (entry != channel.transmissions.end()) {
-            bool periodic = entry->second.periodic;
-            bool remove = (operation == CLEAR_PERIODIC_MSGS && periodic) ||
-                          (operation == CLEAR_TX_BUFFER && !periodic);
+            TransmissionKind kind = entry->second.kind;
+            bool remove = (operation == CLEAR_PERIODIC_MSGS && kind == TRANSMISSION_PERIODIC) ||
+                          (operation == CLEAR_TX_BUFFER && kind == TRANSMISSION_ONCE);
             if (remove) {
                 std::map<J2534_ULONG, Transmission>::iterator removed = entry;
                 ++entry;
@@ -1112,12 +1222,166 @@ static J2534_LONG clearIoctl(J2534_ULONG id, Channel &channel, J2534_ULONG opera
             }
         }
     }
-    return STATUS_NOERROR;
+    return releaseUnusedEndpoints(channel);
+}
+
+static J2534_LONG discoveryIoctl(J2534_ULONG target,
+                                 J2534_ULONG operation,
+                                 void *input,
+                                 void *output) {
+    if (target != deviceId) {
+        return ERR_INVALID_DEVICE_ID;
+    }
+    if (!output || (operation == GET_PROTOCOL_INFO && !input)) {
+        return ERR_NULL_PARAMETER;
+    }
+    if (operation == GET_DEVICE_INFO && input) {
+        return ERR_INVALID_IOCTL_VALUE;
+    }
+    SPARAM_LIST &source = *(SPARAM_LIST *)output;
+    if (source.NumOfParams && !source.ParamPtr) {
+        return ERR_NULL_PARAMETER;
+    }
+    std::vector<native::SPARAM> parameters(source.NumOfParams);
+    for (J2534_ULONG index = 0; index < source.NumOfParams; ++index) {
+        parameters[index].Parameter = source.ParamPtr[index].Parameter;
+        parameters[index].Value =
+            operation == GET_DEVICE_INFO ? ENTIRE_DEVICE : source.ParamPtr[index].Value;
+    }
+    native::SPARAM_LIST list = {source.NumOfParams, parameters.empty() ? NULL : &parameters[0]};
+    J2534_ULONG protocol = input ? *(J2534_ULONG *)input : 0;
+    if (protocol == ISO15765) {
+        protocol = ISO15765_LOGICAL;
+    }
+    J2534_LONG status =
+        translate(backend.ioctl(nativeDeviceId, operation, input ? &protocol : NULL, &list));
+    if (!status) {
+        for (J2534_ULONG index = 0; index < source.NumOfParams; ++index) {
+            SPARAM &parameter = source.ParamPtr[index];
+            parameter.Supported = parameters[index].Supported;
+            if (parameter.Supported) {
+                parameter.Value = operation == GET_DEVICE_INFO ? 1 : parameters[index].Value;
+            }
+            if (operation == GET_DEVICE_INFO && parameter.Parameter == ISO15765_SUPPORTED) {
+                J2534_ULONG logical = ISO15765_LOGICAL;
+                native::SPARAM capability = {MAX_REPEAT_MESSAGING, 0, 0};
+                native::SPARAM_LIST logicalList = {1, &capability};
+                J2534_LONG logicalStatus = translate(
+                    backend.ioctl(nativeDeviceId, GET_PROTOCOL_INFO, &logical, &logicalList));
+                if (logicalStatus && logicalStatus != ERR_INVALID_PROTOCOL_ID) {
+                    return logicalStatus;
+                }
+                parameter.Supported = 1;
+                parameter.Value = logicalStatus ? 0 : 1;
+            }
+        }
+    }
+    return status;
+}
+
+static J2534_LONG repeatIoctl(Channel &channel, J2534_ULONG operation, void *input, void *output) {
+    if (!input || (operation != STOP_REPEAT_MESSAGE && !output)) {
+        return ERR_NULL_PARAMETER;
+    }
+    if (operation == STOP_REPEAT_MESSAGE && output) {
+        return ERR_INVALID_IOCTL_VALUE;
+    }
+    native::SPARAM capacity = {MAX_REPEAT_MESSAGING, 0, 0};
+    native::SPARAM_LIST list = {1, &capacity};
+    J2534_ULONG protocol = channel.protocol == ISO15765 ? ISO15765_LOGICAL : channel.protocol;
+    J2534_LONG status =
+        translate(backend.ioctl(nativeDeviceId, GET_PROTOCOL_INFO, &protocol, &list));
+    if (status) {
+        return status;
+    }
+    if (!capacity.Supported || !capacity.Value) {
+        return ERR_NOT_SUPPORTED;
+    }
+    if (operation == START_REPEAT_MESSAGE) {
+        const REPEAT_MSG_SETUP &setup = *(REPEAT_MSG_SETUP *)input;
+        native::REPEAT_MSG_SETUP encoded = {};
+        encoded.TimeInterval = setup.TimeInterval;
+        encoded.Condition = setup.Condition;
+        for (unsigned index = 0; index < 3; ++index) {
+            const PASSTHRU_MSG &message = setup.RepeatMsgData[index];
+            if (message.ProtocolID != channel.protocol) {
+                return ERR_MSG_PROTOCOL_ID;
+            }
+            if (!message.DataSize || message.DataSize > 12) {
+                return ERR_INVALID_MSG;
+            }
+            encodeMessage(message, channel.protocol, 0, encoded.RepeatMsgData[index]);
+        }
+        J2534_ULONG token = allocateId();
+        J2534_ULONG endpoint = 0;
+        unsigned char singleFrame[12];
+        status = routeMessage(channel,
+                              setup.RepeatMsgData[0],
+                              token,
+                              encoded.RepeatMsgData[0],
+                              singleFrame,
+                              endpoint);
+        if (status) {
+            return status == ERR_INVALID_FLAGS ? ERR_INVALID_MSG : status;
+        }
+        // A raw CAN fallback would compare PCI bytes instead of ISO-TP messages.
+        if (channel.protocol == ISO15765) {
+            if (endpoint == channel.physical) {
+                return ERR_NO_FLOW_CONTROL;
+            }
+            encoded.RepeatMsgData[1].ProtocolID = ISO15765_LOGICAL;
+            encoded.RepeatMsgData[2].ProtocolID = ISO15765_LOGICAL;
+        }
+        unsigned count = 0;
+        for (std::map<J2534_ULONG, Transmission>::const_iterator entry =
+                 channel.transmissions.begin();
+             entry != channel.transmissions.end();
+             ++entry) {
+            if (entry->second.kind == TRANSMISSION_REPEAT) {
+                ++count;
+            }
+        }
+        if (count >= capacity.Value) {
+            return ERR_EXCEEDED_LIMIT;
+        }
+        status = checkTransmissionCapacity(channel);
+        if (status) {
+            return status;
+        }
+        Transmission transmission;
+        transmission.message = setup.RepeatMsgData[0];
+        transmission.endpoint = endpoint;
+        transmission.kind = TRANSMISSION_REPEAT;
+        std::map<J2534_ULONG, Transmission>::iterator entry =
+            channel.transmissions.insert(std::make_pair(token, transmission)).first;
+        status = translate(backend.ioctl(endpoint, operation, &encoded, &entry->second.nativeId));
+        if (status) {
+            channel.transmissions.erase(entry);
+            return status == ERR_INVALID_FLAGS ? ERR_INVALID_MSG : status;
+        }
+        *(J2534_ULONG *)output = token;
+        return STATUS_NOERROR;
+    }
+    J2534_ULONG token = *(J2534_ULONG *)input;
+    std::map<J2534_ULONG, Transmission>::iterator entry = channel.transmissions.find(token);
+    if (entry == channel.transmissions.end() || entry->second.kind != TRANSMISSION_REPEAT) {
+        return ERR_INVALID_MSG_ID;
+    }
+    status = translate(
+        backend.ioctl(entry->second.endpoint, operation, &entry->second.nativeId, output));
+    if (!status && operation == STOP_REPEAT_MESSAGE) {
+        channel.transmissions.erase(entry);
+        status = releaseUnusedEndpoints(channel);
+    }
+    return status;
 }
 
 J2534_LONG PassThruIoctl(J2534_ULONG target, J2534_ULONG id, void *input, void *output) {
     if (!deviceId) {
         return ERR_INVALID_DEVICE_ID;
+    }
+    if (id == GET_DEVICE_INFO || id == GET_PROTOCOL_INFO) {
+        return discoveryIoctl(target, id, input, output);
     }
     if (id == READ_VBATT || id == READ_PROG_VOLTAGE) {
         if (target != deviceId) {
@@ -1145,6 +1409,10 @@ J2534_LONG PassThruIoctl(J2534_ULONG target, J2534_ULONG id, void *input, void *
         return status;
     }
     switch (id) {
+    case START_REPEAT_MESSAGE:
+    case QUERY_REPEAT_MESSAGE:
+    case STOP_REPEAT_MESSAGE:
+        return repeatIoctl(*channel, id, input, output);
     case GET_CONFIG:
     case SET_CONFIG:
         return configurationIoctl(*channel, id, input);

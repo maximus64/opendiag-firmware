@@ -8,6 +8,7 @@
 #include "board.h"
 #include "isotp.h"
 #include "j2534.pb.h"
+#include "j2534_scheduler.h"
 #include "kline_codec.h"
 #include "pb_decode.h"
 #include "pb_encode.h"
@@ -16,6 +17,10 @@
 #define RX_BYTES 8192u
 #define MSG_HEADER 28u
 #define TX_BYTES (J2534_DATA_MAX + MSG_HEADER)
+
+_Static_assert(J2534_PERIODIC_MAX == J2534_SCHEDULE_SLOTS &&
+                   J2534_REPEAT_MAX == J2534_SCHEDULE_SLOTS,
+               "scheduler quotas");
 
 enum {
     IOCTL_GET_CONFIG = 1,
@@ -52,15 +57,24 @@ typedef struct {
     uint8_t pattern[12];
 } filter_t;
 
+typedef enum {
+    TX_NONE,
+    TX_MESSAGE,
+    TX_ISOTP,
+    TX_FLOW_CONTROL,
+    TX_SCHEDULED,
+} tx_kind_t;
+
 typedef struct {
-    uint32_t id;
-    uint32_t interval_us;
-    uint32_t due_us;
-    uint32_t flags;
+    tx_kind_t kind;
+    uint32_t channel;
+    uint32_t job;
     uint32_t handle;
-    uint8_t len;
-    uint8_t data[12];
-} periodic_t;
+    bool discard;
+    bool confirmed;
+    uint32_t rx_generation;
+    struct can_frame frame;
+} pending_tx_t;
 
 typedef struct {
     uint32_t id;
@@ -82,13 +96,21 @@ typedef struct {
     bool link_down;
 
     filter_t filters[J2534_FILTER_MAX];
-    periodic_t periodic[J2534_PERIODIC_MAX];
+    j2534_scheduler_t scheduler;
+    pending_tx_t pending;
+    uint32_t rx_sequence;
+    unsigned tx_cursor;
+    bool rx_drained;
+    bool flow_control_pending;
+    uint32_t rx_generation;
+    struct can_frame flow_control;
 
     isotp_config_t config;
     isotp_rx_t iso_rx;
     isotp_tx_t iso_tx;
     uint32_t local_flags;
     uint32_t remote_flags;
+    bool legacy_channel;
     uint32_t tx_timeout_a_us;
     uint8_t local[5];
     uint8_t remote[5];
@@ -163,6 +185,8 @@ static uint32_t bus_error(int rc) {
     }
 }
 
+static void cancel_channel_tx(channel_t *channel);
+
 static void release_channel(channel_t *channel) {
     free(channel->rx);
     free(channel->tx);
@@ -171,6 +195,7 @@ static void release_channel(channel_t *channel) {
 }
 
 static uint32_t disconnect_channel(channel_t *channel) {
+    cancel_channel_tx(channel);
     if (!channel->parent) {
         if (vif_bus_close(VIF_OWNER_LINK, channel->bus) != ESP_OK)
             return J2534_FAILED;
@@ -357,25 +382,25 @@ static uint32_t validate_message(channel_t *channel, uint32_t protocol,
     return J2534_OK;
 }
 
-static int send_can(channel_t *channel, const struct can_frame *frame) {
-    bus_msg_t msg;
+static void echo_can(channel_t *physical, const struct can_frame *frame,
+                     uint32_t timestamp) {
+    if (!physical->echo)
+        return;
+    uint8_t data[12];
+    put_be32(data, frame->id & CAN_EFF_MASK);
+    memcpy(data + 4, frame->data, frame->dlc);
+    uint32_t flags = frame->id & CAN_EFF_FLAG ? J2534_29BIT : 0;
+    if (filter_accepts(physical, data, frame->dlc + 4, flags))
+        enqueue_rx(physical, 0, flags | J2534_TX_MSG, timestamp, data,
+                   frame->dlc + 4, false);
+}
 
-    bus_msg_tx(&msg, frame->data, frame->dlc, frame->id);
-    int rc = vif_bus_send(VIF_OWNER_LINK, VIF_BUS_CAN, &msg, BUS_TX_WAIT_DONE);
+static void cancel_channel_tx(channel_t *channel) {
     channel_t *physical = physical_channel(channel);
-
-    if (!rc && physical && physical->echo) {
-        uint8_t data[12];
-
-        put_be32(data, frame->id & CAN_EFF_MASK);
-        memcpy(data + 4, frame->data, frame->dlc);
-        uint32_t flags = frame->id & CAN_EFF_FLAG ? J2534_29BIT : 0;
-
-        if (filter_accepts(physical, data, frame->dlc + 4, flags))
-            enqueue_rx(physical, 0, flags | J2534_TX_MSG, now_us(), data,
-                       frame->dlc + 4, false);
-    }
-    return rc;
+    if (!physical || physical->pending.channel != channel->id)
+        return;
+    physical->pending.discard = true;
+    vif_bus_tx_cancel(VIF_OWNER_LINK, physical->bus);
 }
 
 static void tx_done(channel_t *channel, bool ok) {
@@ -398,20 +423,129 @@ static int send_byte_message(channel_t *channel) {
                         flags & J2534_WAIT_P3 ? BUS_TX_WAIT_P3_MIN_ONLY : 0);
 }
 
+static void confirm_protocol_tx(channel_t *channel, const pending_tx_t *pending,
+                                bool success, uint32_t timestamp) {
+    if (pending->kind == TX_FLOW_CONTROL) {
+        if (pending->rx_generation == channel->rx_generation)
+            isotp_rx_confirm(&channel->iso_rx, success, timestamp);
+    } else if (pending->kind == TX_ISOTP) {
+        int rc = isotp_tx_confirm(&channel->iso_tx, success, timestamp);
+        if (rc < 0 || channel->iso_tx.state == ISOTP_TX_IDLE)
+            tx_done(channel, rc >= 0);
+    } else {
+        tx_done(channel, success);
+    }
+}
+
+static void finish_bus_tx(channel_t *physical, const bus_tx_result_t *result) {
+    pending_tx_t pending = physical->pending;
+    memset(&physical->pending, 0, sizeof(physical->pending));
+    channel_t *channel = find_channel(pending.channel);
+    if (result->status == 0 && physical->bus == VIF_BUS_CAN)
+        echo_can(physical, &pending.frame, result->ended_us);
+    if (!channel)
+        return;
+    bool success = result->status == 0;
+    if (pending.kind == TX_SCHEDULED) {
+        j2534_schedule_job_t *job =
+            j2534_schedule_find(&channel->scheduler, pending.job);
+        bool deferred =
+            result->status == BUS_ERR_RX_PENDING ||
+            (result->status == BUS_ERR_CANCELLED && pending.discard);
+        if (job) {
+            uint32_t start = success ? result->started_us : now_us();
+            uint32_t end = success ? result->ended_us : start;
+            if (deferred)
+                j2534_schedule_defer(job);
+            else
+                j2534_schedule_complete(job, success, start, end);
+        }
+        if (!pending.discard && !deferred &&
+            result->status != BUS_ERR_CANCELLED && pending.handle)
+            enqueue_rx(channel, pending.handle,
+                       success ? J2534_TX_SUCCESS : J2534_TX_FAILED,
+                       result->ended_us, NULL, 0, true);
+        return;
+    }
+    if (pending.discard || pending.confirmed)
+        return;
+    confirm_protocol_tx(channel, &pending, success, now_us());
+}
+
+static void collect_bus_tx(channel_t *physical) {
+    bus_tx_result_t result;
+    if (physical->pending.kind == TX_NONE ||
+        !vif_bus_tx_poll(VIF_OWNER_LINK, physical->bus, &result))
+        return;
+    if (result.complete) {
+        finish_bus_tx(physical, &result);
+    } else if (!physical->pending.discard &&
+               (physical->pending.kind == TX_ISOTP ||
+                physical->pending.kind == TX_FLOW_CONTROL)) {
+        channel_t *channel = find_channel(physical->pending.channel);
+        if (channel && !physical->pending.confirmed) {
+            confirm_protocol_tx(channel, &physical->pending, true,
+                                result.ended_us);
+            physical->pending.confirmed = true;
+        }
+    } else if (physical->pending.kind == TX_SCHEDULED) {
+        channel_t *channel = find_channel(physical->pending.channel);
+        j2534_schedule_job_t *job =
+            channel ? j2534_schedule_find(&channel->scheduler,
+                                          physical->pending.job)
+                    : NULL;
+        if (job)
+            j2534_schedule_transmitted(job, result.started_us, result.ended_us);
+    }
+}
+
+static void submit_bus_tx(channel_t *channel, tx_kind_t kind, uint32_t job,
+                          uint32_t handle, const bus_msg_t *msg,
+                          uint32_t bus_flags) {
+    channel_t *physical = physical_channel(channel);
+    physical->pending = (pending_tx_t){
+        .kind = kind,
+        .channel = channel->id,
+        .job = job,
+        .handle = handle,
+        .rx_generation = channel->rx_generation,
+    };
+    if (physical->bus == VIF_BUS_CAN) {
+        physical->pending.frame.id = msg->id;
+        physical->pending.frame.dlc = msg->len;
+        memcpy(physical->pending.frame.data, msg->data, msg->len);
+        bus_flags |= BUS_TX_WAIT_DONE;
+    }
+    int rc = vif_bus_submit(VIF_OWNER_LINK, physical->bus, msg, bus_flags,
+                            physical->rx_sequence);
+    if (rc) {
+        bus_tx_result_t result = {.status = rc,
+                                  .complete = true,
+                                  .started_us = now_us(),
+                                  .ended_us = now_us()};
+        finish_bus_tx(physical, &result);
+    }
+}
+
+static void submit_can(channel_t *channel, tx_kind_t kind,
+                       const struct can_frame *frame) {
+    bus_msg_t msg;
+    bus_msg_tx(&msg, frame->data, frame->dlc, frame->id);
+    submit_bus_tx(channel, kind, 0, 0, &msg, 0);
+}
+
 static void poll_tx(channel_t *channel) {
-    if (!channel->tx_len || physical_channel(channel)->link_down)
+    if (!channel->tx_len)
         return;
     const uint8_t *data = channel->tx + MSG_HEADER;
     size_t len = channel->tx_len - MSG_HEADER;
     uint32_t flags = j2534_u32(channel->tx + 12);
-
     if (channel->parent) {
         if (!channel->tx_active) {
             if (!(channel->flags & LOGICAL_FULL_DUPLEX) &&
                 channel->iso_rx.state != ISOTP_RX_IDLE)
                 return;
             isotp_config_t cfg = channel->config;
-
             cfg.tx_id = be32(data) | (flags & J2534_29BIT ? CAN_EFF_FLAG : 0);
             cfg.tx_address = flags & J2534_ADDR ? data[4] : 0;
             cfg.pad = !!(flags & J2534_PAD);
@@ -420,7 +554,6 @@ static void poll_tx(channel_t *channel) {
                 memcmp(data, channel->remote, 4 + cfg.extended_address) != 0;
             unsigned address = 4 + cfg.extended_address;
             isotp_tx_init(&channel->iso_tx, &cfg);
-
             if (isotp_tx_start(&channel->iso_tx, data + address, len - address,
                                now_us()) < 0) {
                 tx_done(channel, false);
@@ -430,31 +563,56 @@ static void poll_tx(channel_t *channel) {
         }
         struct can_frame frame;
         int rc = isotp_tx_next(&channel->iso_tx, &frame, now_us());
-
-        if (rc == ISOTP_FRAME) {
-            int sent = send_can(channel, &frame);
-
-            rc = isotp_tx_confirm(&channel->iso_tx, sent == 0, now_us());
-        }
-        if (rc < 0)
+        if (rc == ISOTP_FRAME)
+            submit_can(channel, TX_ISOTP, &frame);
+        else if (rc < 0)
             tx_done(channel, false);
-        else if (channel->iso_tx.state == ISOTP_TX_IDLE)
-            tx_done(channel, true);
         return;
     }
-    int rc;
+    bus_msg_t msg;
+    if (channel->bus == VIF_BUS_CAN)
+        bus_msg_tx(&msg, data + 4, len - 4,
+                   be32(data) | (flags & J2534_29BIT ? CAN_EFF_FLAG : 0));
+    else
+        bus_msg_tx(&msg, data, len, 0);
+    submit_bus_tx(channel, TX_MESSAGE, 0, 0, &msg,
+                  flags & J2534_WAIT_P3 ? BUS_TX_WAIT_P3_MIN_ONLY : 0);
+}
 
-    if (channel->protocol == J2534_CAN) {
-        struct can_frame frame = {
-            .id = be32(data) | (flags & J2534_29BIT ? CAN_EFF_FLAG : 0),
-            .dlc = len - 4};
-
-        memcpy(frame.data, data + 4, len - 4);
-        rc = send_can(channel, &frame);
+static void submit_scheduled(channel_t *channel, j2534_schedule_job_t *job) {
+    const j2534_scheduled_message_t *message = &job->message;
+    const uint8_t *data = message->data;
+    uint32_t flags = message->flags;
+    bus_msg_t msg;
+    struct can_frame frame;
+    if (channel->parent) {
+        isotp_config_t cfg = channel->config;
+        cfg.tx_id = be32(data) | (flags & J2534_29BIT ? CAN_EFF_FLAG : 0);
+        cfg.tx_address = flags & J2534_ADDR ? data[4] : 0;
+        cfg.pad = !!(flags & J2534_PAD);
+        unsigned address = 4 + cfg.extended_address;
+        isotp_tx_t tx;
+        isotp_tx_init(&tx, &cfg);
+        if (isotp_tx_start(&tx, data + address, message->len - address,
+                           now_us()) < 0 ||
+            isotp_tx_next(&tx, &frame, now_us()) != ISOTP_FRAME) {
+            job->active = false;
+            return;
+        }
+        bus_msg_tx(&msg, frame.data, frame.dlc, frame.id);
+    } else if (channel->bus == VIF_BUS_CAN) {
+        bus_msg_tx(&msg, data + 4, message->len - 4,
+                   be32(data) | (flags & J2534_29BIT ? CAN_EFF_FLAG : 0));
     } else {
-        rc = send_byte_message(channel);
+        bus_msg_tx(&msg, data, message->len, 0);
     }
-    tx_done(channel, rc == 0);
+    uint32_t bus_flags = flags & J2534_WAIT_P3 ? BUS_TX_WAIT_P3_MIN_ONLY : 0;
+    if (job->kind != J2534_SCHEDULE_PERIODIC)
+        bus_flags |= BUS_TX_CHECK_RX;
+    job->pending = true;
+    job->transmission_ended = false;
+    submit_bus_tx(channel, TX_SCHEDULED, job->id, message->handle, &msg,
+                  bus_flags);
 }
 
 static void logical_receive(channel_t *channel, const struct can_frame *frame,
@@ -477,31 +635,52 @@ static void logical_receive(channel_t *channel, const struct can_frame *frame,
     put_be32(channel->assembly, frame->id & CAN_EFF_MASK);
     if (address == 5)
         channel->assembly[4] = frame->data[0];
+    if (segment.started)
+        channel->rx_generation++;
     if (segment.started && !segment.complete)
         enqueue_rx(channel, 0, flags | J2534_START, timestamp,
                    channel->assembly, address, true);
-    if (segment.complete)
+    if (segment.complete) {
+        j2534_schedule_receive(&channel->scheduler, channel->assembly,
+                               address + segment.total, flags, timestamp);
+        if (channel->legacy_channel) {
+            for (unsigned i = J2534_PHYSICAL_MAX; i < CHANNELS; i++) {
+                channel_t *peer = &channels[i];
+                if (peer != channel && peer->id && peer->legacy_channel &&
+                    peer->parent == channel->parent)
+                    j2534_schedule_receive(&peer->scheduler, channel->assembly,
+                                           address + segment.total, flags,
+                                           timestamp);
+            }
+        }
         enqueue_rx(
             channel, 0, flags | (segment.padding_error ? J2534_PADDING : 0),
             timestamp, channel->assembly, address + segment.total, false);
+    }
     struct can_frame flow_control;
 
     if (isotp_rx_flow_control(&channel->iso_rx, &flow_control, now_us()) ==
         ISOTP_FRAME) {
-        int sent = send_can(channel, &flow_control);
-        isotp_rx_confirm(&channel->iso_rx, sent == 0, now_us());
+        channel->flow_control = flow_control;
+        channel->flow_control_pending = true;
     }
 }
 
 static void poll_rx(channel_t *channel) {
+    channel->rx_drained = false;
     for (unsigned burst = 0; burst < 32; burst++) {
         bus_msg_t msg;
 
         bus_msg_init(&msg, scratch + 4, J2534_DATA_MAX);
         int received = vif_bus_recv(VIF_OWNER_LINK, channel->bus, &msg, 0);
 
-        if (received < 0)
+        if (received < 0) {
+            channel->rx_drained = true;
             break;
+        }
+        collect_bus_tx(channel);
+        if ((int32_t)(msg.sequence - channel->rx_sequence) > 0)
+            channel->rx_sequence = msg.sequence;
         if (msg.status & BUS_RX_LINK_DOWN) {
             const uint8_t reason[4] = {1, 0, 0, 0};
 
@@ -512,6 +691,8 @@ static void poll_rx(channel_t *channel) {
                 if (affected != channel && affected->parent != channel->id)
                     continue;
 
+                j2534_schedule_receive_lost(&affected->scheduler);
+                cancel_channel_tx(affected);
                 if (affected->tx_len)
                     tx_done(affected, false);
                 if (affected->parent) {
@@ -526,10 +707,15 @@ static void poll_rx(channel_t *channel) {
         }
         if (msg.status & BUS_RX_BUFFER_OVERFLOW) {
             channel->overflow = true;
+            j2534_schedule_receive_lost(&channel->scheduler);
             for (unsigned i = J2534_PHYSICAL_MAX; i < CHANNELS; i++)
-                if (channels[i].parent == channel->id)
+                if (channels[i].parent == channel->id) {
                     channels[i].overflow = true;
+                    j2534_schedule_receive_lost(&channels[i].scheduler);
+                }
         }
+        if (!msg.len && (msg.status & BUS_RX_BUFFER_OVERFLOW))
+            continue;
         if (msg.status & BUS_RX_BREAK) {
             enqueue_rx(channel, 0, J2534_BREAK, msg.timestamp_us, NULL, 0,
                        true);
@@ -573,44 +759,93 @@ static void poll_rx(channel_t *channel) {
         }
         if (msg.status & BUS_RX_TX_MSG_TYPE)
             flags |= J2534_TX_MSG;
+        else
+            j2534_schedule_receive(&channel->scheduler, data, len, flags,
+                                   msg.timestamp_us);
         if (filter_accepts(channel, data, len, flags))
             enqueue_rx(channel, 0, flags, msg.timestamp_us, data, len, false);
     }
+}
+
+static void service_bus(channel_t *physical) {
+    collect_bus_tx(physical);
+    poll_rx(physical);
+    uint32_t now = now_us();
+    channel_t *selected = NULL;
+    j2534_schedule_job_t *next = NULL;
+    for (unsigned i = 0; i < CHANNELS; i++) {
+        channel_t *channel = &channels[i];
+        if (!channel->id || physical_channel(channel) != physical)
+            continue;
+        if (channel->parent)
+            isotp_rx_check_timeout(&channel->iso_rx, now);
+        if (physical->rx_drained)
+            j2534_schedule_expire(&channel->scheduler, now);
+        j2534_schedule_job_t *job =
+            j2534_schedule_next(&channel->scheduler, now, physical->rx_drained);
+        if (job && (!next || (int32_t)(job->due_us - next->due_us) < 0 ||
+                    (job->due_us == next->due_us &&
+                     (int32_t)(job->id - next->id) < 0))) {
+            next = job;
+            selected = channel;
+        }
+    }
+    if (physical->pending.kind == TX_SCHEDULED) {
+        channel_t *owner = find_channel(physical->pending.channel);
+        j2534_schedule_job_t *job =
+            owner
+                ? j2534_schedule_find(&owner->scheduler, physical->pending.job)
+                : NULL;
+        if (!job || !job->active)
+            vif_bus_tx_cancel(VIF_OWNER_LINK, physical->bus);
+    }
+    if (physical->pending.kind != TX_NONE || physical->link_down)
+        return;
+
+    /* Flow control has protocol deadlines; scheduled data precedes queued data.
+     */
+    for (unsigned sent = 0; sent < J2534_LOGICAL_MAX; sent++) {
+        channel_t *flow = NULL;
+        for (unsigned i = J2534_PHYSICAL_MAX; i < CHANNELS; i++) {
+            channel_t *channel = &channels[i];
+            if (channel->parent == physical->id &&
+                channel->flow_control_pending &&
+                (!flow || (int32_t)(channel->iso_rx.deadline_us -
+                                    flow->iso_rx.deadline_us) < 0))
+                flow = channel;
+        }
+        if (!flow)
+            break;
+        flow->flow_control_pending = false;
+        submit_can(flow, TX_FLOW_CONTROL, &flow->flow_control);
+        collect_bus_tx(physical);
+        if (physical->pending.kind != TX_NONE)
+            return;
+    }
+    if (next) {
+        submit_scheduled(selected, next);
+    } else {
+        for (unsigned offset = 0; offset < CHANNELS; offset++) {
+            unsigned i = (physical->tx_cursor + offset) % CHANNELS;
+            channel_t *channel = &channels[i];
+            if (channel->id && physical_channel(channel) == physical) {
+                poll_tx(channel);
+                if (physical->pending.kind != TX_NONE) {
+                    physical->tx_cursor = (i + 1) % CHANNELS;
+                    break;
+                }
+            }
+        }
+    }
+    collect_bus_tx(physical);
 }
 
 void j2534_core_poll(void) {
     if (!device)
         return;
     for (unsigned i = 0; i < J2534_PHYSICAL_MAX; i++)
-        if (channel_is_live(&channels[i]) && channels[i].id)
-            poll_rx(&channels[i]);
-    for (unsigned i = 0; i < CHANNELS; i++) {
-        channel_t *channel = &channels[i];
-
-        if (!channel->id || !channel_is_live(channel))
-            continue;
-
-        if (channel->parent)
-            isotp_rx_check_timeout(&channel->iso_rx, now_us());
-        if (!channel->tx_len) {
-            for (unsigned j = 0; j < J2534_PERIODIC_MAX; j++) {
-                periodic_t *periodic = &channel->periodic[j];
-
-                if (!periodic->id || (int32_t)(now_us() - periodic->due_us) < 0)
-                    continue;
-
-                memset(channel->tx, 0, MSG_HEADER);
-                j2534_put32(channel->tx, channel->protocol);
-                j2534_put32(channel->tx + 4, periodic->handle);
-                j2534_put32(channel->tx + 12, periodic->flags);
-                memcpy(channel->tx + MSG_HEADER, periodic->data, periodic->len);
-                channel->tx_len = MSG_HEADER + periodic->len;
-                periodic->due_us = now_us() + periodic->interval_us;
-                break;
-            }
-        }
-        poll_tx(channel);
-    }
+        if (channels[i].id && channel_is_live(&channels[i]))
+            service_bus(&channels[i]);
 }
 
 static uint32_t connect_channel(const opendiag_Connect *req) {
@@ -785,6 +1020,7 @@ static uint32_t logical_connect(channel_t *parent,
         be32(local) | (local_flags & J2534_29BIT ? CAN_EFF_FLAG : 0));
     channel->config.extended_address = !!(local_flags & J2534_ADDR);
     channel->config.rx_address = local[4];
+    channel->legacy_channel = req->legacy_channel;
     channel->config.tx_address = remote[4];
     channel->config.pad = !!(remote_flags & J2534_PAD);
     isotp_rx_init(&channel->iso_rx, &channel->config,
@@ -1008,32 +1244,44 @@ static uint32_t ioctl_request(channel_t *channel, const opendiag_Ioctl *req) {
 
     switch (id) {
     case BUS_IOCTL_CLEAR_TX_QUEUE:
+        cancel_channel_tx(channel);
         channel->tx_len = 0;
         channel->tx_active = false;
         if (channel->parent)
             isotp_tx_init(&channel->iso_tx, &channel->config);
         return J2534_OK;
-    case BUS_IOCTL_CLEAR_RX_QUEUE:
+    case BUS_IOCTL_CLEAR_RX_QUEUE: {
+        channel_t *physical = physical_channel(channel);
+        /* Repeat conditions still observe the input removed from the API queue.
+         */
+        poll_rx(physical);
+        if (!physical->rx_drained)
+            poll_rx(physical);
         channel->rx_head = channel->rx_used = 0;
         channel->overflow = false;
         if (channel->parent) {
+            channel->rx_generation++;
+            channel->flow_control_pending = false;
             isotp_rx_init(&channel->iso_rx, &channel->config,
                           channel->assembly + 4 +
                               channel->config.extended_address,
                           ISOTP_MAX_PAYLOAD);
-        } else {
-            /* CAN has no queue-clear ioctl; bound the drain on a busy bus. */
-            bus_msg_t msg;
-
-            for (unsigned i = 0; i < 64; i++) {
-                bus_msg_init(&msg, scratch, sizeof(scratch));
-                if (vif_bus_recv(VIF_OWNER_LINK, channel->bus, &msg, 0) < 0)
-                    break;
-            }
         }
         return J2534_OK;
+    }
     case BUS_IOCTL_CLEAR_PERIODIC:
-        memset(channel->periodic, 0, sizeof(channel->periodic));
+        for (unsigned i = 0; i < J2534_SCHEDULE_SLOTS; i++) {
+            j2534_schedule_job_t *job = &channel->scheduler.jobs[i];
+            if (job->id) {
+                channel_t *physical = physical_channel(channel);
+                if (physical->pending.kind == TX_SCHEDULED &&
+                    physical->pending.job == job->id) {
+                    physical->pending.discard = true;
+                    vif_bus_tx_cancel(VIF_OWNER_LINK, physical->bus);
+                }
+                memset(job, 0, sizeof(*job));
+            }
+        }
         return J2534_OK;
     case IOCTL_CLEAR_FILTERS:
         if (channel->parent)
@@ -1145,6 +1393,12 @@ static uint32_t fast_init(channel_t *channel, const opendiag_FastInit *req) {
         req->data.size > BUS_INIT_MSG_MAX - (checksum ? 1u : 0u))
         return J2534_MSG;
 
+    if (channel->pending.kind != TX_NONE) {
+        int rc = vif_bus_tx_wait(VIF_OWNER_LINK, channel->bus);
+        if (rc)
+            return bus_error(rc);
+        collect_bus_tx(channel);
+    }
     if (channel->tx_len) {
         int rc = send_byte_message(channel);
         tx_done(channel, rc == 0);
@@ -1190,13 +1444,14 @@ static uint32_t read_capabilities(void) {
         .rx_queue_bytes = RX_BYTES,
         .tx_queue_messages = 1,
         .fast_init_max_data = BUS_INIT_MSG_MAX,
+        .repeat_per_channel = J2534_REPEAT_MAX,
         .protocols_count = 6,
-        .protocols = {{J2534_CAN, 12, 12},
-                      {J2534_PWM, 10, 11},
-                      {J2534_VPW, 11, 11},
-                      {J2534_ISO9141, 259, 259},
-                      {J2534_ISO14230, 259, 259},
-                      {J2534_ISOTP, 4100, 4100}},
+        .protocols = {{J2534_CAN, 12, 12, 12},
+                      {J2534_PWM, 10, 11, 10},
+                      {J2534_VPW, 11, 11, 11},
+                      {J2534_ISO9141, 259, 259, 12},
+                      {J2534_ISO14230, 259, 259, 12},
+                      {J2534_ISOTP, 4100, 4100, 11}},
     };
     return J2534_OK;
 }
@@ -1284,23 +1539,23 @@ static uint32_t start_periodic(channel_t *channel,
     if (rc)
         return rc;
 
-    for (unsigned i = 0; i < J2534_PERIODIC_MAX; i++) {
-        periodic_t *entry = &channel->periodic[i];
-
-        if (entry->id)
-            continue;
-
-        entry->id = new_id();
-        entry->interval_us = periodic->interval_ms * 1000;
-        entry->due_us = now_us();
-        entry->flags = message->tx_flags;
-        entry->handle = message->handle;
-        entry->len = message->data.size;
-        memcpy(entry->data, message->data.bytes, entry->len);
-        response.id = entry->id;
-        return J2534_OK;
-    }
-    return J2534_LIMIT;
+    j2534_schedule_job_t *job =
+        j2534_schedule_allocate(&channel->scheduler, false);
+    if (!job)
+        return J2534_LIMIT;
+    *job = (j2534_schedule_job_t){
+        .id = new_id(),
+        .kind = J2534_SCHEDULE_PERIODIC,
+        .interval_us = periodic->interval_ms * 1000,
+        .due_us = now_us(),
+        .active = true,
+        .message = {.flags = message->tx_flags,
+                    .handle = message->handle,
+                    .len = message->data.size},
+    };
+    memcpy(job->message.data, message->data.bytes, message->data.size);
+    response.id = job->id;
+    return J2534_OK;
 }
 
 static uint32_t start_filter(channel_t *channel,
@@ -1340,13 +1595,135 @@ static uint32_t start_filter(channel_t *channel,
     return J2534_LIMIT;
 }
 
+static uint32_t stop_scheduled(channel_t *channel, uint32_t id, bool repeat) {
+    j2534_schedule_job_t *job = j2534_schedule_find(&channel->scheduler, id);
+    if (!job || (job->kind != J2534_SCHEDULE_PERIODIC) != repeat)
+        return J2534_MSG_ID;
+    channel_t *physical = physical_channel(channel);
+    if (physical->pending.kind == TX_SCHEDULED && physical->pending.job == id) {
+        physical->pending.discard = true;
+        vif_bus_tx_cancel(VIF_OWNER_LINK, physical->bus);
+    }
+    memset(job, 0, sizeof(*job));
+    return J2534_OK;
+}
+
 static uint32_t stop_periodic(channel_t *channel, uint32_t id) {
-    for (unsigned i = 0; i < J2534_PERIODIC_MAX; i++)
-        if (channel->periodic[i].id && channel->periodic[i].id == id) {
-            memset(&channel->periodic[i], 0, sizeof(channel->periodic[i]));
-            return J2534_OK;
-        }
-    return J2534_MSG_ID;
+    return stop_scheduled(channel, id, false);
+}
+
+uint32_t j2534_core_repeat_start(uint32_t id, const j2534_repeat_setup_t *setup,
+                                 uint32_t *repeat_id) {
+    channel_t *channel = find_channel(id);
+    if (!channel_is_live(channel))
+        return J2534_CHANNEL;
+    if (!setup || !repeat_id)
+        return J2534_VALUE;
+    if (setup->interval_ms < 5 || setup->interval_ms > 65535)
+        return J2534_INTERVAL;
+    if (setup->condition > 1)
+        return J2534_VALUE;
+    const j2534_repeat_message_t *message = &setup->message;
+    const j2534_repeat_message_t *mask = &setup->mask;
+    const j2534_repeat_message_t *pattern = &setup->pattern;
+    if (message->len > sizeof(message->data) ||
+        mask->len > sizeof(mask->data) || !mask->len ||
+        mask->len != pattern->len || mask->flags != pattern->flags)
+        return J2534_MSG;
+    if (mask->protocol != channel->protocol ||
+        pattern->protocol != channel->protocol)
+        return J2534_MSG_PROTOCOL;
+    uint32_t rc = validate_message(channel, message->protocol, message->flags,
+                                   message->data, message->len, true);
+    if (rc)
+        return rc;
+    uint32_t match_flags = channel->parent
+                               ? J2534_ADDR | J2534_29BIT | J2534_PAD
+                           : channel->bus == VIF_BUS_CAN   ? J2534_29BIT
+                           : channel->bus == VIF_BUS_KLINE ? J2534_WAIT_P3
+                                                           : 0;
+    if (mask->flags & ~match_flags)
+        return J2534_FLAGS;
+    if (channel->bus == VIF_BUS_CAN &&
+        !can_flags_match(physical_channel(channel), mask->flags))
+        return J2534_FLAGS;
+    if (channel->parent &&
+        !!(mask->flags & J2534_ADDR) != channel->config.extended_address)
+        return J2534_FLAGS;
+    unsigned max_match = channel->parent                  ? 11
+                         : channel->protocol == J2534_PWM ? 10
+                         : channel->protocol == J2534_VPW ? 11
+                                                          : 12;
+    if (mask->len > max_match)
+        return J2534_MSG;
+    j2534_schedule_job_t *job =
+        j2534_schedule_allocate(&channel->scheduler, true);
+    if (!job)
+        return J2534_LIMIT;
+    uint32_t now = now_us();
+    *job = (j2534_schedule_job_t){
+        .id = new_id(),
+        .kind = setup->condition ? J2534_SCHEDULE_WHILE : J2534_SCHEDULE_UNTIL,
+        .interval_us = setup->interval_ms * 1000,
+        .due_us = now,
+        .created_us = now,
+        .active = true,
+        .message = {.flags = message->flags,
+                    .handle = message->handle,
+                    .len = message->len},
+        .match_flags = mask->flags & (J2534_ADDR | J2534_29BIT),
+        .match_len = mask->len,
+    };
+    memcpy(job->message.data, message->data, message->len);
+    memcpy(job->mask, mask->data, mask->len);
+    memcpy(job->pattern, pattern->data, mask->len);
+    *repeat_id = job->id;
+    return J2534_OK;
+}
+
+uint32_t j2534_core_repeat_query(uint32_t channel_id, uint32_t id,
+                                 bool *active) {
+    channel_t *channel = find_channel(channel_id);
+    if (!channel_is_live(channel))
+        return J2534_CHANNEL;
+    if (!active)
+        return J2534_VALUE;
+    j2534_schedule_job_t *job = j2534_schedule_find(&channel->scheduler, id);
+    if (!job || job->kind == J2534_SCHEDULE_PERIODIC)
+        return J2534_MSG_ID;
+    *active = job->active;
+    return J2534_OK;
+}
+
+uint32_t j2534_core_repeat_stop(uint32_t channel_id, uint32_t id) {
+    channel_t *channel = find_channel(channel_id);
+    if (!channel_is_live(channel))
+        return J2534_CHANNEL;
+    return stop_scheduled(channel, id, true);
+}
+
+static void decode_repeat_message(const opendiag_RepeatMessage *source,
+                                  j2534_repeat_message_t *message) {
+    _Static_assert(sizeof(source->data.bytes) == sizeof(message->data),
+                   "Repeat wire and scheduler capacities must agree");
+    message->protocol = source->protocol;
+    message->handle = source->handle;
+    message->flags = source->tx_flags;
+    message->len = source->data.size;
+    memcpy(message->data, source->data.bytes, source->data.size);
+}
+
+static uint32_t start_repeat(const opendiag_Repeat *req) {
+    if (!req->has_message || !req->has_mask || !req->has_pattern)
+        return J2534_MSG;
+    j2534_repeat_setup_t setup = {
+        .interval_ms = req->interval_ms,
+        .condition = req->condition,
+    };
+    decode_repeat_message(&req->message, &setup.message);
+    decode_repeat_message(&req->mask, &setup.mask);
+    decode_repeat_message(&req->pattern, &setup.pattern);
+    return j2534_core_repeat_start(req->channel, &setup, &response.id);
 }
 
 static uint32_t stop_filter(channel_t *channel, uint32_t id) {
@@ -1380,6 +1757,15 @@ static uint32_t dispatch_channel_request(const opendiag_Request *req) {
         break;
     case opendiag_Request_stop_periodic_tag:
         id = req->command.stop_periodic.channel;
+        break;
+    case opendiag_Request_start_repeat_tag:
+        id = req->command.start_repeat.channel;
+        break;
+    case opendiag_Request_query_repeat_tag:
+        id = req->command.query_repeat.channel;
+        break;
+    case opendiag_Request_stop_repeat_tag:
+        id = req->command.stop_repeat.channel;
         break;
     case opendiag_Request_start_filter_tag:
         id = req->command.start_filter.channel;
@@ -1423,6 +1809,13 @@ static uint32_t dispatch_channel_request(const opendiag_Request *req) {
         return start_periodic(channel, &req->command.start_periodic);
     case opendiag_Request_stop_periodic_tag:
         return stop_periodic(channel, req->command.stop_periodic.id);
+    case opendiag_Request_start_repeat_tag:
+        return start_repeat(&req->command.start_repeat);
+    case opendiag_Request_query_repeat_tag:
+        return j2534_core_repeat_query(id, req->command.query_repeat.id,
+                                       &response.repeat_active);
+    case opendiag_Request_stop_repeat_tag:
+        return j2534_core_repeat_stop(id, req->command.stop_repeat.id);
     case opendiag_Request_start_filter_tag:
         return start_filter(channel, &req->command.start_filter);
     case opendiag_Request_stop_filter_tag:
@@ -1559,7 +1952,11 @@ bool j2534_core_start(void) {
 }
 
 void j2534_core_stop(void) {
-    /* VIF performs hardware teardown after stop(), on this same task. */
+    /* VIF joins workers after stop(); cancel queued copies before dropping IDs.
+     */
+    for (unsigned i = 0; i < J2534_PHYSICAL_MAX; i++)
+        if (channels[i].id)
+            vif_bus_tx_cancel(VIF_OWNER_LINK, channels[i].bus);
     for (unsigned i = 0; i < CHANNELS; i++)
         release_channel(&channels[i]);
     device = 0;

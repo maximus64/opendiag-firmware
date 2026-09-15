@@ -8,6 +8,7 @@ idf_component_register(SRCS main.c
                             button.c
                             slcan.c
                             j2534.c
+                            j2534_scheduler.c
                             j2534_wire.c
                             j2534.pb.c
                             usb_cdc.c
@@ -16,6 +17,8 @@ idf_component_register(SRCS main.c
                             isotp.c
                             kline.c
                             kline_codec.c
+                            bus_tx.c
+                            bus_tx_worker.c
                             bus.c
                             j1850_pwm.c
                             j1850_pwm_codec.c

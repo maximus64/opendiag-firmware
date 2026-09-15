@@ -116,7 +116,8 @@ COMMON_EXPORTS = {
 EXPORTS = {
     "opendiag32.dll": dict(COMMON_EXPORTS, PassThruQueueMsgs=15, PassThruScanForDevices=16,
                            PassThruGetNextDevice=17, PassThruLogicalConnect=18,
-                           PassThruLogicalDisconnect=19, PassThruSelect=20),
+                           PassThruLogicalDisconnect=19, PassThruSelect=20,
+                           OpenDiagLogicalConnect0404=21),
     "odg40432.dll": dict(COMMON_EXPORTS, PassThruWriteMsgs=6),
     "opendiag_config.exe": {},
 }

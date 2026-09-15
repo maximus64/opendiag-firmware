@@ -59,6 +59,7 @@ typedef struct _opendiag_LogicalConnect {
     uint32_t remote_flags;
     opendiag_LogicalConnect_local_address_t local_address;
     opendiag_LogicalConnect_remote_address_t remote_address;
+    bool legacy_channel;
 } opendiag_LogicalConnect;
 
 typedef struct _opendiag_Queue {
@@ -73,6 +74,26 @@ typedef struct _opendiag_Periodic {
     bool has_message;
     opendiag_Message message;
 } opendiag_Periodic;
+
+typedef PB_BYTES_ARRAY_T(12) opendiag_RepeatMessage_data_t;
+typedef struct _opendiag_RepeatMessage {
+    uint32_t protocol;
+    uint32_t handle;
+    uint32_t tx_flags;
+    opendiag_RepeatMessage_data_t data;
+} opendiag_RepeatMessage;
+
+typedef struct _opendiag_Repeat {
+    uint32_t channel;
+    uint32_t interval_ms;
+    uint32_t condition;
+    bool has_message;
+    opendiag_RepeatMessage message;
+    bool has_mask;
+    opendiag_RepeatMessage mask;
+    bool has_pattern;
+    opendiag_RepeatMessage pattern;
+} opendiag_Repeat;
 
 typedef PB_BYTES_ARRAY_T(12) opendiag_Filter_mask_t;
 typedef PB_BYTES_ARRAY_T(12) opendiag_Filter_pattern_t;
@@ -138,6 +159,9 @@ typedef struct _opendiag_Request {
         opendiag_Target logical_disconnect;
         opendiag_Select select;
         opendiag_FastInit fast_init;
+        opendiag_Repeat start_repeat;
+        opendiag_Object query_repeat;
+        opendiag_Object stop_repeat;
     } command;
 } opendiag_Request;
 
@@ -145,6 +169,7 @@ typedef struct _opendiag_ProtocolLimit {
     uint32_t protocol;
     uint32_t max_tx_data;
     uint32_t max_rx_data;
+    uint32_t max_repeat_data;
 } opendiag_ProtocolLimit;
 
 typedef struct _opendiag_Capabilities {
@@ -162,6 +187,7 @@ typedef struct _opendiag_Capabilities {
     opendiag_ProtocolLimit protocols[6];
     bool full_j2534_compliance;
     uint32_t fast_init_max_data;
+    uint32_t repeat_per_channel;
 } opendiag_Capabilities;
 
 typedef PB_BYTES_ARRAY_T(255) opendiag_Response_data_t;
@@ -180,6 +206,7 @@ typedef struct _opendiag_Response {
     bool has_capabilities;
     opendiag_Capabilities capabilities;
     uint32_t millivolts;
+    bool repeat_active;
 } opendiag_Response;
 
 
@@ -194,36 +221,40 @@ extern "C" {
 #define opendiag_Config_init_default             {0, 0}
 #define opendiag_Message_init_default            {0, 0, 0, 0, 0, 0, {0, {0}}}
 #define opendiag_Connect_init_default            {0, 0, 0, 0, 0, 0, {0, 0}}
-#define opendiag_LogicalConnect_init_default     {0, 0, 0, 0, 0, {0, {0}}, {0, {0}}}
+#define opendiag_LogicalConnect_init_default     {0, 0, 0, 0, 0, {0, {0}}, {0, {0}}, 0}
 #define opendiag_Queue_init_default              {0, false, opendiag_Message_init_default}
 #define opendiag_Periodic_init_default           {0, 0, false, opendiag_Message_init_default}
+#define opendiag_RepeatMessage_init_default      {0, 0, 0, {0, {0}}}
+#define opendiag_Repeat_init_default             {0, 0, 0, false, opendiag_RepeatMessage_init_default, false, opendiag_RepeatMessage_init_default, false, opendiag_RepeatMessage_init_default}
 #define opendiag_Filter_init_default             {0, 0, 0, {0, {0}}, {0, {0}}}
 #define opendiag_Voltage_init_default            {0, 0, 0, 0}
 #define opendiag_Ioctl_init_default              {0, 0, 0, {opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default}, {0, {0}}, 0, 0}
 #define opendiag_FastInit_init_default           {0, 0, {0, {0}}, 0}
 #define opendiag_Select_init_default             {0, 0, {0, 0, 0, 0, 0}}
 #define opendiag_Request_init_default            {0, {opendiag_Empty_init_default}}
-#define opendiag_ProtocolLimit_init_default      {0, 0, 0}
-#define opendiag_Capabilities_init_default       {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {opendiag_ProtocolLimit_init_default, opendiag_ProtocolLimit_init_default, opendiag_ProtocolLimit_init_default, opendiag_ProtocolLimit_init_default, opendiag_ProtocolLimit_init_default, opendiag_ProtocolLimit_init_default}, 0, 0}
-#define opendiag_Response_init_default           {0, 0, 0, false, opendiag_Message_init_default, 0, {opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default}, {0, {0}}, 0, {0, 0, 0, 0, 0}, "", false, opendiag_Capabilities_init_default, 0}
+#define opendiag_ProtocolLimit_init_default      {0, 0, 0, 0}
+#define opendiag_Capabilities_init_default       {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {opendiag_ProtocolLimit_init_default, opendiag_ProtocolLimit_init_default, opendiag_ProtocolLimit_init_default, opendiag_ProtocolLimit_init_default, opendiag_ProtocolLimit_init_default, opendiag_ProtocolLimit_init_default}, 0, 0, 0}
+#define opendiag_Response_init_default           {0, 0, 0, false, opendiag_Message_init_default, 0, {opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default, opendiag_Config_init_default}, {0, {0}}, 0, {0, 0, 0, 0, 0}, "", false, opendiag_Capabilities_init_default, 0, 0}
 #define opendiag_Empty_init_zero                 {0}
 #define opendiag_Target_init_zero                {0}
 #define opendiag_Object_init_zero                {0, 0}
 #define opendiag_Config_init_zero                {0, 0}
 #define opendiag_Message_init_zero               {0, 0, 0, 0, 0, 0, {0, {0}}}
 #define opendiag_Connect_init_zero               {0, 0, 0, 0, 0, 0, {0, 0}}
-#define opendiag_LogicalConnect_init_zero        {0, 0, 0, 0, 0, {0, {0}}, {0, {0}}}
+#define opendiag_LogicalConnect_init_zero        {0, 0, 0, 0, 0, {0, {0}}, {0, {0}}, 0}
 #define opendiag_Queue_init_zero                 {0, false, opendiag_Message_init_zero}
 #define opendiag_Periodic_init_zero              {0, 0, false, opendiag_Message_init_zero}
+#define opendiag_RepeatMessage_init_zero         {0, 0, 0, {0, {0}}}
+#define opendiag_Repeat_init_zero                {0, 0, 0, false, opendiag_RepeatMessage_init_zero, false, opendiag_RepeatMessage_init_zero, false, opendiag_RepeatMessage_init_zero}
 #define opendiag_Filter_init_zero                {0, 0, 0, {0, {0}}, {0, {0}}}
 #define opendiag_Voltage_init_zero               {0, 0, 0, 0}
 #define opendiag_Ioctl_init_zero                 {0, 0, 0, {opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero}, {0, {0}}, 0, 0}
 #define opendiag_FastInit_init_zero              {0, 0, {0, {0}}, 0}
 #define opendiag_Select_init_zero                {0, 0, {0, 0, 0, 0, 0}}
 #define opendiag_Request_init_zero               {0, {opendiag_Empty_init_zero}}
-#define opendiag_ProtocolLimit_init_zero         {0, 0, 0}
-#define opendiag_Capabilities_init_zero          {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {opendiag_ProtocolLimit_init_zero, opendiag_ProtocolLimit_init_zero, opendiag_ProtocolLimit_init_zero, opendiag_ProtocolLimit_init_zero, opendiag_ProtocolLimit_init_zero, opendiag_ProtocolLimit_init_zero}, 0, 0}
-#define opendiag_Response_init_zero              {0, 0, 0, false, opendiag_Message_init_zero, 0, {opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero}, {0, {0}}, 0, {0, 0, 0, 0, 0}, "", false, opendiag_Capabilities_init_zero, 0}
+#define opendiag_ProtocolLimit_init_zero         {0, 0, 0, 0}
+#define opendiag_Capabilities_init_zero          {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {opendiag_ProtocolLimit_init_zero, opendiag_ProtocolLimit_init_zero, opendiag_ProtocolLimit_init_zero, opendiag_ProtocolLimit_init_zero, opendiag_ProtocolLimit_init_zero, opendiag_ProtocolLimit_init_zero}, 0, 0, 0}
+#define opendiag_Response_init_zero              {0, 0, 0, false, opendiag_Message_init_zero, 0, {opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero, opendiag_Config_init_zero}, {0, {0}}, 0, {0, 0, 0, 0, 0}, "", false, opendiag_Capabilities_init_zero, 0, 0}
 
 /* Field tags (for use in manual encoding/decoding) */
 #define opendiag_Target_id_tag                   1
@@ -251,11 +282,22 @@ extern "C" {
 #define opendiag_LogicalConnect_remote_flags_tag 5
 #define opendiag_LogicalConnect_local_address_tag 6
 #define opendiag_LogicalConnect_remote_address_tag 7
+#define opendiag_LogicalConnect_legacy_channel_tag 8
 #define opendiag_Queue_channel_tag               1
 #define opendiag_Queue_message_tag               2
 #define opendiag_Periodic_channel_tag            1
 #define opendiag_Periodic_interval_ms_tag        2
 #define opendiag_Periodic_message_tag            3
+#define opendiag_RepeatMessage_protocol_tag      1
+#define opendiag_RepeatMessage_handle_tag        2
+#define opendiag_RepeatMessage_tx_flags_tag      3
+#define opendiag_RepeatMessage_data_tag          4
+#define opendiag_Repeat_channel_tag              1
+#define opendiag_Repeat_interval_ms_tag          2
+#define opendiag_Repeat_condition_tag            3
+#define opendiag_Repeat_message_tag              4
+#define opendiag_Repeat_mask_tag                 5
+#define opendiag_Repeat_pattern_tag              6
 #define opendiag_Filter_channel_tag              1
 #define opendiag_Filter_type_tag                 2
 #define opendiag_Filter_flags_tag                3
@@ -296,9 +338,13 @@ extern "C" {
 #define opendiag_Request_logical_disconnect_tag  20
 #define opendiag_Request_select_tag              21
 #define opendiag_Request_fast_init_tag           22
+#define opendiag_Request_start_repeat_tag        23
+#define opendiag_Request_query_repeat_tag        24
+#define opendiag_Request_stop_repeat_tag         25
 #define opendiag_ProtocolLimit_protocol_tag      1
 #define opendiag_ProtocolLimit_max_tx_data_tag   2
 #define opendiag_ProtocolLimit_max_rx_data_tag   3
+#define opendiag_ProtocolLimit_max_repeat_data_tag 4
 #define opendiag_Capabilities_wire_version_tag   1
 #define opendiag_Capabilities_api_version_tag    2
 #define opendiag_Capabilities_physical_channels_tag 3
@@ -312,6 +358,7 @@ extern "C" {
 #define opendiag_Capabilities_protocols_tag      11
 #define opendiag_Capabilities_full_j2534_compliance_tag 12
 #define opendiag_Capabilities_fast_init_max_data_tag 13
+#define opendiag_Capabilities_repeat_per_channel_tag 14
 #define opendiag_Response_status_tag             1
 #define opendiag_Response_id_tag                 2
 #define opendiag_Response_count_tag              3
@@ -322,6 +369,7 @@ extern "C" {
 #define opendiag_Response_text_tag               8
 #define opendiag_Response_capabilities_tag       9
 #define opendiag_Response_millivolts_tag         10
+#define opendiag_Response_repeat_active_tag      11
 
 /* Struct field encoding specification for nanopb */
 #define opendiag_Empty_FIELDLIST(X, a) \
@@ -374,7 +422,8 @@ X(a, STATIC,   SINGULAR, UINT32,   flags,             3) \
 X(a, STATIC,   SINGULAR, UINT32,   local_flags,       4) \
 X(a, STATIC,   SINGULAR, UINT32,   remote_flags,      5) \
 X(a, STATIC,   SINGULAR, BYTES,    local_address,     6) \
-X(a, STATIC,   SINGULAR, BYTES,    remote_address,    7)
+X(a, STATIC,   SINGULAR, BYTES,    remote_address,    7) \
+X(a, STATIC,   SINGULAR, BOOL,     legacy_channel,    8)
 #define opendiag_LogicalConnect_CALLBACK NULL
 #define opendiag_LogicalConnect_DEFAULT NULL
 
@@ -392,6 +441,27 @@ X(a, STATIC,   OPTIONAL, MESSAGE,  message,           3)
 #define opendiag_Periodic_CALLBACK NULL
 #define opendiag_Periodic_DEFAULT NULL
 #define opendiag_Periodic_message_MSGTYPE opendiag_Message
+
+#define opendiag_RepeatMessage_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT32,   protocol,          1) \
+X(a, STATIC,   SINGULAR, UINT32,   handle,            2) \
+X(a, STATIC,   SINGULAR, UINT32,   tx_flags,          3) \
+X(a, STATIC,   SINGULAR, BYTES,    data,              4)
+#define opendiag_RepeatMessage_CALLBACK NULL
+#define opendiag_RepeatMessage_DEFAULT NULL
+
+#define opendiag_Repeat_FIELDLIST(X, a) \
+X(a, STATIC,   SINGULAR, UINT32,   channel,           1) \
+X(a, STATIC,   SINGULAR, UINT32,   interval_ms,       2) \
+X(a, STATIC,   SINGULAR, UINT32,   condition,         3) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  message,           4) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  mask,              5) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  pattern,           6)
+#define opendiag_Repeat_CALLBACK NULL
+#define opendiag_Repeat_DEFAULT NULL
+#define opendiag_Repeat_message_MSGTYPE opendiag_RepeatMessage
+#define opendiag_Repeat_mask_MSGTYPE opendiag_RepeatMessage
+#define opendiag_Repeat_pattern_MSGTYPE opendiag_RepeatMessage
 
 #define opendiag_Filter_FIELDLIST(X, a) \
 X(a, STATIC,   SINGULAR, UINT32,   channel,           1) \
@@ -454,7 +524,10 @@ X(a, STATIC,   ONEOF,    MESSAGE,  (command,queue,command.queue),  16) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (command,logical_connect,command.logical_connect),  19) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (command,logical_disconnect,command.logical_disconnect),  20) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (command,select,command.select),  21) \
-X(a, STATIC,   ONEOF,    MESSAGE,  (command,fast_init,command.fast_init),  22)
+X(a, STATIC,   ONEOF,    MESSAGE,  (command,fast_init,command.fast_init),  22) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (command,start_repeat,command.start_repeat),  23) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (command,query_repeat,command.query_repeat),  24) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (command,stop_repeat,command.stop_repeat),  25)
 #define opendiag_Request_CALLBACK NULL
 #define opendiag_Request_DEFAULT NULL
 #define opendiag_Request_command_capabilities_MSGTYPE opendiag_Empty
@@ -476,11 +549,15 @@ X(a, STATIC,   ONEOF,    MESSAGE,  (command,fast_init,command.fast_init),  22)
 #define opendiag_Request_command_logical_disconnect_MSGTYPE opendiag_Target
 #define opendiag_Request_command_select_MSGTYPE opendiag_Select
 #define opendiag_Request_command_fast_init_MSGTYPE opendiag_FastInit
+#define opendiag_Request_command_start_repeat_MSGTYPE opendiag_Repeat
+#define opendiag_Request_command_query_repeat_MSGTYPE opendiag_Object
+#define opendiag_Request_command_stop_repeat_MSGTYPE opendiag_Object
 
 #define opendiag_ProtocolLimit_FIELDLIST(X, a) \
 X(a, STATIC,   SINGULAR, UINT32,   protocol,          1) \
 X(a, STATIC,   SINGULAR, UINT32,   max_tx_data,       2) \
-X(a, STATIC,   SINGULAR, UINT32,   max_rx_data,       3)
+X(a, STATIC,   SINGULAR, UINT32,   max_rx_data,       3) \
+X(a, STATIC,   SINGULAR, UINT32,   max_repeat_data,   4)
 #define opendiag_ProtocolLimit_CALLBACK NULL
 #define opendiag_ProtocolLimit_DEFAULT NULL
 
@@ -497,7 +574,8 @@ X(a, STATIC,   SINGULAR, UINT32,   rx_queue_bytes,    9) \
 X(a, STATIC,   SINGULAR, UINT32,   tx_queue_messages,  10) \
 X(a, STATIC,   REPEATED, MESSAGE,  protocols,        11) \
 X(a, STATIC,   SINGULAR, BOOL,     full_j2534_compliance,  12) \
-X(a, STATIC,   SINGULAR, UINT32,   fast_init_max_data,  13)
+X(a, STATIC,   SINGULAR, UINT32,   fast_init_max_data,  13) \
+X(a, STATIC,   SINGULAR, UINT32,   repeat_per_channel,  14)
 #define opendiag_Capabilities_CALLBACK NULL
 #define opendiag_Capabilities_DEFAULT NULL
 #define opendiag_Capabilities_protocols_MSGTYPE opendiag_ProtocolLimit
@@ -512,7 +590,8 @@ X(a, STATIC,   SINGULAR, BYTES,    data,              6) \
 X(a, STATIC,   REPEATED, UINT32,   channels,          7) \
 X(a, STATIC,   SINGULAR, STRING,   text,              8) \
 X(a, STATIC,   OPTIONAL, MESSAGE,  capabilities,      9) \
-X(a, STATIC,   SINGULAR, UINT32,   millivolts,       10)
+X(a, STATIC,   SINGULAR, UINT32,   millivolts,       10) \
+X(a, STATIC,   SINGULAR, BOOL,     repeat_active,    11)
 #define opendiag_Response_CALLBACK NULL
 #define opendiag_Response_DEFAULT NULL
 #define opendiag_Response_message_MSGTYPE opendiag_Message
@@ -528,6 +607,8 @@ extern const pb_msgdesc_t opendiag_Connect_msg;
 extern const pb_msgdesc_t opendiag_LogicalConnect_msg;
 extern const pb_msgdesc_t opendiag_Queue_msg;
 extern const pb_msgdesc_t opendiag_Periodic_msg;
+extern const pb_msgdesc_t opendiag_RepeatMessage_msg;
+extern const pb_msgdesc_t opendiag_Repeat_msg;
 extern const pb_msgdesc_t opendiag_Filter_msg;
 extern const pb_msgdesc_t opendiag_Voltage_msg;
 extern const pb_msgdesc_t opendiag_Ioctl_msg;
@@ -548,6 +629,8 @@ extern const pb_msgdesc_t opendiag_Response_msg;
 #define opendiag_LogicalConnect_fields &opendiag_LogicalConnect_msg
 #define opendiag_Queue_fields &opendiag_Queue_msg
 #define opendiag_Periodic_fields &opendiag_Periodic_msg
+#define opendiag_RepeatMessage_fields &opendiag_RepeatMessage_msg
+#define opendiag_Repeat_fields &opendiag_Repeat_msg
 #define opendiag_Filter_fields &opendiag_Filter_msg
 #define opendiag_Voltage_fields &opendiag_Voltage_msg
 #define opendiag_Ioctl_fields &opendiag_Ioctl_msg
@@ -560,21 +643,23 @@ extern const pb_msgdesc_t opendiag_Response_msg;
 
 /* Maximum encoded size of messages (where known) */
 #define OPENDIAG_J2534_PB_H_MAX_SIZE             opendiag_Response_size
-#define opendiag_Capabilities_size               188
+#define opendiag_Capabilities_size               230
 #define opendiag_Config_size                     12
 #define opendiag_Connect_size                    42
 #define opendiag_Empty_size                      0
 #define opendiag_FastInit_size                   277
 #define opendiag_Filter_size                     46
 #define opendiag_Ioctl_size                      730
-#define opendiag_LogicalConnect_size             44
+#define opendiag_LogicalConnect_size             46
 #define opendiag_Message_size                    4167
 #define opendiag_Object_size                     12
 #define opendiag_Periodic_size                   4182
-#define opendiag_ProtocolLimit_size              18
+#define opendiag_ProtocolLimit_size              24
 #define opendiag_Queue_size                      4176
+#define opendiag_RepeatMessage_size              32
+#define opendiag_Repeat_size                     120
 #define opendiag_Request_size                    4185
-#define opendiag_Response_size                   5251
+#define opendiag_Response_size                   5295
 #define opendiag_Select_size                     36
 #define opendiag_Target_size                     6
 #define opendiag_Voltage_size                    24

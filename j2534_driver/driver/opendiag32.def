@@ -19,3 +19,4 @@ EXPORTS
     PassThruLogicalConnect=PassThruLogicalConnect@20 @18
     PassThruLogicalDisconnect=PassThruLogicalDisconnect@4 @19
     PassThruSelect=PassThruSelect@12 @20
+    OpenDiagLogicalConnect0404=OpenDiagLogicalConnect0404@20 @21

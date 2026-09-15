@@ -39,9 +39,9 @@ void Backend::load(const void *owner) {
             throw std::runtime_error("Missing backend export: PassThruDisconnect");
         }
         logicalConnect =
-            (PassThruLogicalConnectFn)platform::findSymbol(library_, "PassThruLogicalConnect");
+            (PassThruLogicalConnectFn)platform::findSymbol(library_, "OpenDiagLogicalConnect0404");
         if (!logicalConnect) {
-            throw std::runtime_error("Missing backend export: PassThruLogicalConnect");
+            throw std::runtime_error("Missing backend export: OpenDiagLogicalConnect0404");
         }
         logicalDisconnect =
             (PassThruLogicalDisconnectFn)platform::findSymbol(library_,

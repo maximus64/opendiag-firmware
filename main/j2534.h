@@ -76,6 +76,31 @@ enum {
     J2534_K_ONLY = 4096,
 };
 
+#define J2534_REPEAT_MAX 10u
+
+typedef struct {
+    uint32_t protocol;
+    uint32_t flags;
+    uint32_t handle;
+    uint32_t len;
+    uint8_t data[12];
+} j2534_repeat_message_t;
+
+typedef struct {
+    uint32_t interval_ms;
+    uint32_t condition; /* 0: until matching RX; 1: while matching RX. */
+    j2534_repeat_message_t message;
+    j2534_repeat_message_t mask;
+    j2534_repeat_message_t pattern;
+} j2534_repeat_setup_t;
+
+/* Internal firmware API; the wire and DLL entry points are added in Phase 2. */
+uint32_t j2534_core_repeat_start(uint32_t channel,
+                                 const j2534_repeat_setup_t *setup,
+                                 uint32_t *id);
+uint32_t j2534_core_repeat_query(uint32_t channel, uint32_t id, bool *active);
+uint32_t j2534_core_repeat_stop(uint32_t channel, uint32_t id);
+
 extern const vif_frontend_t j2534_frontend;
 void j2534_register(void);
 

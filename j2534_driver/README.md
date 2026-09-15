@@ -25,6 +25,9 @@ The container runs the host tests, then builds and checks the Windows package
 once using its i686 MSVCRT MinGW cross-compiler. The resulting archive is
 `build/docker/opendiag-j2534-driver.zip`.
 
+Install both DLLs from the same package; the 04.04 shim uses a private bridge in
+the native DLL to preserve its channel semantics.
+
 The ZIP includes `opendiag-cdc-xp.inf` for the diagnostic data and debug console
 USB CDC ports on Windows XP SP3 (x86), using Windows' built-in `usbser.sys`.
 Follow the hardware wizard instructions in [packaging/README.txt](packaging/README.txt).

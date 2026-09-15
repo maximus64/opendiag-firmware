@@ -1,4 +1,5 @@
 opendiag.Message.data max_size:4128
+opendiag.RepeatMessage.data max_size:12
 opendiag.FastInit.data max_size:260
 opendiag.Connect.pins max_count:2
 opendiag.LogicalConnect.local_address max_size:5

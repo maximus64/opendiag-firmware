@@ -3,6 +3,7 @@ FROM debian:bookworm-slim@sha256:5ae3c39ebd15e229dcedd5cee596b2497182493d41ff162
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    cmake \
     git \
     python3 \
     python3-protobuf \

@@ -8,3 +8,8 @@ _Static_assert(offsetof(PASSTHRU_MSG, Data) == 24, "data offset");
 _Static_assert(sizeof(SCONFIG) == 8, "config layout");
 _Static_assert(sizeof(SCONFIG_LIST) == 4 + sizeof(void *), "config list layout");
 _Static_assert(sizeof(SBYTE_ARRAY) == 4 + sizeof(void *), "byte array layout");
+_Static_assert(sizeof(REPEAT_MSG_SETUP) == 8 + 3 * sizeof(PASSTHRU_MSG), "repeat layout");
+_Static_assert(offsetof(REPEAT_MSG_SETUP, RepeatMsgData) == 8, "repeat message offset");
+_Static_assert(sizeof(SPARAM) == 12, "discovery parameter layout");
+_Static_assert(sizeof(SPARAM_LIST) == 4 + sizeof(void *), "discovery list layout");
+_Static_assert(offsetof(SPARAM_LIST, ParamPtr) == 4, "discovery pointer offset");

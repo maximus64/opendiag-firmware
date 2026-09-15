@@ -1003,3 +1003,116 @@ TEST(kline_fast_init_rejects_damaged_response_after_good_tx) {
     TEST_ASSERT_EQUAL_INT(0, g.stats.init_ok);
     TEST_ASSERT_NULL(g.tx);
 }
+
+TEST(kline_controlled_send_defers_for_reply_received_during_quiet_wait) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, kline_open(NULL));
+    uart_immediate_echo = true;
+    stage_uart_reply(previous_reply, sizeof(previous_reply));
+    g.tx_answered = false;
+    bus_tx_control_t control;
+    bus_tx_prepare(&control, 0);
+    control.check_rx = true;
+    g.active_control = &control;
+    TEST_ASSERT_EQUAL_INT(
+        BUS_ERR_RX_PENDING,
+        tx_message(current_request, sizeof(current_request), true, 0));
+    g.active_control = NULL;
+    TEST_ASSERT_EQUAL_INT(0, uart_tx_count);
+    uint8_t data[16];
+    bus_msg_t message;
+    bus_msg_init(&message, data, sizeof(data));
+    TEST_ASSERT_EQUAL_INT(sizeof(previous_reply), kline_rx(&message, 0));
+    TEST_ASSERT_EQUAL_MEM(previous_reply, data, sizeof(previous_reply));
+    TEST_ASSERT_EQUAL_INT(1, message.sequence);
+
+    bus_tx_prepare(&control, message.sequence);
+    control.check_rx = true;
+    g.active_control = &control;
+    TEST_ASSERT_EQUAL_INT(
+        0, tx_message(current_request, sizeof(current_request), true, 0));
+    g.active_control = NULL;
+    TEST_ASSERT_EQUAL_INT(sizeof(current_request), uart_tx_count);
+    TEST_ASSERT_TRUE(control.started_us >=
+                     message.timestamp_us + P_TO_US(g.cfg.p3_min));
+    TEST_ASSERT_EQUAL_HEX32(g.tx_end_us, control.ended_us);
+}
+
+TEST(kline_controlled_send_frames_buffered_input_even_after_long_idle) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, kline_open(NULL));
+    fake_clock_advance_ms(250);
+    uart_immediate_echo = true;
+    stage_uart_reply(previous_reply, sizeof(previous_reply));
+    bus_tx_control_t control;
+    bus_tx_prepare(&control, 0);
+    control.check_rx = true;
+    g.active_control = &control;
+    TEST_ASSERT_EQUAL_INT(
+        BUS_ERR_RX_PENDING,
+        tx_message(current_request, sizeof(current_request), true, 0));
+    g.active_control = NULL;
+    TEST_ASSERT_EQUAL_INT(0, uart_tx_count);
+    TEST_ASSERT_EQUAL_INT(1, g.stats.rx_msgs);
+}
+
+static int64_t cancel_tx_at;
+
+static void cancel_waiting_tx(TickType_t wait) {
+    if (now_us() >= cancel_tx_at) {
+        uart_read_hook = NULL;
+        TEST_ASSERT_TRUE(bus_tx_cancel(g.active_control));
+    }
+}
+
+TEST(kline_cancellation_during_quiet_wait_sends_no_bytes) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, kline_open(NULL));
+    bus_tx_control_t control;
+    bus_tx_prepare(&control, 0);
+    g.active_control = &control;
+    cancel_tx_at = now_us() + 5000;
+    uart_read_hook = cancel_waiting_tx;
+    TEST_ASSERT_EQUAL_INT(
+        BUS_ERR_CANCELLED,
+        tx_message(current_request, sizeof(current_request), true, 0));
+    g.active_control = NULL;
+    TEST_ASSERT_EQUAL_INT(0, uart_tx_count);
+}
+
+static void cancel_started_tx(void) {
+    uart_write_hook = NULL;
+    TEST_ASSERT_FALSE(bus_tx_cancel(g.active_control));
+}
+
+TEST(kline_transmission_already_started_finishes_when_stop_arrives) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, kline_open(NULL));
+    uart_immediate_echo = true;
+    bus_tx_control_t control;
+    bus_tx_prepare(&control, 0);
+    g.active_control = &control;
+    uart_write_hook = cancel_started_tx;
+    TEST_ASSERT_EQUAL_INT(
+        0, tx_message(current_request, sizeof(current_request), true, 0));
+    g.active_control = NULL;
+    TEST_ASSERT_EQUAL_INT(sizeof(current_request), uart_tx_count);
+    TEST_ASSERT_TRUE(control.ended_us >= control.started_us);
+}
+
+TEST(kline_uart_overflow_blocks_repeat_admission_without_a_later_response) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, kline_open(NULL));
+    uart_event_t event = {.type = UART_BUFFER_FULL};
+    uart_event(&event);
+    bus_tx_control_t control;
+    bus_tx_prepare(&control, 0);
+    control.check_rx = true;
+    g.active_control = &control;
+    TEST_ASSERT_EQUAL_INT(
+        BUS_ERR_RX_PENDING,
+        tx_message(current_request, sizeof(current_request), true, 0));
+    g.active_control = NULL;
+    uint8_t buffer[16];
+    bus_msg_t message;
+    bus_msg_init(&message, buffer, sizeof(buffer));
+    TEST_ASSERT_EQUAL_INT(0, kline_rx(&message, 0));
+    TEST_ASSERT_EQUAL_INT(BUS_RX_BUFFER_OVERFLOW, message.status);
+    TEST_ASSERT_EQUAL_INT(1, message.sequence);
+    TEST_ASSERT_EQUAL_INT(0, uart_tx_count);
+}

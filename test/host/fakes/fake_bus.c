@@ -5,6 +5,8 @@
  */
 
 #include "fake_bus.h"
+#include "esp_timer.h"
+#include "bus_tx.h"
 
 #include <string.h>
 
@@ -23,6 +25,7 @@ typedef struct {
     size_t len;
     uint32_t delay_ms;
     uint64_t ready_ms;
+    uint32_t timestamp_us;
     uint32_t status;
 } staged_t;
 
@@ -30,9 +33,11 @@ typedef struct {
     bool up;
     uint32_t rx_timestamp_us;
     uint32_t rx_status;
+    uint32_t rx_sequence;
     int setup_count;
     int teardown_count;
     bool fail_next_send;
+    uint32_t send_duration_ms;
     void (*lifecycle_hook)(void *);
     void *lifecycle_arg;
     esp_err_t open_result;
@@ -63,6 +68,7 @@ static int g_kline_only_result;
 static uint32_t g_wakeup_ms;
 static uint32_t g_ifr_enabled;
 static uint32_t g_ifr_byte;
+static uint32_t g_node_address;
 static bus_init_t g_init_request, g_init_reply;
 static uint8_t g_wakeup[KLINE_WAKEUP_MAX];
 static uint8_t g_wakeup_len;
@@ -82,6 +88,7 @@ void fake_bus_reset_all(void) {
     g_wakeup_ms = 0;
     g_ifr_enabled = 0;
     g_ifr_byte = 0xF1;
+    g_node_address = 0xF1;
     g_wakeup_len = 0;
     memset(g_stats, 0, sizeof(g_stats));
 }
@@ -135,6 +142,7 @@ static void stage(staged_t *slot, const uint8_t *data, size_t len,
     slot->len = len;
     slot->delay_ms = delay_ms;
     slot->ready_ms = fake_clock_ms();
+    slot->timestamp_us = (uint32_t)esp_timer_get_time();
 }
 
 void fake_bus_stage_response(fake_bus_id_t id, const uint8_t *data, size_t len,
@@ -173,6 +181,9 @@ int fake_bus_teardown_count(fake_bus_id_t id) {
 }
 bool fake_bus_is_up(fake_bus_id_t id) { return bus_of(id)->up; }
 int fake_bus_sent_count(fake_bus_id_t id) { return bus_of(id)->sent_count; }
+void fake_bus_send_duration(fake_bus_id_t id, uint32_t duration_ms) {
+    bus_of(id)->send_duration_ms = duration_ms;
+}
 int fake_bus_sync_count(void) { return g_sync_count; }
 int fake_bus_stop_comm_count(void) { return g_stop_comm_count; }
 
@@ -245,6 +256,7 @@ static int bus_send(fake_bus_id_t id, const uint8_t *data, uint8_t len,
     if (b->sent_count < MAX_FRAMES) {
         stage(&b->sent[b->sent_count++], data, len, 0);
     }
+    fake_clock_advance_ms(b->send_duration_ms);
 
     if (id == FAKE_BUS_KLINE && (flags & BUS_TX_CLEAR_RX_QUEUE)) {
         b->live_head = 0;
@@ -262,6 +274,9 @@ static int bus_send(fake_bus_id_t id, const uint8_t *data, uint8_t len,
     for (int i = 0; i < b->pending_count && b->live_count < MAX_FRAMES; i++) {
         ready_ms += b->pending[i].delay_ms;
         b->pending[i].ready_ms = ready_ms;
+        b->pending[i].timestamp_us =
+            (uint32_t)esp_timer_get_time() +
+            (uint32_t)(ready_ms - fake_clock_ms()) * 1000u;
         b->live[(b->live_head + b->live_count) % MAX_FRAMES] = b->pending[i];
         b->live_count++;
     }
@@ -304,7 +319,7 @@ static int bus_receive(fake_bus_id_t id, uint8_t *data, uint8_t len,
     }
 
     fake_clock_advance_ms(delay_ms);
-    b->rx_timestamp_us = (uint32_t)(s->ready_ms * 1000u);
+    b->rx_timestamp_us = s->timestamp_us;
     b->rx_status = s->status;
 
     b->live_head = (b->live_head + 1) % MAX_FRAMES;
@@ -343,6 +358,22 @@ static int fake_send(fake_bus_id_t id, const uint8_t *data, size_t len,
     return bus_send(id, data, (uint8_t)len, flags);
 }
 
+static int fake_controlled(fake_bus_id_t id, const bus_msg_t *msg,
+                           uint32_t flags, bus_tx_control_t *control) {
+    bus_t *bus = bus_of(id);
+    uint32_t sequence = bus->rx_sequence;
+    for (int i = 0; i < bus->live_count; i++)
+        if (bus->live[(bus->live_head + i) % MAX_FRAMES].ready_ms <=
+            fake_clock_ms())
+            sequence++;
+    int rc = bus_tx_admit(control, sequence, (uint32_t)esp_timer_get_time());
+    if (rc)
+        return rc;
+    rc = fake_send(id, msg->data, msg->len, flags);
+    bus_tx_end(control, (uint32_t)esp_timer_get_time());
+    return rc;
+}
+
 static int fake_recv(fake_bus_id_t id, bus_msg_t *msg, TickType_t wait) {
     bus_t *b = bus_of(id);
     if (b->receive_hook) {
@@ -366,6 +397,7 @@ static int fake_recv(fake_bus_id_t id, bus_msg_t *msg, TickType_t wait) {
     msg->len = (uint16_t)rc;
     msg->status = b->rx_status;
     msg->timestamp_us = b->rx_timestamp_us;
+    msg->sequence = ++b->rx_sequence;
     g_stats[id].rx_msgs++;
     return rc;
 }
@@ -384,6 +416,9 @@ void fake_bus_on_kline_only(void (*hook)(void), int result) {
 
 static int fake_set_param(bus_param_t p, uint32_t value) {
     switch (p) {
+    case BUS_P_NODE_ADDRESS:
+        g_node_address = value;
+        return 0;
     case BUS_P_IFR_ENABLED:
         g_ifr_enabled = value;
         return 0;
@@ -416,6 +451,9 @@ static int fake_get_param(bus_param_t p, uint32_t *out) {
     }
 
     switch (p) {
+    case BUS_P_NODE_ADDRESS:
+        *out = g_node_address;
+        return 0;
     case BUS_P_IFR_ENABLED:
         *out = g_ifr_enabled;
         return 0;
@@ -555,6 +593,10 @@ static void fake_reset_stats(fake_bus_id_t id) {
     static int prefix##_send(const bus_msg_t *m, uint32_t f) {                 \
         return fake_send(id, m->data, m->len, f);                              \
     }                                                                          \
+    static int prefix##_controlled(const bus_msg_t *m, uint32_t f,             \
+                                   bus_tx_control_t *c) {                      \
+        return fake_controlled(id, m, f, c);                                   \
+    }                                                                          \
     static int prefix##_recv(bus_msg_t *m, TickType_t w) {                     \
         return fake_recv(id, m, w);                                            \
     }                                                                          \
@@ -570,6 +612,7 @@ const bus_ops_t kline_bus_ops = {
     .open = fk_kline_open,
     .close = fk_kline_close,
     .send = fk_kline_send,
+    .send_controlled = fk_kline_controlled,
     .recv = fk_kline_recv,
     .set_param = fake_set_param,
     .get_param = fake_get_param,
@@ -583,6 +626,7 @@ const bus_ops_t j1850_pwm_bus_ops = {
     .open = fk_pwm_open,
     .close = fk_pwm_close,
     .send = fk_pwm_send,
+    .send_controlled = fk_pwm_controlled,
     .recv = fk_pwm_recv,
     .set_param = fake_set_param,
     .get_param = fake_get_param,
@@ -596,6 +640,7 @@ const bus_ops_t j1850_vpw_bus_ops = {
     .open = fk_vpw_open,
     .close = fk_vpw_close,
     .send = fk_vpw_send,
+    .send_controlled = fk_vpw_controlled,
     .recv = fk_vpw_recv,
     .set_param = fake_set_param,
     .get_param = fake_get_param,

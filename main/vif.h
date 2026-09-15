@@ -6,6 +6,7 @@
 #include "freertos/FreeRTOS.h"
 #include "esp_err.h"
 #include "bus.h"
+#include "bus_tx.h"
 #include "comm_iface.h"
 
 /** Protocol grammars the firmware carries. Registered once, never removed. */
@@ -286,6 +287,14 @@ void vif_bus_info(vif_bus_claim_t out[VIF_BUS_GROUPS]);
  */
 int vif_bus_send(vif_owner_t owner, vif_bus_t bus, const bus_msg_t *msg,
                  uint32_t flags);
+
+/* Managed TX copies the packet; poll reports TX end and final completion.
+ * These calls keep the same owner-task requirement as synchronous I/O. */
+int vif_bus_submit(vif_owner_t owner, vif_bus_t bus, const bus_msg_t *msg,
+                   uint32_t flags, uint32_t rx_sequence);
+bool vif_bus_tx_poll(vif_owner_t owner, vif_bus_t bus, bus_tx_result_t *result);
+void vif_bus_tx_cancel(vif_owner_t owner, vif_bus_t bus);
+int vif_bus_tx_wait(vif_owner_t owner, vif_bus_t bus);
 
 /**
  * @brief Receive from a bus the owner holds.
