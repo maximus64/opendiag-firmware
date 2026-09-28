@@ -50,29 +50,60 @@ static const tusb_desc_device_t cdc_device_descriptor = {
     .bDeviceSubClass = MISC_SUBCLASS_COMMON,
     .bDeviceProtocol = MISC_PROTOCOL_IAD,
     .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
-    .idVendor = USB_ESPRESSIF_VID,
-    .idProduct = 0x4002,
+    .idVendor = 0x1209,
+    .idProduct = 0xd1a6,
     .bcdDevice = 0x0100,
     .iManufacturer = 0x01,
     .iProduct = 0x02,
     .iSerialNumber = 0x03,
     .bNumConfigurations = 0x01};
 
+/* TUD_CDC_DESCRIPTOR, plus iFunction so hosts name the ports "COM"/"DEBUG".
+ * Protocol stays NONE: the data link's grammar is host-selected at runtime. */
+#define OPENDIAG_CDC_DESCRIPTOR(_itfnum, _stridx, _ep_notif, _ep_notif_size,   \
+                                _epout, _epin, _epsize)                        \
+    /* Interface Association */                                                \
+    8, TUSB_DESC_INTERFACE_ASSOCIATION, _itfnum, 2, TUSB_CLASS_CDC,            \
+        CDC_COMM_SUBCLASS_ABSTRACT_CONTROL_MODEL, CDC_COMM_PROTOCOL_NONE,      \
+        _stridx,                                                               \
+    /* CDC Control Interface */                                                \
+    9, TUSB_DESC_INTERFACE, _itfnum, 0, 1, TUSB_CLASS_CDC,                     \
+        CDC_COMM_SUBCLASS_ABSTRACT_CONTROL_MODEL, CDC_COMM_PROTOCOL_NONE,      \
+        _stridx,                                                               \
+    /* CDC Header */                                                           \
+    5, TUSB_DESC_CS_INTERFACE, CDC_FUNC_DESC_HEADER, U16_TO_U8S_LE(0x0120),    \
+    /* CDC Call Management */                                                  \
+    5, TUSB_DESC_CS_INTERFACE, CDC_FUNC_DESC_CALL_MANAGEMENT, 0,               \
+        (uint8_t)((_itfnum) + 1),                                              \
+    /* CDC ACM: line request + send break */                                   \
+    4, TUSB_DESC_CS_INTERFACE, CDC_FUNC_DESC_ABSTRACT_CONTROL_MANAGEMENT, 6,   \
+    /* CDC Union */                                                            \
+    5, TUSB_DESC_CS_INTERFACE, CDC_FUNC_DESC_UNION, _itfnum,                   \
+        (uint8_t)((_itfnum) + 1),                                              \
+    /* Endpoint Notification */                                                \
+    7, TUSB_DESC_ENDPOINT, _ep_notif, TUSB_XFER_INTERRUPT,                     \
+        U16_TO_U8S_LE(_ep_notif_size), 1,                                      \
+    /* CDC Data Interface */                                                   \
+    9, TUSB_DESC_INTERFACE, (uint8_t)((_itfnum) + 1), 0, 2,                    \
+        TUSB_CLASS_CDC_DATA, 0, 0, 0,                                          \
+    /* Endpoint Out */                                                         \
+    7, TUSB_DESC_ENDPOINT, _epout, TUSB_XFER_BULK, U16_TO_U8S_LE(_epsize), 0,  \
+    /* Endpoint In */                                                          \
+    7, TUSB_DESC_ENDPOINT, _epin, TUSB_XFER_BULK, U16_TO_U8S_LE(_epsize), 0
+
 static const uint8_t desc_configuration[] = {
-    // Config number, interface count, string index, total length, attribute,
-    // power in mA
-    TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, TUSB_DESC_TOTAL_LEN,
-                          TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
+    /* Declare the full USB-only draw, including the active radio. */
+    TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, TUSB_DESC_TOTAL_LEN, 0, 500),
 
-    // 1st CDC: Interface number, string index, EP notification, EP notification
-    // size, EP data out, EP data in, EP data packet size
-    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_0, 4, EPNUM_CDC_0_NOTIF, 8, EPNUM_CDC_0_OUT,
-                       EPNUM_CDC_0_IN, 64),
+    // 1st CDC, the protocol data link: interface number, string index,
+    // EP notification, EP notification size, EP data out, EP data in,
+    // EP data packet size
+    OPENDIAG_CDC_DESCRIPTOR(ITF_NUM_CDC_0, 4, EPNUM_CDC_0_NOTIF, 8,
+                            EPNUM_CDC_0_OUT, EPNUM_CDC_0_IN, 64),
 
-    // 2nd CDC: Interface number, string index, EP notification, EP notification
-    // size, EP data out, EP data in, EP data packet size
-    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC_1, 5, EPNUM_CDC_1_NOTIF, 8, EPNUM_CDC_1_OUT,
-                       EPNUM_CDC_1_IN, 64),
+    // 2nd CDC, the console and debug shell
+    OPENDIAG_CDC_DESCRIPTOR(ITF_NUM_CDC_1, 5, EPNUM_CDC_1_NOTIF, 8,
+                            EPNUM_CDC_1_OUT, EPNUM_CDC_1_IN, 64),
 };
 
 static char serial_str[13] = "000000000000";
@@ -88,7 +119,7 @@ static const char *string_desc_arr[] = {
 };
 
 static const tinyusb_config_t tusb_cfg = {
-    .device_descriptor = NULL,
+    .device_descriptor = &cdc_device_descriptor,
     .string_descriptor = string_desc_arr,
     .string_descriptor_count =
         sizeof(string_desc_arr) / sizeof(string_desc_arr[0]),

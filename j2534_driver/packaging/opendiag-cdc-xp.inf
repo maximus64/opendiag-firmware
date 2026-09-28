@@ -6,14 +6,14 @@ Signature="$Windows NT$"
 Class=Ports
 ClassGuid={4D36E978-E325-11CE-BFC1-08002BE10318}
 Provider=%Manufacturer%
-DriverVer=09/14/2026,1.0.0.0
+DriverVer=09/28/2026,1.0.0.1
 
 [Manufacturer]
 %Manufacturer%=OpenDIAG,NTx86
 
 [OpenDIAG.NTx86]
-%DataPort%=CDC_Install,USB\VID_303A&PID_4002&MI_00
-%DebugPort%=CDC_Install,USB\VID_303A&PID_4002&MI_02
+%DataPort%=CDC_Install,USB\VID_1209&PID_D1A6&MI_00
+%DebugPort%=CDC_Install,USB\VID_1209&PID_D1A6&MI_02
 
 [DestinationDirs]
 FakeModemCopyFileSection=12
@@ -37,7 +37,7 @@ ErrorControl=1
 ServiceBinary=%12%\usbser.sys
 
 [Strings]
-Manufacturer="OpenDIAG"
+Manufacturer="Maximus64"
 DataPort="OpenDIAG Diagnostic Data Port"
 DebugPort="OpenDIAG Debug Console Port"
 ServiceName="Microsoft USB Serial Driver"

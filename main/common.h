@@ -4,6 +4,6 @@
 #include <stdint.h>
 
 /* Product identity, reported by AT @1 and by the control plane's ID. */
-#define OPENDIAG_MANUFACTURE "Dalalogic"
+#define OPENDIAG_MANUFACTURE "Maximus64"
 #define OPENDIAG_PRODUCT "OpenDiag"
 #define OPENDIAG_HARDWARE "rev1"

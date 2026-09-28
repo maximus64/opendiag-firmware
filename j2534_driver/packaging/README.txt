@@ -19,8 +19,8 @@ Install
 Windows XP SP3 USB CDC setup (32-bit x86 only)
 opendiag-cdc-xp.inf uses the Microsoft usbser.sys driver supplied with Windows.
 It supports the two CDC functions exposed by normal OpenDIAG firmware:
-  USB\VID_303A&PID_4002&MI_00 - OpenDIAG Diagnostic Data Port
-  USB\VID_303A&PID_4002&MI_02 - OpenDIAG Debug Console Port
+  USB\VID_1209&PID_D1A6&MI_00 - OpenDIAG Diagnostic Data Port
+  USB\VID_1209&PID_D1A6&MI_02 - OpenDIAG Debug Console Port
 
 1. Connect the OpenDIAG USB port while logged in as an administrator.
 2. In the Found New Hardware Wizard, select "No, not this time" for Windows

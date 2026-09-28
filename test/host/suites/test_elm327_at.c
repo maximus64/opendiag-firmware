@@ -139,7 +139,7 @@ TEST(a_line_longer_than_the_buffer_wraps_without_running_off_the_end) {
 TEST(at_at1_reports_the_device_name) {
     elm_echo_off();
 
-    TEST_ASSERT_EQUAL_STRING("Dalalogic OpenDiag (host-test)\r" ELM_PROMPT,
+    TEST_ASSERT_EQUAL_STRING("Maximus64 OpenDiag (host-test)\r" ELM_PROMPT,
                              elm_ask("AT@1\r"));
 }
 
