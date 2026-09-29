@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenDiag Firmware Update</title>
+    <meta name="description" content="Flash the latest OpenDiag firmware straight from your browser.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #14171c;
+            --bg-glow: #1d222b;
+            --card: #20242c;
+            --card-edge: #2f3540;
+            --ink: #e8eaee;
+            --ink-dim: #9aa3b2;
+            --brand: #6abd48;
+            --accent: #f1b430;
+            --accent-ink: #1a1205;
+            --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+        }
+
+        * { box-sizing: border-box; }
+
+        html {
+            background: var(--bg);
+            -webkit-text-size-adjust: 100%;
+        }
+
+        body {
+            margin: 0;
+            padding: 48px 20px 72px;
+            min-height: 100vh;
+            font-family: "Chakra Petch", system-ui, -apple-system, "Segoe UI", sans-serif;
+            font-size: 16px;
+            line-height: 1.6;
+            color: var(--ink);
+            background:
+                radial-gradient(520px 260px at 50% 2%, rgba(106, 189, 72, 0.09), transparent 72%),
+                radial-gradient(900px 500px at 50% -10%, var(--bg-glow), transparent 70%),
+                var(--bg);
+        }
+
+        .wrap {
+            max-width: 720px;
+            margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            gap: 28px;
+        }
+
+        /* ---------- header ---------- */
+
+        header {
+            text-align: center;
+        }
+
+        .logo-stage {
+            position: relative;
+            width: min(100%, 430px);
+            height: 190px;
+            margin: 0 auto 2px;
+            overflow: hidden;
+            isolation: isolate;
+        }
+
+        .logo-stage::before {
+            content: "";
+            position: absolute;
+            z-index: -2;
+            top: 50%;
+            left: 8%;
+            right: 8%;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, rgba(106, 189, 72, 0.55) 22%, rgba(106, 189, 72, 0.55) 78%, transparent);
+            box-shadow: 0 -34px 0 rgba(106, 189, 72, 0.08), 0 34px 0 rgba(106, 189, 72, 0.08);
+        }
+
+        .logo-stage::after {
+            content: "";
+            position: absolute;
+            z-index: -1;
+            inset: 26px 75px;
+            border-radius: 50%;
+            background: rgba(106, 189, 72, 0.12);
+            filter: blur(30px);
+        }
+
+        .brand-logo {
+            position: absolute;
+            top: -55px;
+            left: 50%;
+            width: 300px;
+            height: 300px;
+            transform: translateX(-50%);
+            filter: drop-shadow(0 10px 22px rgba(0, 0, 0, 0.3));
+        }
+
+        h1 {
+            margin: 4px 0 6px;
+            font-size: clamp(28px, 6vw, 40px);
+            font-weight: 700;
+            letter-spacing: -0.01em;
+        }
+
+        .tagline {
+            margin: 0;
+            color: var(--ink-dim);
+        }
+
+        .version {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 18px;
+            padding: 7px 14px;
+            border: 1px solid var(--card-edge);
+            border-radius: 999px;
+            background: var(--card);
+            font-family: var(--mono);
+            font-size: 13.5px;
+            color: var(--ink);
+        }
+
+        .version .dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: var(--brand);
+            box-shadow: 0 0 0 3px rgba(106, 189, 72, 0.16);
+        }
+
+        .version .label {
+            color: var(--ink-dim);
+        }
+
+        /* ---------- steps ---------- */
+
+        .card {
+            background: var(--card);
+            border: 1px solid var(--card-edge);
+            border-radius: 14px;
+            padding: 8px 26px;
+        }
+
+        ol.steps {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+            counter-reset: step;
+        }
+
+        ol.steps > li {
+            position: relative;
+            counter-increment: step;
+            padding: 22px 0 22px 52px;
+            border-bottom: 1px solid var(--card-edge);
+        }
+
+        ol.steps > li:last-child { border-bottom: none; }
+
+        ol.steps > li::before {
+            content: counter(step);
+            position: absolute;
+            left: 0;
+            top: 20px;
+            width: 30px;
+            height: 30px;
+            display: grid;
+            place-items: center;
+            border-radius: 50%;
+            background: var(--accent);
+            color: var(--accent-ink);
+            font-weight: 700;
+            font-size: 15px;
+        }
+
+        ol.steps h2 {
+            margin: 0 0 4px;
+            font-size: 17px;
+            font-weight: 600;
+        }
+
+        ol.steps p {
+            margin: 0;
+            color: var(--ink-dim);
+        }
+
+        ol.steps ul {
+            margin: 10px 0 0;
+            padding-left: 20px;
+            color: var(--ink-dim);
+        }
+
+        ol.steps ul li { margin-bottom: 6px; }
+        ol.steps ul li:last-child { margin-bottom: 0; }
+
+        b, strong { color: var(--ink); font-weight: 600; }
+
+        code {
+            font-family: var(--mono);
+            font-size: 0.92em;
+            padding: 1px 6px;
+            border-radius: 5px;
+            background: rgba(255, 255, 255, 0.07);
+        }
+
+        /* ---------- install button ---------- */
+
+        .install {
+            margin-top: 18px;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 12px;
+        }
+
+        .install button {
+            font: inherit;
+            font-size: 17px;
+            font-weight: 700;
+            padding: 12px 26px;
+            border: none;
+            border-radius: 999px;
+            background: var(--accent);
+            color: var(--accent-ink);
+            cursor: pointer;
+            box-shadow: 0 4px 14px rgba(241, 180, 48, 0.28);
+            transition: transform 0.12s ease, box-shadow 0.12s ease, filter 0.12s ease;
+        }
+
+        .install button:hover {
+            filter: brightness(1.06);
+            box-shadow: 0 6px 20px rgba(241, 180, 48, 0.38);
+        }
+
+        .install button:active { transform: translateY(1px); }
+
+        .install button:focus-visible {
+            outline: 2px solid var(--ink);
+            outline-offset: 3px;
+        }
+
+        .note {
+            font-size: 14px;
+            color: var(--ink-dim);
+        }
+
+        .warn {
+            margin: 0;
+            padding: 12px 16px;
+            border-left: 3px solid var(--accent);
+            border-radius: 0 8px 8px 0;
+            background: rgba(241, 180, 48, 0.09);
+            color: var(--ink);
+            font-size: 14.5px;
+        }
+
+        /* ---------- footer ---------- */
+
+        footer {
+            text-align: center;
+            color: var(--ink-dim);
+            font-size: 14.5px;
+        }
+
+        .links {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 10px;
+            margin: 14px 0 0;
+            padding: 0;
+            list-style: none;
+        }
+
+        .links a {
+            display: inline-block;
+            padding: 8px 16px;
+            border: 1px solid var(--card-edge);
+            border-radius: 999px;
+            background: var(--card);
+            color: var(--ink);
+            text-decoration: none;
+            font-size: 14px;
+            transition: border-color 0.12s ease, color 0.12s ease;
+        }
+
+        .links a:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        @media (max-width: 520px) {
+            body { padding: 32px 14px 56px; }
+            .logo-stage { height: 170px; }
+            .brand-logo { top: -48px; width: 270px; height: 270px; }
+            .card { padding: 4px 18px; }
+            ol.steps > li { padding-left: 44px; }
+            .install button { width: 100%; }
+        }
+    </style>
+    <script type="module" src="https://unpkg.com/@zjwhitehead/esp-web-tools@10.2.0-b1/dist/web/install-button.js?module"></script>
+</head>
+
+<body>
+    <div class="wrap">
+        <header>
+            <div class="logo-stage">
+                <img class="brand-logo" src="logo.svg" alt="OpenDiag">
+            </div>
+            <h1>Firmware Update Tool</h1>
+            <p class="tagline">Flash your OpenDiag adapter straight from this page — no drivers, no toolchain.</p>
+            <div class="version">
+                <span class="dot" aria-hidden="true"></span>
+                <span class="label">Latest release</span>
+                <span id="fw-version">checking…</span>
+            </div>
+        </header>
+
+        <div class="card">
+            <ol class="steps">
+                <li>
+                    <h2>Hold the button</h2>
+                    <p>Press and hold the button on the OpenDiag device — keep holding it through the next step.</p>
+                </li>
+                <li>
+                    <h2>Plug in the USB cable</h2>
+                    <p>While still holding the button, connect OpenDiag to your computer's USB port. Release the button
+                        once it's plugged in.</p>
+                </li>
+                <li>
+                    <h2>Start the update</h2>
+                    <p>Your browser will ask you to pick a device:</p>
+                    <ul>
+                        <li>Select the one called <b>"USB JTAG/serial debug unit"</b>.</li>
+                        <li>If it isn't listed, unplug the device and repeat steps 1 and 2.</li>
+                    </ul>
+                    <div class="install">
+                        <esp-web-install-button manifest="firmware/manifest.json">
+                            <button slot="activate">Begin Firmware Update</button>
+                            <p slot="unsupported" class="warn">Your browser can't talk to serial devices. Use
+                                <b>desktop Chrome or Edge</b> — mobile browsers are not supported.</p>
+                            <p slot="not-allowed" class="warn">This page must be served over HTTPS (or from
+                                <code>localhost</code>) to flash firmware.</p>
+                        </esp-web-install-button>
+                        <p class="note">When the update finishes, unplug OpenDiag and plug it back in normally.</p>
+                    </div>
+                </li>
+            </ol>
+        </div>
+
+        <p class="warn">Requires <b>desktop Chrome or Edge</b>. Mobile browsers, Safari, and Firefox cannot access USB
+            serial devices.</p>
+
+        <footer>
+            <p>OpenDiag is open source — grab the code:</p>
+            <ul class="links">
+                <li><a href="https://github.com/maximus64/opendiag-hardware">Hardware Design</a></li>
+                <li><a href="https://github.com/maximus64/opendiag-firmware">Firmware</a></li>
+                <li><a href="https://github.com/maximus64/opendiag-cli">CLI</a></li>
+            </ul>
+        </footer>
+    </div>
+
+    <script>
+        // Show the version from the same manifest the install button flashes,
+        // so this line can't go stale when new firmware is synced.
+        fetch("firmware/manifest.json", { cache: "no-store" })
+            .then((r) => r.json())
+            .then((m) => {
+                document.getElementById("fw-version").textContent = m.version || "unknown";
+            })
+            .catch(() => {
+                document.getElementById("fw-version").textContent = "unavailable";
+            });
+    </script>
+</body>
+
+</html>

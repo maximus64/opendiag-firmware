@@ -98,6 +98,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+      actions: write
     steps:
       - name: Download verified firmware package
         uses: actions/download-artifact@v8
@@ -136,3 +137,12 @@ jobs:
             dist/opendiag-firmware.zip \
             dist/opendiag-j2534-driver.zip \
             "${release_flags[@]}"
+
+      # A release made with GITHUB_TOKEN does not trigger other workflows, so ask for the docs
+      # rebuild explicitly. It runs on main, which the github-pages environment allows to deploy.
+      - name: Republish the firmware update page
+        if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run docs.yml --ref main

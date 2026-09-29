@@ -1,0 +1,40 @@
+site_name: OpenDIAG
+site_url: https://maximus64.github.io/opendiag-firmware/
+repo_url: https://github.com/maximus64/opendiag-firmware
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+nav:
+  - Home: index.md
+  - User manual: manual.md
+  - ELM327 commands: at_commands.md
+  - Firmware update: update/index.html
+
+theme:
+  name: material
+  logo: assets/logo.svg
+  favicon: assets/logo.svg
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle: { icon: material/brightness-7, name: Dark mode }
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle: { icon: material/brightness-4, name: Light mode }
+  features:
+    - navigation.instant
+    - navigation.top
+    - toc.follow
+    - search.highlight
+    - content.code.copy
+
+plugins:
+  - search
+  - gh-admonitions        # renders the manual's > [!WARNING] boxes
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc: { permalink: true }
+  - pymdownx.superfences
+  - pymdownx.highlight

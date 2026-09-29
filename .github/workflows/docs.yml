@@ -1,0 +1,70 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths: ["docs/**", "mkdocs.yml", ".github/workflows/docs.yml"]
+  pull_request:
+    branches: [main, dev]
+    paths: ["docs/**", "mkdocs.yml", ".github/workflows/docs.yml"]
+  # Also dispatched by firmware.yml after a release, so the update page serves the new firmware.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build MkDocs site
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install MkDocs
+        # MkDocs 2.0 drops the plugin and theme system Material depends on.
+        run: pip install "mkdocs<2" mkdocs-material mkdocs-github-admonitions-plugin
+
+      # --strict turns broken links and missing files into failures, so a PR catches them.
+      - name: Build
+        run: mkdocs build --strict -d site
+
+      # The web installer on update/ flashes whatever is in update/firmware/. The release ZIP's
+      # manifest.json is already in ESP Web Tools format, so the latest release is unpacked as-is.
+      - name: Add latest firmware release to the update page
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release download --pattern opendiag-firmware.zip --dir "$RUNNER_TEMP"
+          unzip "$RUNNER_TEMP/opendiag-firmware.zip" -d site/update/firmware
+          (cd site/update/firmware && sha256sum --check SHA256SUMS)
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

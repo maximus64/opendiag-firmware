@@ -6,7 +6,7 @@
 #include <stdexcept>
 
 static const UINT WM_CHECK_FINISHED = WM_APP + 1;
-static const char UPDATE_URL[] = "https://dalalogic.com/opendiag/update";
+static const char UPDATE_URL[] = "https://maximus64.github.io/opendiag-firmware/update/";
 
 struct Application {
     HWND window;
