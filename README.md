@@ -9,6 +9,11 @@ found on an OBD-II connector.
 > everything it does to a vehicle is your responsibility. See
 > [Disclaimer](#disclaimer).
 
+## Documentation
+
+The documentation is at **[maximus64.github.io/opendiag-firmware](https://maximus64.github.io/opendiag-firmware/)**:
+
+
 ## Features
 
 *   **ELM327 Compatible:** Provides an AT command set over USB and BLE, ensuring drop-in compatibility with existing ELM327-supported OBD-II software.
