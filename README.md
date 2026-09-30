@@ -11,7 +11,7 @@ found on an OBD-II connector.
 
 ## Documentation
 
-The documentation is at **[maximus64.github.io/opendiag-firmware](https://maximus64.github.io/opendiag-firmware/)**:
+The documentation is at **[maximus64.github.io/opendiag-firmware](https://maximus64.github.io/opendiag-firmware/)**
 
 
 ## Features
