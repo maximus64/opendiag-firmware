@@ -177,6 +177,9 @@ static void on_alarm(int sig) {
  * Runner
  * ------------------------------------------------------------------ */
 
+__attribute__((weak)) void td_setup(void) {}
+__attribute__((weak)) void td_teardown(void) {}
+
 int main(int argc, char **argv) {
     const char *filter = NULL;
     int run = 0, passed = 0;
@@ -207,18 +210,14 @@ int main(int argc, char **argv) {
 
         g_in_test = 1;
         if (setjmp(g_abort_test) == 0) {
-            if (td_setup) {
-                td_setup();
-            }
+            td_setup();
             g_cases[i].fn();
         }
         g_in_test = 0;
 
         /* Runs even when the body aborted, so a fixture that owns resources
          * still gets to release them. */
-        if (td_teardown) {
-            td_teardown();
-        }
+        td_teardown();
 
         alarm(0);
 

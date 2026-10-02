@@ -4,15 +4,14 @@ import argparse
 from contextlib import contextmanager
 import ctypes as c
 from pathlib import Path
-import shutil
 import tempfile
 import time
 import unittest
 
 import mock_peer
-from run_tests import Server, configure
+from run_tests import Server, add_library_arguments, configure, install_libraries
 
-BUILD = None
+LIBRARIES = None
 U32 = c.c_uint32
 
 
@@ -92,10 +91,9 @@ class LegacyIOTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary, Server(Peer) as server:
             root = Path(temporary)
-            for name in ("libopendiag.so", "libopendiag0404.so"):
-                shutil.copyfile(BUILD / name, root / name)
+            _, legacy = install_libraries(*LIBRARIES, root)
             configure(root, server.port)
-            session = Session(root / "libopendiag0404.so", protocol)
+            session = Session(legacy, protocol)
             try:
                 yield session, operations
             finally:
@@ -227,7 +225,7 @@ class LegacyIOTests(unittest.TestCase):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--build", type=Path, required=True)
+    add_library_arguments(parser)
     args, remaining = parser.parse_known_args()
-    BUILD = args.build.resolve()
+    LIBRARIES = args.native.resolve(), args.legacy.resolve()
     unittest.main(argv=[__file__, *remaining])

@@ -8,15 +8,14 @@ import argparse
 from contextlib import contextmanager
 import ctypes as c
 from pathlib import Path
-import shutil
 import tempfile
 import unittest
 
 from firmware_peer import Firmware
 from mock_peer import pb
-from run_tests import Server, configure
+from run_tests import Server, add_library_arguments, configure, install_libraries
 
-BUILD = None
+LIBRARIES = None
 FIRMWARE = None
 U32 = c.c_uint32
 START_REPEAT = 0x8004
@@ -89,12 +88,11 @@ def require_success(status, operation):
 
 
 class Session:
-    def __init__(self, root, version):
+    def __init__(self, library, version):
         self.version = version
         self.message_type = Message0404 if version == "0404" else Message0500
         self.repeat_type = Repeat0404 if version == "0404" else Repeat0500
-        name = "libopendiag0404.so" if version == "0404" else "libopendiag.so"
-        self.api = c.CDLL(str(root / name))
+        self.api = c.CDLL(str(library))
         msg = c.POINTER(self.message_type)
         connect = [U32, U32, U32, U32]
         if version == "0500":
@@ -234,12 +232,11 @@ class ContractTests(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory(prefix="opendiag-repeat-") as temporary:
                 root = Path(temporary)
-                for name in ("libopendiag.so", "libopendiag0404.so"):
-                    shutil.copyfile(BUILD / name, root / name)
+                native, legacy = install_libraries(*LIBRARIES, root)
                 peer = firmware.peer_type() if peer_factory is None else peer_factory(firmware)
                 with Server(peer) as server:
                     configure(root, server.port)
-                    session = Session(root, version)
+                    session = Session(legacy if version == "0404" else native, version)
                     try:
                         name = b"J2534-1:" if version == "0500" else None
                         require_success(session.api.PassThruOpen(name, c.byref(session.device)), "PassThruOpen")
@@ -1019,8 +1016,9 @@ class IntegrationTests(ContractTests):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--build", type=Path, required=True)
+    add_library_arguments(parser)
     parser.add_argument("--firmware", type=Path, required=True)
     args, remaining = parser.parse_known_args()
-    BUILD, FIRMWARE = args.build.resolve(), args.firmware.resolve()
+    LIBRARIES = args.native.resolve(), args.legacy.resolve()
+    FIRMWARE = args.firmware.resolve()
     unittest.main(argv=[__file__] + remaining, verbosity=2)

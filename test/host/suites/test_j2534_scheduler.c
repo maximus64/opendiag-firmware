@@ -6,7 +6,6 @@
 
 static j2534_scheduler_t scheduler;
 void td_setup(void) { memset(&scheduler, 0, sizeof(scheduler)); }
-void td_teardown(void) {}
 
 static j2534_schedule_job_t *create(j2534_schedule_kind_t kind, uint32_t id) {
     j2534_schedule_job_t *job =

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "platform.h"
+#include "posix.h"
 #include <arpa/inet.h>
 #include <cerrno>
 #include <climits>
@@ -17,9 +18,6 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/syscall.h>
-#include <sys/uio.h>
-#include <termios.h>
 #include <unistd.h>
 
 namespace platform {
@@ -38,10 +36,6 @@ void sleepMs(uint32_t duration) {
 
 uint32_t processId() {
     return static_cast<uint32_t>(getpid());
-}
-
-uint32_t threadId() {
-    return static_cast<uint32_t>(syscall(SYS_gettid));
 }
 
 ErrorPreserver::ErrorPreserver()
@@ -153,19 +147,6 @@ void *findSymbol(Library library, const char *name) {
 
 void closeLibrary(Library library) {
     dlclose(library);
-}
-
-const char *nativeLibraryName() {
-    return "libopendiag.so";
-}
-
-bool readValue(const J2534_ULONG *source, J2534_ULONG &value) {
-    if (!source) {
-        return false;
-    }
-    iovec local = {&value, sizeof(value)};
-    iovec remote = {const_cast<J2534_ULONG *>(source), sizeof(value)};
-    return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == sizeof(value);
 }
 
 void appendLog(const char *path, const char *line, uint32_t maximumBytes) {
@@ -284,7 +265,7 @@ void Stream::close() {
 
 void Stream::openTcp(const std::string &host, unsigned port, uint32_t timeout) {
     close();
-    socket_ = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    socket_ = openTcpSocket();
     if (socket_ < 0) {
         throw std::runtime_error("Socket creation failed");
     }
@@ -310,29 +291,8 @@ void Stream::openTcp(const std::string &host, unsigned port, uint32_t timeout) {
     setsockopt(file, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
 }
 
-static speed_t serialSpeed(unsigned baud) {
-    struct Speed {
-        unsigned value;
-        speed_t setting;
-    };
-    static const Speed speeds[] = {
-        {300, B300},         {600, B600},         {1200, B1200},       {2400, B2400},
-        {4800, B4800},       {9600, B9600},       {19200, B19200},     {38400, B38400},
-        {57600, B57600},     {115200, B115200},   {230400, B230400},   {460800, B460800},
-        {500000, B500000},   {576000, B576000},   {921600, B921600},   {1000000, B1000000},
-        {1152000, B1152000}, {1500000, B1500000}, {2000000, B2000000}, {2500000, B2500000},
-        {3000000, B3000000}, {3500000, B3500000}, {4000000, B4000000}};
-    for (const Speed &speed : speeds) {
-        if (speed.value == baud) {
-            return speed.setting;
-        }
-    }
-    throw std::runtime_error("Unsupported serial baud rate");
-}
-
 void Stream::openCom(const std::string &name, unsigned baud) {
     close();
-    speed_t speed = serialSpeed(baud);
     serial_ = ::open(name.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
     if (serial_ < 0) {
         throw std::runtime_error("Cannot open the configured serial device");
@@ -347,8 +307,8 @@ void Stream::openCom(const std::string &name, unsigned baud) {
     settings.c_cflag |= CLOCAL | CREAD;
     settings.c_cc[VMIN] = 1;
     settings.c_cc[VTIME] = 0;
-    if (cfsetispeed(&settings, speed) || cfsetospeed(&settings, speed) ||
-        tcsetattr(file, TCSANOW, &settings) || tcflush(file, TCIOFLUSH)) {
+    configureSerial(file, settings, baud);
+    if (tcflush(file, TCIOFLUSH)) {
         throw std::runtime_error("Serial configuration failed");
     }
     int lines = TIOCM_DTR | TIOCM_RTS;

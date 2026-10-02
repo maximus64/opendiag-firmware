@@ -42,9 +42,10 @@ void td_register(const char *name, td_test_fn fn, const char *file);
     }                                                                          \
     static void name(void)
 
-/* Optional per-test fixture hooks, supplied by the suite. */
-void td_setup(void) __attribute__((weak));
-void td_teardown(void) __attribute__((weak));
+/* Per-test fixture hooks. The framework's defaults do nothing; a suite that
+ * defines either one replaces the default at link time. */
+void td_setup(void);
+void td_teardown(void);
 
 /* ------------------------------------------------------------------ *
  * Assertions

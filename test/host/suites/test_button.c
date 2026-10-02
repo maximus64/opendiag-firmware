@@ -60,7 +60,6 @@ void td_setup(void) {
     g_on_click = on_click;
 }
 
-void td_teardown(void) {}
 
 /* ------------------------------------------------------------------ *
  * Setup

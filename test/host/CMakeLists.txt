@@ -180,7 +180,11 @@ set(test_j2534_FW ${test_slcan_FW} ${FW_DIR}/j2534.c
 add_library(j2534_contract_firmware SHARED EXCLUDE_FROM_ALL
     fakes/j2534_contract_firmware.c ${test_j2534_FW})
 target_link_libraries(j2534_contract_firmware PRIVATE td_fakes td_framework)
-target_link_options(j2534_contract_firmware PRIVATE -Wl,--no-undefined)
+if(APPLE)
+    target_link_options(j2534_contract_firmware PRIVATE -Wl,-undefined,error)
+else()
+    target_link_options(j2534_contract_firmware PRIVATE -Wl,--no-undefined)
+endif()
 
 if(COVERAGE)
     if(CMAKE_C_COMPILER_ID MATCHES "Clang")

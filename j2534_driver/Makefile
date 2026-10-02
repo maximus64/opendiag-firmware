@@ -16,8 +16,18 @@ CXX := $(CROSS_COMPILE)g++
 endif
 endif
 
-BUILD_PLATFORM := $(if $(findstring mingw,$(shell $(CC) -dumpmachine)),win32,host)
-BUILD_DIR ?= build/$(BUILD_PLATFORM)/$(CONFIG)
+# The one place the target OS is decided; everything below keys off TARGET_OS.
+TARGET_TRIPLE := $(shell $(CC) -dumpmachine)
+ifneq ($(findstring -mingw32,$(TARGET_TRIPLE)),)
+TARGET_OS := win32
+else ifneq ($(findstring -darwin,$(TARGET_TRIPLE)),)
+TARGET_OS := darwin
+else ifneq ($(findstring -linux,$(TARGET_TRIPLE)),)
+TARGET_OS := linux
+else
+$(error Unsupported target "$(TARGET_TRIPLE)" from $(CC); expected Linux, macOS or MinGW)
+endif
+BUILD_DIR ?= build/$(TARGET_OS)/$(CONFIG)
 
 NANOPB_DIR := ../components/nanopb/upstream
 PROTOCOL_DIR := ../protocol
@@ -49,7 +59,7 @@ LEGACY := legacy/legacy.cpp legacy/exports.cpp legacy/backend.cpp legacy/dllmain
 NANOPB_SOURCES := pb_common.c pb_encode.c pb_decode.c
 GUI := config/main.cpp config/settings.cpp config/connection.cpp
 
-ifeq ($(BUILD_PLATFORM),win32)
+ifeq ($(TARGET_OS),win32)
 RC ?= $(CROSS_COMPILE)windres
 CPPFLAGS += -DWIN32_LEAN_AND_MEAN -DNOMINMAX -DWINVER=0x0501 -D_WIN32_WINNT=0x0501
 CPPFLAGS += -D__USE_MINGW_ANSI_STDIO=1
@@ -69,13 +79,19 @@ LEGACY_LINK := legacy/odg40432.def $(BUILD_DIR)/legacy/version.res
 CORE_LDFLAGS := -Wl,--image-base,0x65000000
 LEGACY_LDFLAGS := -Wl,--image-base,0x66000000
 else
-PLATFORM := platform/posix.cpp
+ifeq ($(TARGET_OS),linux)
 CPPFLAGS += -D_GNU_SOURCE
+LDLIBS += -ldl
+SHARED_EXT := so
+else
+SHARED_EXT := dylib
+endif
+PLATFORM := platform/posix.cpp platform/$(TARGET_OS).cpp
 CFLAGS += -fPIC -fvisibility=hidden
 CXXFLAGS += -fPIC -fvisibility=hidden -fvisibility-inlines-hidden
-LDLIBS += -ldl -pthread
-NATIVE_LIB := $(BUILD_DIR)/libopendiag.so
-LEGACY_LIB := $(BUILD_DIR)/libopendiag0404.so
+LDLIBS += -pthread
+NATIVE_LIB := $(BUILD_DIR)/libopendiag.$(SHARED_EXT)
+LEGACY_LIB := $(BUILD_DIR)/libopendiag0404.$(SHARED_EXT)
 PRODUCTS := $(NATIVE_LIB) $(LEGACY_LIB)
 endif
 
@@ -94,7 +110,7 @@ $(CONFIG_STAMP): FORCE
 
 $(sort $(CORE_OBJECTS) $(LEGACY_OBJECTS) $(GUI_OBJECTS)) $(BUILD_DIR)/tests/abi0404.o $(BUILD_DIR)/tests/abi0500.o: $(CONFIG_STAMP) Makefile
 $(call objects,$(CORE)): $(GENERATED_DIR)/j2534.pb.h
-ifeq ($(BUILD_PLATFORM),win32)
+ifeq ($(TARGET_OS),win32)
 $(BUILD_DIR)/driver/version.res $(BUILD_DIR)/legacy/version.res $(BUILD_DIR)/config/config.res: $(CONFIG_STAMP) Makefile
 $(BUILD_DIR)/config/config.res: config/resource.h
 endif
@@ -110,7 +126,7 @@ $(GENERATED_DIR)/j2534.pb.c $(GENERATED_DIR)/j2534.pb.h &: $(PROTOCOL_DIR)/j2534
 	@mkdir -p "$(GENERATED_DIR)"
 	NANOPB_PB2_TEMP_DIR="$(abspath $(GENERATED_DIR))" $(PYTHON) -B "$(NANOPB_GENERATOR)" -I "$(PROTOCOL_DIR)" -D "$(GENERATED_DIR)" "$<"
 
-ifeq ($(BUILD_PLATFORM),win32)
+ifeq ($(TARGET_OS),win32)
 $(CORE_OBJECTS) $(LEGACY_OBJECTS) $(GUI_OBJECTS): | check-toolchain
 check-toolchain:
 	@$(PYTHON) tools/check_toolchain.py --cc "$(CC)" --cxx "$(CXX)"
@@ -151,9 +167,19 @@ $(BUILD_DIR)/opendiag.ini:
 	@mkdir -p "$(@D)"
 	cp opendiag.ini "$@"
 
-ifeq ($(BUILD_PLATFORM),host)
-test: all repeat-test
-	$(PYTHON) tests/run_tests.py --build "$(abspath $(BUILD_DIR))" --cxx "$(CXX)" --cc "$(CC)"
+ifneq ($(TARGET_OS),win32)
+API_TESTS := $(BUILD_DIR)/tests/api0500 $(BUILD_DIR)/tests/api0404
+HOST_TESTS := $(BUILD_DIR)/tests/platform_test $(API_TESTS) $(BUILD_DIR)/tests/abi0404.o $(BUILD_DIR)/tests/abi0500.o
+TEST_OBJECTS := $(call objects,tests/platform_test.cpp tests/api0500.cpp tests/api0404.cpp)
+$(TEST_OBJECTS): $(CONFIG_STAMP) Makefile
+$(BUILD_DIR)/tests/platform_test: $(call objects,tests/platform_test.cpp common/api_trace.cpp $(PLATFORM_SOURCES))
+	$(CXX) $(LDFLAGS) -o "$@" $^ $(LDLIBS)
+$(API_TESTS): $(BUILD_DIR)/tests/%: $(BUILD_DIR)/tests/%.o $(call objects,$(PLATFORM_SOURCES))
+	$(CXX) $(LDFLAGS) -o "$@" $^ $(LDLIBS)
+LIBRARY_ARGS = --native "$(abspath $(NATIVE_LIB))" --legacy "$(abspath $(LEGACY_LIB))"
+
+test: all repeat-test $(HOST_TESTS)
+	$(PYTHON) tests/run_tests.py --build "$(abspath $(BUILD_DIR))" $(LIBRARY_ARGS)
 HOST_TEST_BUILD ?= ../test/host/build
 $(GENERATED_DIR)/j2534_pb2.py: $(PROTOCOL_DIR)/j2534.proto
 	@mkdir -p "$(@D)"
@@ -163,8 +189,8 @@ repeat-test: all $(GENERATED_DIR)/j2534_pb2.py
 	cmake -S ../test/host -B "$(HOST_TEST_BUILD)"
 	cmake --build "$(HOST_TEST_BUILD)" --target j2534_contract_firmware
 	OPENDIAG_TEST_PROTO_DIR="$(abspath $(GENERATED_DIR))" \
-		$(PYTHON) tests/test_repeat_messages.py --build "$(abspath $(BUILD_DIR))" \
-		--firmware "$(abspath $(HOST_TEST_BUILD))/libj2534_contract_firmware.so"
+		$(PYTHON) tests/test_repeat_messages.py $(LIBRARY_ARGS) \
+		--firmware "$(abspath $(HOST_TEST_BUILD))/libj2534_contract_firmware.$(SHARED_EXT)"
 check-wincompat package:
 	@echo "$@ requires Windows artifacts; use: docker compose run --rm --build j2534-driver" >&2; exit 2
 else
@@ -179,4 +205,5 @@ endif
 clean:
 	$(PYTHON) -c 'import shutil; shutil.rmtree("$(BUILD_DIR)", ignore_errors=True)'
 
--include $(sort $(CORE_OBJECTS:.o=.d) $(LEGACY_OBJECTS:.o=.d) $(GUI_OBJECTS:.o=.d))
+-include $(sort $(CORE_OBJECTS:.o=.d) $(LEGACY_OBJECTS:.o=.d) $(GUI_OBJECTS:.o=.d) \
+    $(TEST_OBJECTS:.o=.d) $(BUILD_DIR)/tests/abi0404.d $(BUILD_DIR)/tests/abi0500.d)
