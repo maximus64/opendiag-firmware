@@ -131,6 +131,55 @@ def test_ownership(native_path, legacy_path, peer):
     print("PASS cross-API ownership and deterministic concurrent-call rejection")
 
 
+def test_contract_mismatch(native_path, legacy_path, peer):
+    """A protocol mismatch must name the offending field instead of failing blind."""
+    cases = [({"wire_version": 2}, "wire 2, driver needs 1"),
+             ({"api_version": 0x404}, "API 0404, driver needs 0500"),
+             ({"fragment_bytes": 256}, "fragment 256, driver needs 192"),
+             ({"rpc_bytes": 2048}, "RPC 2048, driver needs 4608"),
+             (None, "firmware reported no capabilities")]
+
+    with tempfile.TemporaryDirectory(prefix="opendiag-contract-") as temporary:
+        directory = Path(temporary)
+        native_path, legacy_path = install_libraries(native_path, legacy_path, directory)
+        native = ctypes.CDLL(str(native_path))
+        legacy = ctypes.CDLL(str(legacy_path))
+        for library in (native, legacy):
+            library.PassThruOpen.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint32)]
+            library.PassThruOpen.restype = ctypes.c_int32
+            library.PassThruGetLastError.argtypes = [ctypes.c_char_p]
+            library.PassThruGetLastError.restype = ctypes.c_int32
+
+        for overrides, expected in cases:
+            class MismatchedPeer(peer.Peer):
+                def respond(self, request, fields=overrides):
+                    response = super().respond(request)
+                    if request.WhichOneof("command") == "capabilities":
+                        if fields is None:
+                            response.ClearField("capabilities")
+                        else:
+                            for key, value in fields.items():
+                                setattr(response.capabilities, key, value)
+                    return response
+
+            identifier = ctypes.c_uint32()
+            text = ctypes.create_string_buffer(80)
+            with Server(MismatchedPeer) as server:
+                configure(directory, server.port, logging=1)
+                assert native.PassThruOpen(b"J2534-1:OpenDIAG",
+                                           ctypes.byref(identifier)) == 0x22, expected
+                native.PassThruGetLastError(text)
+                reported = text.value.decode()
+                assert expected in reported, f"05.00 lost {expected!r}: {reported!r}"
+                assert "update one of them" in reported, reported
+                # 04.04 reports ERR_DEVICE_NOT_CONNECTED but must forward the reason.
+                assert legacy.PassThruOpen(None, ctypes.byref(identifier)) == 0x08, expected
+                legacy.PassThruGetLastError(text)
+                reported = text.value.decode()
+                assert expected in reported, f"04.04 lost {expected!r}: {reported!r}"
+    print(f"PASS {len(cases)} protocol-mismatch reports reach both APIs")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build", type=Path, required=True)
@@ -179,6 +228,7 @@ def main():
                 if not logs or not any("END status=" in path.read_text() for path in logs):
                     raise RuntimeError("API logging produced no return records")
     test_ownership(args.native, args.legacy, peer)
+    test_contract_mismatch(args.native, args.legacy, peer)
     subprocess.run([sys.executable, str(project / "tests/test_legacy_io.py"),
                     "--native", str(args.native), "--legacy", str(args.legacy)],
                    check=True, timeout=90)

@@ -17,7 +17,7 @@ struct AdapterSettings {
     unsigned logSizeKB;
 };
 
-std::string applicationDirectory();
+std::string installDirectory();
 AdapterSettings readSettings(const std::string &path);
 void validateSettings(const AdapterSettings &settings);
 void saveSettings(const std::string &path, const AdapterSettings &settings);

@@ -4,18 +4,54 @@
 #include <stdexcept>
 #include <stdio.h>
 
-std::string applicationDirectory() {
-    char path[MAX_PATH];
-    DWORD length = GetModuleFileNameA(NULL, path, sizeof(path));
-    if (!length || length >= sizeof(path)) {
-        throw std::runtime_error("The application path is too long.");
+static bool registryText(const char *key, const char *name, std::string &result) {
+    HKEY handle;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, key, 0, KEY_READ, &handle) != ERROR_SUCCESS) {
+        return false;
     }
-    char *filename = strrchr(path, '\\');
-    if (!filename) {
-        throw std::runtime_error("Cannot locate the application folder.");
+    char text[MAX_PATH];
+    DWORD size = sizeof(text);
+    DWORD type = 0;
+    LONG status = RegQueryValueExA(handle, name, NULL, &type, (BYTE *)text, &size);
+    RegCloseKey(handle);
+    if (status != ERROR_SUCCESS || type != REG_SZ || !size || size >= sizeof(text)) {
+        return false;
     }
-    filename[1] = 0;
-    return path;
+    text[size] = 0;
+    result = text;
+    return !result.empty();
+}
+
+// The installed DLL always reads opendiag.ini from its own folder, so the registered
+// FunctionLibrary is the only authority on which file the driver actually uses. Anchoring
+// here keeps this utility correct wherever it is started from.
+std::string installDirectory() {
+    static const char *const keys[] = {
+        "SOFTWARE\\PassThruSupport.05.00\\OpenDIAG - OpenDIAG",
+        "SOFTWARE\\PassThruSupport.04.04\\OpenDIAG - OpenDIAG",
+    };
+    for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
+        std::string library;
+        if (!registryText(keys[i], "FunctionLibrary", library)) {
+            continue;
+        }
+        size_t slash = library.find_last_of("\\/");
+        if (slash == std::string::npos) {
+            continue;
+        }
+        std::string directory = library.substr(0, slash + 1);
+        DWORD attributes = GetFileAttributesA(directory.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            throw std::runtime_error("OpenDIAG is registered at " + directory +
+                                     " but that folder is missing.\r\n\r\nReinstall with "
+                                     "install.cmd from an administrator command prompt.");
+        }
+        return directory;
+    }
+    throw std::runtime_error(
+        "OpenDIAG is not registered on this computer, so diagnostic applications cannot find "
+        "the adapter and there is no installed configuration to edit.\r\n\r\nRun install.cmd "
+        "from an administrator command prompt, then start this program again.");
 }
 
 static std::string readValue(const std::string &path, const char *key, const char *fallback) {

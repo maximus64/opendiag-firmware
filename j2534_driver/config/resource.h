@@ -16,3 +16,4 @@
 #define IDC_SAVE 1018
 #define IDC_STATUS 1019
 #define IDC_VERSIONS 1020
+#define IDC_INI_PATH 1021

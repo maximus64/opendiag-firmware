@@ -169,6 +169,24 @@ static J2534_LONG rpc(const opendiag_Request &request, opendiag_Response &respon
     }
 }
 
+// The firmware contract this driver was built against. A mismatch means firmware and
+// driver came from different protocol revisions, so name the field that differs instead
+// of failing blind: PassThruGetLastError is the only channel a host application has.
+static const uint32_t REQUIRED_WIRE = 1;
+static const uint32_t REQUIRED_API = 0x0500;
+static const uint32_t REQUIRED_FRAGMENT = 192;
+static const uint32_t REQUIRED_RPC = 4608;
+
+static bool contractMismatch(const char *field, uint32_t found, uint32_t needed) {
+    platform::format(detail,
+                     sizeof(detail),
+                     "firmware %s %u, driver needs %u; update one of them",
+                     field,
+                     (unsigned)found,
+                     (unsigned)needed);
+    return false;
+}
+
 static bool compatible(Link &link, opendiag_Capabilities *capabilities = NULL) {
     opendiag_Request request = {};
     opendiag_Response response = {};
@@ -183,9 +201,33 @@ static bool compatible(Link &link, opendiag_Capabilities *capabilities = NULL) {
     if (capabilities) {
         *capabilities = response.capabilities;
     }
-    return !response.status && response.has_capabilities &&
-           response.capabilities.wire_version == 1 && response.capabilities.api_version == 0x0500 &&
-           response.capabilities.fragment_bytes == 192 && response.capabilities.rpc_bytes == 4608;
+    if (response.status || !response.has_capabilities) {
+        platform::copyText(detail,
+                           sizeof(detail),
+                           "firmware reported no capabilities; update one of them");
+        return false;
+    }
+
+    const opendiag_Capabilities &caps = response.capabilities;
+    if (caps.wire_version != REQUIRED_WIRE) {
+        return contractMismatch("wire", caps.wire_version, REQUIRED_WIRE);
+    }
+    if (caps.api_version != REQUIRED_API) {
+        // J2534 API versions read as 0500/0404, so decimal would only confuse.
+        platform::format(detail,
+                         sizeof(detail),
+                         "firmware API %04X, driver needs %04X; update one of them",
+                         (unsigned)caps.api_version,
+                         (unsigned)REQUIRED_API);
+        return false;
+    }
+    if (caps.fragment_bytes != REQUIRED_FRAGMENT) {
+        return contractMismatch("fragment", caps.fragment_bytes, REQUIRED_FRAGMENT);
+    }
+    if (caps.rpc_bytes != REQUIRED_RPC) {
+        return contractMismatch("RPC", caps.rpc_bytes, REQUIRED_RPC);
+    }
+    return true;
 }
 
 J2534_LONG PassThruScanForDevices(J2534_ULONG *count) {

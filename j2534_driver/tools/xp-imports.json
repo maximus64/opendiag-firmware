@@ -142,7 +142,8 @@
     "advapi32.dll": [
       "RegCloseKey",
       "RegEnumValueA",
-      "RegOpenKeyExA"
+      "RegOpenKeyExA",
+      "RegQueryValueExA"
     ],
     "shell32.dll": [
       "ShellExecuteA"

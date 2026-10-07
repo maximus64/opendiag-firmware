@@ -46,6 +46,7 @@ static void updateControls(Application &app) {
     EnableWindow(GetDlgItem(app.window, IDC_LOG_SIZE),
                  !app.busy && checked(app.window, IDC_LOGGING));
     EnableWindow(GetDlgItem(app.window, IDC_STATUS), TRUE);
+    EnableWindow(GetDlgItem(app.window, IDC_INI_PATH), TRUE);
 }
 
 static void refreshPorts(Application &app) {
@@ -74,9 +75,8 @@ static void showSettings(Application &app) {
     CheckDlgButton(app.window, IDC_LOGGING, s.logging ? BST_CHECKED : BST_UNCHECKED);
     refreshPorts(app);
     setText(app.window, IDC_VERSIONS, driverVersions(app.directory));
-    setText(app.window,
-            IDC_STATUS,
-            "Settings: " + app.ini + "\r\nClose diagnostic software before testing the adapter.");
+    setText(app.window, IDC_INI_PATH, app.ini);
+    setText(app.window, IDC_STATUS, "Close diagnostic software before testing the adapter.");
     app.loading = false;
     app.dirty = false;
     updateControls(app);
@@ -239,7 +239,7 @@ static INT_PTR CALLBACK dialogProcedure(HWND window, UINT message, WPARAM wparam
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
     try {
         Application app = {};
-        app.directory = applicationDirectory();
+        app.directory = installDirectory();
         app.ini = app.directory + "opendiag.ini";
         app.settings = readSettings(app.ini);
         INT_PTR result = DialogBoxParamA(instance,
