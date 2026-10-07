@@ -101,22 +101,80 @@ ports:
 
 | Port | Name | Use |
 | --- | --- | --- |
-| First port | COM | **Data link.** Point your OBD-II, J2534 or SLCAN software here. |
-| Second port | DEBUG | **Debug shell** and control commands. See [The debug shell](#the-debug-shell). |
-
-Typical port names:
-
-- **Linux:** `/dev/ttyACM0` (data) and `/dev/ttyACM1` (shell)
-- **macOS:** two `/dev/cu.usbmodem…` devices. The lower-numbered one is the data port.
-- **Windows:** two COM ports in Device Manager. The lower-numbered one is the data port.
+| Data port | COM | Choose this port in your OBD-II, J2534 or SLCAN software. |
+| Debug port | DEBUG | Use this port to enter commands in [the debug shell](#the-debug-shell). |
 
 Windows 10 and 11, macOS, and Linux need no driver. Windows XP needs the INF that ships with the
 [J2534 driver package](#j2534-pass-thru-on-windows). These are virtual serial ports, so the baud
-rate you pick doesn't matter.
+rate you pick doesn't matter. The lower-numbered port is not always the data port. Follow the
+steps for your operating system below to find the right one.
 
-> [!TIP]
-> To tell the ports apart, open one and type `help` followed by Enter. The shell port lists its
-> commands. The data port answers `?`, as an ELM327 does to anything it doesn't recognise.
+### Linux
+
+Open a terminal and paste this command:
+
+```sh
+ls -l /dev/serial/by-id/usb-Maximus64_OpenDiag_*-if0*
+```
+
+For example, an adapter with serial number `1051DB7B22EC` may appear as:
+
+```text
+usb-Maximus64_OpenDiag_1051DB7B22EC-if00 -> ../../ttyACM0
+usb-Maximus64_OpenDiag_1051DB7B22EC-if02 -> ../../ttyACM1
+```
+
+| Name ends with | Choose it for |
+| --- | --- |
+| `-if00` | Diagnostic software (**COM**) |
+| `-if02` | Debug commands (**DEBUG**) |
+
+In your diagnostic software, use the full name starting with `/dev/serial/by-id/` and ending
+with `-if00`. This name stays the same even if Linux assigns a different `ttyACM` number later.
+If the software only lists `ttyACM` ports, choose the one shown after the arrow on the `-if00`
+line — `/dev/ttyACM0` in this example. Your number may be different.
+
+If several OpenDIAG adapters are connected, their serial numbers distinguish them.
+
+### macOS
+
+Open **Terminal** and paste this command. It lists the adapter's port details without connecting
+to either port:
+
+```sh
+ioreg -r -n OpenDiag -l -w 0 |
+  grep -E '\+-o|USB Serial Number|bInterfaceNumber|IOCalloutDevice'
+```
+
+The output contains several sections. To find the port for your diagnostic software:
+
+1. Find the line containing `"bInterfaceNumber" = 1`.
+2. In that section, find the `IOCalloutDevice` line below it.
+3. Copy the name beginning with `/dev/cu.` into your diagnostic software's port setting.
+
+For example, this shortened output identifies `/dev/cu.usbmodem12301` as the data port:
+
+```text
+    "bInterfaceNumber" = 1
+        "IOCalloutDevice" = "/dev/cu.usbmodem12301"
+```
+
+Your port name will be different. For the **debug port**, follow the same steps using
+`"bInterfaceNumber" = 3`. If several OpenDIAG adapters are connected, check the
+`USB Serial Number` line to find the one you want.
+
+### Windows
+
+1. Open **Device Manager** and expand **Ports (COM & LPT)**.
+2. Right-click one of the adapter's ports and choose **Properties**.
+3. Open the **Details** tab and select **Bus reported device description** from the list.
+4. If the value is **COM**, choose this port in your diagnostic software. **DEBUG** is for
+   debug commands.
+
+In the example below, COM9 is the debug port and COM10 is the data port. Your port numbers may
+differ.
+
+![Windows Device Manager showing the Bus reported device description as DEBUG for COM9 and COM for COM10](assets/win_usb_cdc_ports.png)
 
 ---
 
@@ -351,7 +409,7 @@ Commands are case-insensitive. A failed command replies with `ERR` and a reason.
 
 ## The debug shell
 
-Open the **second** USB serial port (DEBUG) in any terminal program, such as PuTTY, screen,
+Open the **DEBUG** USB serial port in any terminal program, such as PuTTY, screen,
 minicom, `idf.py monitor`, or `python tools/serial_term.py`, which adds highlighting. Type `help`
 for the list of commands.
 
@@ -458,7 +516,7 @@ Updating keeps your paired phones and the unit's voltage calibration.
 | **Save & Test** fails in `opendiag_config.exe` | Check you picked the **data** COM port, not the debug port, and that no other program has it open. |
 | SLCAN tool gets ELM327 replies | The link reverted when the port was last closed. Run `mode slcan` again before opening it. |
 | LED pulsing amber unexpectedly | A pin is still energised. Type `vif` in the shell to see who holds it, then `pinoff` if it's the shell. |
-| Shell port prints but doesn't accept typing | Make sure you opened the **second** port, and that your terminal sends a carriage return (Enter). |
+| Shell port prints but doesn't accept typing | Make sure you opened the **DEBUG** port, and that your terminal sends a carriage return (Enter). |
 | Nothing enumerates on USB | Try another cable (some are charge-only) and another USB port. |
 
 ---
