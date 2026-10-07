@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "legacy.h"
 #include "backend.h"
+#include "version.h"
 #include <algorithm>
 #include <deque>
 #include <map>
@@ -1078,7 +1079,7 @@ J2534_LONG PassThruReadVersion(J2534_ULONG id, char *firmware, char *dll, char *
         return ERR_NULL_PARAMETER;
     }
     firmware[0] = 0;
-    platform::copyText(dll, 80, "OpenDIAG 0.3.2");
+    platform::copyText(dll, 80, "OpenDIAG " OPENDIAG_VERSION_TAG);
     platform::copyText(api, 80, "04.04");
     if (!deviceId || id != deviceId) {
         return ERR_INVALID_DEVICE_ID;

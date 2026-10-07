@@ -1,4 +1,5 @@
 #include <windows.h>
+#include "version.h"
 #include "resource.h"
 
 IDD_CONFIG DIALOGEX 0, 0, 380, 317
@@ -41,8 +42,8 @@ BEGIN
 END
 
 1 VERSIONINFO
- FILEVERSION 0,1,1,0
- PRODUCTVERSION 0,1,1,0
+ FILEVERSION OPENDIAG_VERSION_FIELDS
+ PRODUCTVERSION OPENDIAG_VERSION_FIELDS
  FILEOS VOS_NT_WINDOWS32
  FILETYPE VFT_APP
 BEGIN
@@ -52,9 +53,9 @@ BEGIN
   BEGIN
    VALUE "CompanyName", "OpenDIAG\0"
    VALUE "FileDescription", "OpenDIAG Adapter Configuration\0"
-   VALUE "FileVersion", "0.1.1.0\0"
+   VALUE "FileVersion", OPENDIAG_VERSION_STRING "\0"
    VALUE "ProductName", "OpenDIAG\0"
-   VALUE "ProductVersion", "0.1.1.0\0"
+   VALUE "ProductVersion", OPENDIAG_VERSION_STRING "\0"
    VALUE "OriginalFilename", "opendiag_config.exe\0"
   END
  END

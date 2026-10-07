@@ -102,16 +102,21 @@ CORE_OBJECTS := $(call objects,$(CORE) $(PLATFORM_SOURCES)) $(NANOPB_OBJECTS) $(
 LEGACY_OBJECTS := $(call objects,$(LEGACY) $(PLATFORM_SOURCES))
 GUI_OBJECTS := $(call objects,$(GUI) $(PLATFORM_SOURCES))
 CONFIG_STAMP := $(BUILD_DIR)/.build-config
+VERSION_HEADER := $(GENERATED_DIR)/version.h
 
 .PHONY: FORCE
 $(CONFIG_STAMP): FORCE
 	@mkdir -p "$(@D)"
 	@$(PYTHON) tools/build_config.py "$@" "$(CC)" "$(CXX)" "$(RC)" "$(CPPFLAGS)" "$(CFLAGS)" "$(CXXFLAGS)" "$(LDFLAGS)" "$(LDLIBS)"
 
-$(sort $(CORE_OBJECTS) $(LEGACY_OBJECTS) $(GUI_OBJECTS)) $(BUILD_DIR)/tests/abi0404.o $(BUILD_DIR)/tests/abi0500.o: $(CONFIG_STAMP) Makefile
+$(VERSION_HEADER): FORCE
+	@mkdir -p "$(@D)"
+	@$(PYTHON) tools/version.py "$@"
+
+$(sort $(CORE_OBJECTS) $(LEGACY_OBJECTS) $(GUI_OBJECTS)) $(BUILD_DIR)/tests/abi0404.o $(BUILD_DIR)/tests/abi0500.o: $(CONFIG_STAMP) $(VERSION_HEADER) Makefile
 $(call objects,$(CORE)): $(GENERATED_DIR)/j2534.pb.h
 ifeq ($(TARGET_OS),win32)
-$(BUILD_DIR)/driver/version.res $(BUILD_DIR)/legacy/version.res $(BUILD_DIR)/config/config.res: $(CONFIG_STAMP) Makefile
+$(BUILD_DIR)/driver/version.res $(BUILD_DIR)/legacy/version.res $(BUILD_DIR)/config/config.res: $(CONFIG_STAMP) $(VERSION_HEADER) Makefile
 $(BUILD_DIR)/config/config.res: config/resource.h
 endif
 

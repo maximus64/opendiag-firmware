@@ -1,7 +1,8 @@
 #include <windows.h>
+#include "version.h"
 1 VERSIONINFO
- FILEVERSION 0,2,2,0
- PRODUCTVERSION 0,2,2,0
+ FILEVERSION OPENDIAG_VERSION_FIELDS
+ PRODUCTVERSION OPENDIAG_VERSION_FIELDS
  FILEOS VOS_NT_WINDOWS32
  FILETYPE VFT_DLL
 BEGIN
@@ -11,9 +12,9 @@ BEGIN
   BEGIN
    VALUE "CompanyName", "OpenDIAG\0"
    VALUE "FileDescription", "OpenDIAG J2534-1 05.00 Pass-Thru DLL\0"
-   VALUE "FileVersion", "0.2.2.0\0"
+   VALUE "FileVersion", OPENDIAG_VERSION_STRING "\0"
    VALUE "ProductName", "OpenDIAG\0"
-   VALUE "ProductVersion", "0.2.2.0\0"
+   VALUE "ProductVersion", OPENDIAG_VERSION_STRING "\0"
    VALUE "OriginalFilename", "opendiag32.dll\0"
   END
  END

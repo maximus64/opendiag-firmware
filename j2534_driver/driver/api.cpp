@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "../include/j2534.h"
 #include "link.h"
+#include "version.h"
 #include <algorithm>
 #include <ctype.h>
 #include <map>
@@ -911,7 +912,7 @@ J2534_LONG PassThruReadVersion(J2534_ULONG id, char *firmware, char *dll, char *
     }
 
     firmware[0] = 0;
-    platform::copyText(dll, 80, "OpenDIAG 0.2.2");
+    platform::copyText(dll, 80, "OpenDIAG " OPENDIAG_VERSION_TAG);
     platform::copyText(api, 80, "05.00");
     J2534_LONG status = checkDevice(id);
     if (status) {
