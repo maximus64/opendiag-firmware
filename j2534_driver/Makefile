@@ -181,6 +181,8 @@ LIBRARY_ARGS = --native "$(abspath $(NATIVE_LIB))" --legacy "$(abspath $(LEGACY_
 test: all repeat-test $(HOST_TESTS)
 	$(PYTHON) tests/run_tests.py --build "$(abspath $(BUILD_DIR))" $(LIBRARY_ARGS)
 HOST_TEST_BUILD ?= ../test/host/build
+# Device opens cost a fixed ~350 ms frontend handshake, so these suites shard. 0 = per CPU.
+TEST_JOBS ?= 0
 $(GENERATED_DIR)/j2534_pb2.py: $(PROTOCOL_DIR)/j2534.proto
 	@mkdir -p "$(@D)"
 	protoc -I "$(PROTOCOL_DIR)" --python_out="$(GENERATED_DIR)" "$<"
@@ -190,6 +192,7 @@ repeat-test: all $(GENERATED_DIR)/j2534_pb2.py
 	cmake --build "$(HOST_TEST_BUILD)" --target j2534_contract_firmware
 	OPENDIAG_TEST_PROTO_DIR="$(abspath $(GENERATED_DIR))" \
 		$(PYTHON) tests/test_repeat_messages.py $(LIBRARY_ARGS) \
+		--jobs $(TEST_JOBS) \
 		--firmware "$(abspath $(HOST_TEST_BUILD))/libj2534_contract_firmware.$(SHARED_EXT)"
 check-wincompat package:
 	@echo "$@ requires Windows artifacts; use: docker compose run --rm --build j2534-driver" >&2; exit 2

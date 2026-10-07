@@ -8,12 +8,14 @@ import argparse
 from contextlib import contextmanager
 import ctypes as c
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 
 from firmware_peer import Firmware
 from mock_peer import pb
-from run_tests import Server, add_library_arguments, configure, install_libraries
+from run_tests import (Server, add_library_arguments, add_shard_arguments, configure,
+                       install_libraries, sharded_main)
 
 LIBRARIES = None
 FIRMWARE = None
@@ -1018,7 +1020,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     add_library_arguments(parser)
     parser.add_argument("--firmware", type=Path, required=True)
+    add_shard_arguments(parser)
     args, remaining = parser.parse_known_args()
     LIBRARIES = args.native.resolve(), args.legacy.resolve()
     FIRMWARE = args.firmware.resolve()
-    unittest.main(argv=[__file__] + remaining, verbosity=2)
+    sys.exit(sharded_main(__file__,
+                          ["--native", str(LIBRARIES[0]), "--legacy", str(LIBRARIES[1]),
+                           "--firmware", str(FIRMWARE)],
+                          remaining,
+                          args,
+                          verbosity=2))
