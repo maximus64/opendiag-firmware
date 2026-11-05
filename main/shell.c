@@ -1482,6 +1482,24 @@ static void canport_command(int argc, char **argv) {
 }
 
 /**
+ * @brief Command handler for 'canguard'
+ *
+ * Whether the ELM327 front-end listens before its first transmit on a CAN
+ * protocol and leaves alone a bus that runs at another bit rate.
+ */
+static void canguard_command(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "on") == 0)
+        elm327_can_guard_set(true);
+    else if (argc == 2 && strcmp(argv[1], "off") == 0)
+        elm327_can_guard_set(false);
+    else if (argc != 1) {
+        printf("Usage: canguard [on|off]\n");
+        return;
+    }
+    printf("canguard: %s\n", elm327_can_guard_get() ? "on" : "off");
+}
+
+/**
  * @brief Command handler for 'comm'
  *
  * Shows the registered comm_iface ports and their state.
@@ -1546,6 +1564,9 @@ const shell_command_t commands[] = {
     {"canport", canport_command,
      "CAN transceiver for the next open: OBD socket or AUX_CAN header "
      "(listen-only). Usage: canport [obd|aux]"},
+    {"canguard", canguard_command,
+     "ELM327: listen before transmitting on CAN, skip a bus at another bit "
+     "rate. Usage: canguard [on|off]"},
     {NULL, NULL, NULL} // End of list marker
 };
 

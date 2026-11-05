@@ -479,6 +479,7 @@ for the list of commands.
 | `elmtrace on` / `elmtrace off` | Copy every ELM327 request (`ELMTRC: >`) and reply (`ELMTRC: <`) to this console, whether the link is on USB or Bluetooth. Closing the console turns it off |
 | `ctrl <command>` | Run a [control command](#control-commands) |
 | `canport obd` / `canport aux` | Choose where the next CAN open goes: the OBD socket (pins 6/14, default) or the AUX_CAN header J3 (pin 1 CAN-H, pin 2 CAN-L, pin 3 GND, no termination). `aux` is always listen-only, so a tapped bus is never driven. Only one CAN at a time. A reset goes back to `obd` |
+| `canguard on` / `canguard off` | Before the ELM327 front-end first transmits on a CAN protocol it listens for 150 ms without driving the bus. If it hears only errors and no valid frame, another bit rate is running on pins 6/14 (some vans carry a 50 kbit/s body bus there) and that protocol is skipped instead of flooding the bus. On by default; `off` restores the plain ELM327 behaviour |
 | `ble` | Show pairing status |
 | `ble pair` | Open the Bluetooth pairing window |
 | `ble forget` | Forget every paired phone |

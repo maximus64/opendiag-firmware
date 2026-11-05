@@ -57,6 +57,15 @@ bool fake_can_is_up(void);
 /** Whether the most recent open asked for listen-only. */
 bool fake_can_last_listen_only(void);
 
+/** Whether the most recent open asked to listen before driving the bus. */
+bool fake_can_last_listen_first(void);
+
+/**
+ * @brief Run a bus at another bit rate: an open that asks to listen first is
+ *        refused, the way the driver refuses it. Cleared by fake_can_reset().
+ */
+void fake_can_set_foreign_rate(bool on);
+
 /** Makes the next can_send() fail, to exercise the error path. */
 void fake_can_fail_next_send(void);
 

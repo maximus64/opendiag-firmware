@@ -31,6 +31,8 @@ static bool tx_unsuccessful;
 static unsigned fail_wire_frame;
 static bool complete_on_poll;
 static int silent, silent1 = -1;
+/* What the bus does as soon as a node joins it. */
+static bool errors_on_enable, frame_on_enable;
 static twai_onchip_node_config_t last_cfg;
 static twai_event_callbacks_t callbacks;
 static int node_token;
@@ -73,6 +75,12 @@ esp_err_t twai_node_register_event_callbacks(twai_node_handle_t node,
 esp_err_t twai_node_enable(twai_node_handle_t node) {
     CALL(ENABLE);
     node_enabled = true;
+    if (errors_on_enable) {
+        twai_error_event_data_t event = {.err_flags.bit_err = 1};
+        callbacks.on_error(NODE, &event, NULL);
+    }
+    if (frame_on_enable)
+        callbacks.on_rx_done(NODE, NULL, NULL);
     return ESP_OK;
 }
 esp_err_t twai_node_disable(twai_node_handle_t node) {
@@ -171,6 +179,8 @@ void td_setup(void) {
     bus_off_on_disable = false;
     tx_unsuccessful = false;
     complete_on_poll = false;
+    errors_on_enable = false;
+    frame_on_enable = false;
     TEST_ASSERT_EQUAL_INT(0, pending_count);
     wire_count = 0;
     tx_attempts = 0;
@@ -227,6 +237,39 @@ TEST(aux_port_uses_can1_pins_and_never_transmits) {
     TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_use_aux(false));
     TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
     TEST_ASSERT_EQUAL_INT(PIN_CAN0_TX, last_cfg.io_cfg.tx);
+    TEST_ASSERT_FALSE(last_cfg.flags.enable_listen_only);
+    TEST_ASSERT_EQUAL_INT(0, silent);
+}
+
+TEST(listen_first_refuses_a_bus_running_at_another_bit_rate) {
+    const bus_cfg_t cfg = {.bitrate = 500000, .listen_first = true};
+    errors_on_enable = true; /* errors, and not one valid frame */
+
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_STATE, can_bus_ops.open(&cfg));
+
+    TEST_ASSERT_TRUE(last_cfg.flags.enable_listen_only);
+    TEST_ASSERT_FALSE(node_live);
+    TEST_ASSERT_EQUAL_INT(1, silent);
+    TEST_ASSERT_EQUAL_INT(0, driver_live_objects);
+}
+
+TEST(listen_first_opens_a_bus_that_carries_valid_frames) {
+    const bus_cfg_t cfg = {.bitrate = 500000, .listen_first = true};
+    errors_on_enable = true; /* a noisy bus at the right rate */
+    frame_on_enable = true;
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_ops.open(&cfg));
+
+    TEST_ASSERT_EQUAL_INT(2, calls[NEW]); /* listened, then joined */
+    TEST_ASSERT_FALSE(last_cfg.flags.enable_listen_only);
+    TEST_ASSERT_EQUAL_INT(0, silent);
+}
+
+TEST(listen_first_opens_a_silent_bus) {
+    const bus_cfg_t cfg = {.bitrate = 500000, .listen_first = true};
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_ops.open(&cfg));
+
     TEST_ASSERT_FALSE(last_cfg.flags.enable_listen_only);
     TEST_ASSERT_EQUAL_INT(0, silent);
 }

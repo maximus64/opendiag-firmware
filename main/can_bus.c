@@ -664,12 +664,57 @@ esp_err_t can_bus_use_aux(bool aux) {
 
 bool can_bus_aux(void) { return aux_requested; }
 
+/* Dozens of frames on a running bus at either OBD bit rate. */
+#define CAN_LISTEN_FIRST_MS 150
+
+/**
+ * @brief Listen for a moment without driving the bus: is another bit rate
+ *        running here?
+ *
+ * At the wrong rate every frame on a running bus breaks a rule, so a
+ * listen-only node sees bus errors and never one valid frame. A silent bus
+ * shows neither and is not refused.
+ *
+ * @return ESP_OK to go ahead, ESP_ERR_INVALID_STATE for a bus at another
+ *         rate, or whatever kept the listen-only node from starting or
+ *         stopping.
+ */
+static esp_err_t can_listen_first(int baud_rate, bool manual) {
+    esp_err_t err = can_setup(baud_rate, manual, true);
+    if (err != ESP_OK)
+        return err;
+
+    vTaskDelay(pdMS_TO_TICKS(CAN_LISTEN_FIRST_MS));
+    /* Every valid frame takes a receive sequence number, queued or dropped. */
+    bool heard = bus_rx_sequence(&rx_epoch) != 0;
+    uint32_t errors = __atomic_load_n(&bus_errors, __ATOMIC_RELAXED);
+
+    err = can_bus_teardown();
+    if (err != ESP_OK)
+        return err;
+    if (!heard && errors) {
+        ESP_LOGW(TAG,
+                 "%d bit/s: %lu bus errors and no valid frame, another bit "
+                 "rate is running here - not transmitting",
+                 baud_rate, (unsigned long)errors);
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ESP_OK;
+}
+
 static esp_err_t can_ops_open(const bus_cfg_t *cfg) {
     /* The controller takes its rate at install time and cannot be retimed
      * while up, so a claim without one is refused here rather than later. */
     if (!cfg || cfg->bitrate == 0) {
         ESP_LOGE(TAG, "CAN needs a bit rate");
         return ESP_ERR_INVALID_ARG;
+    }
+
+    if (cfg->listen_first && !cfg->listen_only) {
+        esp_err_t err =
+            can_listen_first((int)cfg->bitrate, cfg->manual_recovery);
+        if (err != ESP_OK)
+            return err;
     }
 
     return can_setup((int)cfg->bitrate, cfg->manual_recovery,
