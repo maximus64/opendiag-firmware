@@ -515,6 +515,7 @@ Updating keeps your paired phones and the unit's voltage calibration.
 | App reports `?` after selecting a protocol | The bus is held by the debug shell. Run `ctrl BUS` or `vif` in the shell to check. |
 | **Save & Test** fails in `opendiag_config.exe` | Check you picked the **data** COM port, not the debug port, and that no other program has it open. |
 | SLCAN tool gets ELM327 replies | The link reverted when the port was last closed. Run `mode slcan` again before opening it. |
+| Connecting takes a long time on a K-Line vehicle | The automatic search tries every CAN protocol first. Set the protocol by hand, `AT SP 5` for KWP fast init or `AT SP 3` / `4` for a 5-baud init, to go straight to K-Line. |
 | LED pulsing amber unexpectedly | A pin is still energised. Type `vif` in the shell to see who holds it, then `pinoff` if it's the shell. |
 | Shell port prints but doesn't accept typing | Make sure you opened the **DEBUG** port, and that your terminal sends a carriage return (Enter). |
 | Nothing enumerates on USB | Try another cable (some are charge-only) and another USB port. |
