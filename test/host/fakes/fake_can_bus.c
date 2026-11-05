@@ -28,6 +28,7 @@ typedef struct {
 
 static struct {
     bool up;
+    bool listen_only; /* most recent open asked for listen-only */
     uint32_t rx_timestamp_us;
     uint32_t rx_sequence;
     int baud;
@@ -105,6 +106,7 @@ int fake_can_setup_count(void) { return g.setup_count; }
 int fake_can_teardown_count(void) { return g.teardown_count; }
 int fake_can_last_baud(void) { return g.baud; }
 bool fake_can_is_up(void) { return g.up; }
+bool fake_can_last_listen_only(void) { return g.listen_only; }
 int fake_can_sent_count(void) { return g.sent_count; }
 
 void fake_can_fail_confirmed_send(void) {
@@ -240,6 +242,7 @@ static esp_err_t can_ops_open(const bus_cfg_t *cfg) {
         return ESP_ERR_INVALID_ARG;
     }
 
+    g.listen_only = cfg->listen_only;
     return can_bus_setup((int)cfg->bitrate);
 }
 
@@ -247,6 +250,10 @@ static esp_err_t can_ops_close(void) { return can_bus_teardown(); }
 
 static int can_ops_send(const bus_msg_t *msg, uint32_t flags) {
     struct can_frame f = {0};
+
+    /* Like the driver: a listen-only node has nothing to transmit with. */
+    if (g.listen_only)
+        return BUS_ERR_TX_FAILED;
 
     if ((flags & BUS_TX_WAIT_DONE) && g.confirmed_send_error) {
         int error = g.confirmed_send_error;

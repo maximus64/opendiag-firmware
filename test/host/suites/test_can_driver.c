@@ -29,6 +29,7 @@ static bool bus_off_on_disable;
 static bool tx_unsuccessful;
 static bool complete_on_poll;
 static int silent;
+static twai_onchip_node_config_t last_cfg;
 static twai_event_callbacks_t callbacks;
 static int node_token;
 static bool forced_bus_off;
@@ -52,6 +53,7 @@ esp_err_t gpio_set_level(gpio_num_t pin, uint32_t value) {
 esp_err_t twai_new_node_onchip(const twai_onchip_node_config_t *cfg,
                                twai_node_handle_t *node) {
     CALL(NEW);
+    last_cfg = *cfg;
     TEST_ASSERT_FALSE(node_live);
     node_live = true;
     *node = NODE;
@@ -172,6 +174,23 @@ static void assert_io_stopped(void) {
     TEST_ASSERT_EQUAL_INT(-1, can_receive(&frame, 0));
     TEST_ASSERT_EQUAL_INT(1, silent);
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_STATE, can_bus_setup(500000));
+}
+
+TEST(listen_only_open_keeps_the_transceiver_silent_and_refuses_to_send) {
+    const bus_cfg_t cfg = {.bitrate = 50000, .listen_only = true};
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_ops.open(&cfg));
+    TEST_ASSERT_TRUE(last_cfg.flags.enable_listen_only);
+    TEST_ASSERT_EQUAL_INT(1, silent);
+    uint8_t byte = 0;
+    bus_msg_t msg = {.data = &byte, .len = 1, .id = 0x123};
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_TX_FAILED, can_bus_ops.send(&msg, 0));
+    TEST_ASSERT_EQUAL_INT(0, calls[TRANSMIT]);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_teardown());
+
+    const bus_cfg_t normal = {.bitrate = 50000};
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_ops.open(&normal));
+    TEST_ASSERT_FALSE(last_cfg.flags.enable_listen_only);
+    TEST_ASSERT_EQUAL_INT(0, silent);
 }
 
 TEST(can_worker_timeout_retains_resources_until_late_acknowledgement) {

@@ -11,6 +11,9 @@ typedef struct {
     } bit_timing;
     unsigned tx_queue_depth;
     int fail_retry_cnt;
+    struct {
+        uint32_t enable_listen_only : 1;
+    } flags;
 } twai_onchip_node_config_t;
 esp_err_t twai_new_node_onchip(const twai_onchip_node_config_t *cfg,
                                twai_node_handle_t *node);

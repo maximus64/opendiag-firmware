@@ -54,6 +54,9 @@ int fake_can_last_baud(void);
 
 bool fake_can_is_up(void);
 
+/** Whether the most recent open asked for listen-only. */
+bool fake_can_last_listen_only(void);
+
 /** Makes the next can_send() fail, to exercise the error path. */
 void fake_can_fail_next_send(void);
 

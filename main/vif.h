@@ -271,6 +271,7 @@ const char *vif_bus_name(vif_bus_t bus);
 typedef struct {
     vif_bus_t bus;     /**< VIF_BUS_NONE when the group is idle. */
     uint32_t bitrate;  /**< CAN bit rate; 0 for the byte buses. */
+    bool listen_only;  /**< CAN opened without driving the bus. */
     vif_owner_t owner; /**< Only meaningful when the group is held. */
 } vif_bus_claim_t;
 
