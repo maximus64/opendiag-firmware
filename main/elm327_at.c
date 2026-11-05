@@ -282,6 +282,43 @@ enum elm327_protocol {
 static int elm327_set_protocol(elm327_ctx_t *e, int proto);
 static void elm327_uart_flush(elm327_ctx_t *e);
 
+/*
+ * Request/reply trace on the console, so a phone app's session over BLE can be
+ * recorded from the USB console. Off at boot ("elmtrace on" turns it on), and
+ * main.c turns it off when the console terminal closes so printing never
+ * stalls on a host that stopped reading. Read-only: it only copies bytes.
+ */
+static volatile bool trace_on;
+
+void elm327_trace_set(bool on) { trace_on = on; }
+bool elm327_trace_get(void) { return trace_on; }
+
+/** One line per call: '>' request from the client, '<' reply. CR shows as
+ * '|', other control bytes as '.', long replies are split. */
+static void elm327_trace(char dir, const void *data, size_t len) {
+    const uint8_t *p = data;
+    char line[121];
+    size_t n = 0;
+
+    if (!trace_on)
+        return;
+    for (size_t i = 0; i < len; i++) {
+        uint8_t c = p[i];
+        if (c == '\n')
+            continue;
+        line[n++] = c == '\r' ? '|' : (c < 0x20 || c > 0x7E) ? '.' : (char)c;
+        if (n == sizeof(line) - 1) {
+            line[n] = '\0';
+            ESP_LOGI("ELMTRC", "%c %s", dir, line);
+            n = 0;
+        }
+    }
+    if (n) {
+        line[n] = '\0';
+        ESP_LOGI("ELMTRC", "%c %s", dir, line);
+    }
+}
+
 /* The K-Line helpers live down beside the transfer path they belong to, but
  * the AT command table above needs them. */
 static bool elm327_is_kline(const elm327_ctx_t *e);
@@ -322,6 +359,7 @@ static size_t elm327_uart_send_bytes(elm327_ctx_t *e, const uint8_t *buffer,
 
 static void elm327_uart_flush(elm327_ctx_t *e) {
     if (e->tx_len) {
+        elm327_trace('<', e->tx_buf, e->tx_len);
         /* Answer whoever sent the request, not every attached client */
         vif_link_write(e->tx_buf, e->tx_len);
         e->tx_len = 0;
@@ -2919,6 +2957,7 @@ static void elm327_parse_command(elm327_ctx_t *e, const char *cmd) {
     /* One marker per dispatch. Bytes on the wire cannot tell "the client sent
      * it twice" from "we ran it twice"; this can. */
     ble_uart_trace_note('!', cmd, strlen(cmd));
+    elm327_trace('>', cmd, strlen(cmd));
 
     int rc;
     uint8_t frame[8] = {0};

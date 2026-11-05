@@ -1381,6 +1381,24 @@ static void mode_command(int argc, char **argv) {
 }
 
 /**
+ * @brief Command handler for 'elmtrace'
+ *
+ * Copies every ELM327 request and reply to this console, whichever transport
+ * carries the link. Read-only. Closing the console turns it off again.
+ */
+static void elmtrace_command(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "on") == 0)
+        elm327_trace_set(true);
+    else if (argc == 2 && strcmp(argv[1], "off") == 0)
+        elm327_trace_set(false);
+    else if (argc != 1) {
+        printf("Usage: elmtrace [on|off]\n");
+        return;
+    }
+    printf("elmtrace: %s\n", elm327_trace_get() ? "on" : "off");
+}
+
+/**
  * @brief Command handler for 'ctrl'
  *
  * Runs a raw control command against the link - the same text a BLE client
@@ -1457,6 +1475,8 @@ const shell_command_t commands[] = {
      "Which transport carries the data link. Usage: link [drop|usb|ble]"},
     {"mode", mode_command,
      "Show or switch the link's grammar. Usage: mode [<name>]"},
+    {"elmtrace", elmtrace_command,
+     "Copy ELM327 requests/replies to this console. Usage: elmtrace [on|off]"},
     {"ctrl", ctrl_command, "Run a control command. Usage: ctrl <command>"},
     {NULL, NULL, NULL} // End of list marker
 };
