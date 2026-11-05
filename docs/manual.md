@@ -418,7 +418,7 @@ for the list of commands.
 | Command | Description |
 | --- | --- |
 | `help` | List all commands |
-| `version` | Show the firmware version and build |
+| `version` | Show the firmware version and build, why the adapter last started (`power on`, `brownout (supply sagged)` - usually cranking -, `watchdog`, ...) and how long it has been up |
 | `board` | Show board information |
 | `link` | Show which transport holds the data link |
 | `link usb` / `link ble` / `link drop` | Hand the data link to USB or Bluetooth, or let go of it |
