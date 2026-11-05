@@ -271,6 +271,19 @@ These commands aren't part of the ELM327 set:
 | `AT VIF PASSTHRU` | Switch the link to J2534 mode. The J2534 driver sends this for you. |
 | `AT VIF SLCAN` | Switch the link to SLCAN mode. |
 
+### Recording an app's session
+
+To see exactly what a diagnostic app asks the vehicle and what comes back, for example while a
+phone app is connected over Bluetooth, open the debug shell on a computer and type:
+
+```
+elmtrace on
+```
+
+Every request then appears as an `ELMTRC: >` line and every reply as `ELMTRC: <`, whether the app
+is on USB or Bluetooth. A carriage return shows as `|`. The app sees no difference. `elmtrace off`
+stops it, and closing the terminal stops it too, so the console can never hold up the link.
+
 ---
 
 ## J2534 pass-thru on Windows
@@ -424,6 +437,7 @@ for the list of commands.
 | `link usb` / `link ble` / `link drop` | Hand the data link to USB or Bluetooth, or let go of it |
 | `mode` | Show the current mode, the default, and every available mode |
 | `mode <name>` | Switch mode, for example `mode slcan` |
+| `elmtrace on` / `elmtrace off` | Copy every ELM327 request (`ELMTRC: >`) and reply (`ELMTRC: <`) to this console, whether the link is on USB or Bluetooth. Closing the console turns it off |
 | `ctrl <command>` | Run a [control command](#control-commands) |
 | `ble` | Show pairing status |
 | `ble pair` | Open the Bluetooth pairing window |
