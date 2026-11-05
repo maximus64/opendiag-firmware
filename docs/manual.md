@@ -61,7 +61,10 @@ This manual covers setting up and using the OpenDIAG adapter.
 - **OBD-II plug** – connects to the vehicle's diagnostic port.
 - **USB-C** – connects to a computer and provides the serial ports. It can also power the adapter
   (see [Power](#power)).
-- **Auxiliary CAN port** (side of the unit) – connects to the second CAN transceiver.
+- **Auxiliary CAN port** (side of the unit) – connects to the second CAN transceiver. It is a
+  3-pin JST PH connector (2.0 mm): pin 1 CAN-H, pin 2 CAN-L, pin 3 ground. No termination
+  resistor is fitted, so it can be tapped onto a running bus without loading it. See
+  [Listening on the auxiliary CAN port](#listening-on-the-auxiliary-can-port).
 
 ---
 
@@ -390,6 +393,24 @@ Use it to sniff a bus you don't know yet, for example to find its bit rate: try 
 - To go from one mode to the other, close the channel with `C` first. Changing the bit rate with
   `S<n>` keeps the mode.
 - In the debug shell, `vif` shows `listen-only` next to the CAN bus while it is open that way.
+
+### Listening on the auxiliary CAN port
+
+Some vehicle buses never reach the OBD-II connector, for example a powertrain CAN behind the body
+computer's gateway. To record one, wire it to the
+[auxiliary CAN port](#connectors) and, in the debug shell, before the CAN channel is opened:
+
+```
+canport aux
+```
+
+The next CAN open, from any mode, then uses the auxiliary port, and **always listen-only**: the
+adapter never transmits on a bus tapped there, whatever the software asks for. `canport obd` goes
+back to the OBD-II connector, and so does a restart.
+
+- Only one CAN bus works at a time: the processor has a single CAN controller.
+- `canport` is refused while a CAN bus is open. Close it first.
+- Keep the tap short and twisted, and don't add a terminating resistor.
 
 ---
 
