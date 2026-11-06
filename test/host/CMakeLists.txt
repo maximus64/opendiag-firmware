@@ -119,11 +119,13 @@ set(SUITES
     test_j1850_pwm_codec
     test_j1850_vpw_codec
     test_kline_codec
+    test_power_policy
 )
 
 set(test_elm327_at_FW      ${ELM327_FW})
 set(test_bus_tx_worker_FW driver_stubs/driver_rtos.c)
 set(test_j2534_scheduler_FW ${FW_DIR}/j2534_scheduler.c)
+set(test_power_policy_FW ${FW_DIR}/power_policy.c)
 set(test_isotp_FW          ${FW_DIR}/isotp.c)
 set(test_bus_params_FW    ${FW_DIR}/bus.c)
 set(test_elm327_can_FW     ${ELM327_FW})

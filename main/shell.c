@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -21,6 +22,7 @@
 #include "j1850_vpw.h"
 #include "kline.h"
 #include "link.h"
+#include "power.h"
 #include "slcan.h"
 #include "soc/rtc_cntl_reg.h"
 #include "utility.h"
@@ -1500,6 +1502,47 @@ static void canguard_command(int argc, char **argv) {
 }
 
 /**
+ * @brief Command handler for 'power'
+ *
+ * Deep sleep while the vehicle is parked and nobody uses the adapter.
+ */
+static void power_command(int argc, char **argv) {
+    esp_err_t err = ESP_OK;
+    char *end = NULL;
+    long v = argc == 3 ? strtol(argv[2], &end, 10) : 0;
+    bool number = argc == 3 && end && *end == '\0';
+
+    if (argc == 1) {
+        power_print_status();
+        return;
+    }
+    if (argc == 2 && strcmp(argv[1], "sleep") == 0) {
+        if (power_sleep_now() != ESP_OK)
+            printf("power: release every bus and pin first\n");
+        return;
+    }
+    if (argc == 3 && strcmp(argv[1], "auto") == 0 &&
+        (strcmp(argv[2], "on") == 0 || strcmp(argv[2], "off") == 0))
+        err = power_set_enabled(strcmp(argv[2], "on") == 0);
+    else if (number && strcmp(argv[1], "idle") == 0)
+        err = power_set_idle_minutes((uint32_t)v);
+    else if (number && strcmp(argv[1], "vrun") == 0)
+        err = power_set_run_mv((int32_t)v);
+    else {
+        printf("Usage: power [auto on|off | idle <1-240 min> | vrun "
+               "<12000-15500 mV> | sleep]\n");
+        return;
+    }
+    if (err != ESP_OK) {
+        printf("power: %s\n", err == ESP_ERR_INVALID_ARG
+                                  ? "out of range"
+                                  : esp_err_to_name(err));
+        return;
+    }
+    power_print_status();
+}
+
+/**
  * @brief Command handler for 'comm'
  *
  * Shows the registered comm_iface ports and their state.
@@ -1567,6 +1610,9 @@ const shell_command_t commands[] = {
     {"canguard", canguard_command,
      "ELM327: listen before transmitting on CAN, skip a bus at another bit "
      "rate. Usage: canguard [on|off]"},
+    {"power", power_command,
+     "Sleep while parked and idle. Usage: power [auto on|off | idle <min> | "
+     "vrun <mV> | sleep]"},
     {NULL, NULL, NULL} // End of list marker
 };
 
