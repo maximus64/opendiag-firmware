@@ -80,6 +80,7 @@ Implemented and working:
 - SLCAN (LAWICEL) on either link, for `slcand` and ECU reflashing
 - Switching a link between the two without dropping its bus or programming voltage
 - Board control: high-side/low-side drivers, boost converter, voltage sense, calibration
+- Deep sleep while the vehicle is parked and nobody uses the adapter
 
 Not yet implemented:
 

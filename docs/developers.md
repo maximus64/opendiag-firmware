@@ -48,6 +48,9 @@ build and test it, how to add a command, and how to send a change.
   messages into CAN frames for the front-ends.
 - **`isotp.c`** is ISO 15765-2, shared by the ELM327 and J2534 front-ends. Behaviour differences
   are flags in `isotp_config_t`, not separate copies.
+- **Power** (`power.c`, decisions in `power_policy.c`) puts the adapter into deep sleep when the
+  vehicle is parked and nobody uses it. It counts CAN edges with the pulse counter, beside the
+  TWAI controller, and holds every output at its idle level while asleep.
 - **Control plane** (`vif_ctrl.c`): `ID`, `MODE`, `BUS`, `RESET`. It is reachable from the shell
   and over BLE, and by design carries nothing that drives pins.
 

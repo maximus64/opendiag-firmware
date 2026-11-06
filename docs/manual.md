@@ -86,6 +86,39 @@ Cranking the engine can pull the vehicle supply low enough to restart the adapte
 connected. `version` in the debug shell says why the adapter last started: `brownout (supply
 sagged)` is this case, not a fault.
 
+### Sleeping while the vehicle is parked
+
+An adapter left plugged in draws current from the battery all the time. To protect it, OpenDIAG
+goes into deep sleep when all of these are true for **10 minutes**:
+
+- nobody is connected: no USB host, no Bluetooth phone;
+- no bus is open and no pin is energised;
+- there is no traffic on the CAN bus (pins 6/14, or the AUX header);
+- the battery is below **13.2 V**, so the engine is off. Below 6 V the adapter assumes it is on
+  USB power only, on the bench, and never sleeps.
+
+The LED goes out. The adapter wakes up, which is a full restart, when:
+
+- **CAN traffic** appears. On most vehicles that happens when you unlock or open a door.
+- you press the **button**.
+- it sees a **charging voltage**, 13.2 V or more. It checks once a minute, and goes straight back
+  to sleep if the engine is still off.
+
+Change it in the [debug shell](#the-debug-shell). The settings are kept across power cycles:
+
+| Command | What it does |
+| --- | --- |
+| `power` | Show the settings, why the adapter is staying awake, and what woke it last |
+| `power auto on` / `power auto off` | Turn sleeping on (default) or off |
+| `power idle <minutes>` | Quiet time before sleeping, 1 to 240 |
+| `power vrun <mV>` | Battery voltage that means "engine running", 12000 to 15500. Lower it for a vehicle with a smart alternator that charges at 12.5 V |
+| `power sleep` | Sleep now, if no bus or pin is in use. For testing |
+
+> [!NOTE]
+> On a vehicle whose CAN bus stays silent when it wakes up, start the engine or press the
+> button to wake the adapter. The once-a-minute check catches a running engine by its charging
+> voltage.
+
 ---
 
 ## One data link, two ways to reach it
@@ -507,6 +540,7 @@ for the list of commands.
 | `board` | Show board information |
 | `link` | Show which transport holds the data link |
 | `link usb` / `link ble` / `link drop` | Hand the data link to USB or Bluetooth, or let go of it |
+| `power`, `power auto on\|off`, `power idle <min>`, `power vrun <mV>`, `power sleep` | Sleeping while parked. See [Sleeping while the vehicle is parked](#sleeping-while-the-vehicle-is-parked) |
 | `mode` | Show the current mode, the default, and every available mode |
 | `mode <name>` | Switch mode, for example `mode slcan` |
 | `elmtrace on` / `elmtrace off` | Copy every ELM327 request (`ELMTRC: >`) and reply (`ELMTRC: <`) to this console, whether the link is on USB or Bluetooth. Closing the console turns it off |
