@@ -26,6 +26,7 @@
 #include "utility.h"
 #include "vif.h"
 #include "vif_ctrl.h"
+#include "wifi_link.h"
 #include "ws2812_led.h"
 
 #define TAG "app_main"
@@ -37,6 +38,7 @@
  */
 comm_port_id_t g_port_usb_cdc0 = COMM_INVALID_PORT_ID;
 comm_port_id_t g_port_ble = COMM_INVALID_PORT_ID;
+comm_port_id_t g_port_wifi = COMM_INVALID_PORT_ID;
 
 /** Room for a whole J2534 wire frame, and so for any command line; overflow
  * is dropped, not blocked. */
@@ -76,6 +78,15 @@ static void ble_rx_callback(const uint8_t *rx_buf, size_t rx_size) {
     comm_port_rx(g_port_ble, rx_buf, rx_size);
 }
 
+/* WiFi: one TCP client on the adapter's own access point */
+static int port_wifi_write(const void *buf, uint32_t length) {
+    return wifi_link_write(buf, length);
+}
+
+static void wifi_rx_callback(const uint8_t *rx_buf, size_t rx_size) {
+    comm_port_rx(g_port_wifi, rx_buf, rx_size);
+}
+
 static void comm_ports_setup(void) {
     static const comm_port_ops_t cdc0_ops = {
         .write = port_usb_cdc0_write,
@@ -87,12 +98,18 @@ static void comm_ports_setup(void) {
         .flush = port_ble_flush,
         .is_connected = port_ble_is_connected,
     };
+    static const comm_port_ops_t wifi_ops = {
+        .write = port_wifi_write,
+        .is_connected = wifi_link_is_connected,
+    };
 
     g_port_usb_cdc0 = comm_port_register("CDC0", &cdc0_ops, LINK_RX_BUF);
     g_port_ble = comm_port_register("BLE", &ble_ops, LINK_RX_BUF);
+    g_port_wifi = comm_port_register("WIFI", &wifi_ops, LINK_RX_BUF);
 
     if (g_port_usb_cdc0 == COMM_INVALID_PORT_ID ||
-        g_port_ble == COMM_INVALID_PORT_ID) {
+        g_port_ble == COMM_INVALID_PORT_ID ||
+        g_port_wifi == COMM_INVALID_PORT_ID) {
         ESP_LOGE(TAG, "Failed to register one or more comm ports");
     }
 
@@ -139,6 +156,8 @@ static void link_offer_elsewhere(comm_port_id_t just_freed) {
         link_try_bind(g_port_usb_cdc0);
     } else if (just_freed != g_port_ble && ble_uart_is_connected()) {
         link_try_bind(g_port_ble);
+    } else if (just_freed != g_port_wifi && wifi_link_is_connected()) {
+        link_try_bind(g_port_wifi);
     }
 }
 
@@ -168,6 +187,8 @@ static comm_port_id_t transport_port(link_transport_t t) {
         return g_port_usb_cdc0;
     case LINK_BLE:
         return g_port_ble;
+    case LINK_WIFI:
+        return g_port_wifi;
     default:
         return COMM_INVALID_PORT_ID;
     }
@@ -180,7 +201,9 @@ link_transport_t link_holder(void) {
         return LINK_NONE;
     }
 
-    return (held == g_port_ble) ? LINK_BLE : LINK_USB;
+    if (held == g_port_ble)
+        return LINK_BLE;
+    return (held == g_port_wifi) ? LINK_WIFI : LINK_USB;
 }
 
 const char *link_transport_name(link_transport_t t) {
@@ -189,6 +212,8 @@ const char *link_transport_name(link_transport_t t) {
         return "usb";
     case LINK_BLE:
         return "ble";
+    case LINK_WIFI:
+        return "wifi";
     default:
         return "none";
     }
@@ -200,6 +225,8 @@ bool link_transport_connected(link_transport_t t) {
         return port_usb_cdc0_is_connected();
     case LINK_BLE:
         return ble_uart_is_connected();
+    case LINK_WIFI:
+        return wifi_link_is_connected();
     default:
         return false;
     }
@@ -299,6 +326,14 @@ static void ble_ctrl_command(const char *cmd, size_t len) {
     ble_uart_ctrl_reply(out);
 }
 
+static void wifi_conn_changed(bool connected) {
+    if (connected) {
+        link_try_bind(g_port_wifi);
+    } else {
+        link_release(g_port_wifi);
+    }
+}
+
 static void links_setup(void) {
     elm327_register();
     slcan_register();
@@ -316,6 +351,7 @@ static void links_setup(void) {
      */
     usb_cdc_set_line_callback(usb_line_state_changed);
     ble_uart_set_conn_callback(ble_conn_changed);
+    wifi_link_set_callbacks(wifi_rx_callback, wifi_conn_changed);
 
     /* A host that opened the port before the callback existed reports no
      * edge, so the state is read once here rather than waited for. */
@@ -421,6 +457,7 @@ void app_main(void) {
     /* setup devices */
     usb_cdc_setup();
     ble_uart_setup();
+    wifi_link_setup(); /* only if enabled, and never without a password */
 
     /*
      * Hand the console to USB CDC 1. Everything up to here has gone to UART0,

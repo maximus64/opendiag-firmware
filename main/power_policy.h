@@ -24,7 +24,7 @@ typedef struct {
 
 /** One look at the board. */
 typedef struct {
-    bool client;      /**< Someone connected: a link, USB host, BLE. */
+    bool client;      /**< Someone connected: a link, USB host, BLE, WiFi. */
     bool busy;        /**< A bus or a pin is claimed. */
     bool bus_traffic; /**< Edges seen on a CAN receiver since the last look. */
     int32_t vbatt_mv;
