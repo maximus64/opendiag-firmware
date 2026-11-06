@@ -54,8 +54,11 @@ static struct {
     int sent_total; /* Includes transmits past the log's end */
 } g;
 
+static uint8_t fake_tec, fake_rec;
+
 void fake_can_reset(void) {
     memset(&g, 0, sizeof(g));
+    fake_tec = fake_rec = 0;
     g.baud = -1;
 }
 
@@ -169,6 +172,18 @@ esp_err_t can_bus_teardown(void) {
 }
 
 void can_print_stat(void) {}
+
+void fake_can_set_error_counters(uint8_t tec, uint8_t rec) {
+    fake_tec = tec;
+    fake_rec = rec;
+}
+esp_err_t can_bus_error_counters(uint8_t *tec, uint8_t *rec) {
+    if (!g.up)
+        return ESP_ERR_INVALID_STATE;
+    *tec = fake_tec;
+    *rec = fake_rec;
+    return ESP_OK;
+}
 
 int can_send(const struct can_frame *frame) {
     if (!frame) {

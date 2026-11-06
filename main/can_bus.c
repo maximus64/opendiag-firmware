@@ -228,6 +228,19 @@ static int queue_frame(const struct can_frame *frame, int position) {
 
 int can_send(const struct can_frame *frame) { return queue_frame(frame, -1); }
 
+esp_err_t can_bus_error_counters(uint8_t *tec, uint8_t *rec) {
+    twai_node_status_t status = {0};
+
+    if (!can_started || can_node == NULL)
+        return ESP_ERR_INVALID_STATE;
+    esp_err_t err = twai_node_get_info(can_node, &status, NULL);
+    if (err != ESP_OK)
+        return err;
+    *tec = (uint8_t)(status.tx_error_count > 255 ? 255 : status.tx_error_count);
+    *rec = (uint8_t)(status.rx_error_count > 255 ? 255 : status.rx_error_count);
+    return ESP_OK;
+}
+
 void can_print_stat(void) {
     if (!can_started || can_node == NULL) {
         ESP_LOGE(TAG, "CAN bus not initialized");

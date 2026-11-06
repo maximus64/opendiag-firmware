@@ -66,6 +66,9 @@ bool fake_can_last_listen_first(void);
  */
 void fake_can_set_foreign_rate(bool on);
 
+/** What can_bus_error_counters() reports while the bus is up. */
+void fake_can_set_error_counters(uint8_t tec, uint8_t rec);
+
 /** Makes the next can_send() fail, to exercise the error path. */
 void fake_can_fail_next_send(void);
 

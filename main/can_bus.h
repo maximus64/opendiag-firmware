@@ -7,6 +7,9 @@
 #include "can_frame.h"
 
 void can_print_stat(void);
+/** TEC/REC of the open bus. ESP_ERR_INVALID_STATE when no bus is open: the
+ *  counters only mean anything while the controller is on the bus. */
+esp_err_t can_bus_error_counters(uint8_t *tec, uint8_t *rec);
 esp_err_t can_bus_setup(int baud_rate);
 /** Failure retains resources; retry teardown before setup. */
 esp_err_t can_bus_teardown(void);
