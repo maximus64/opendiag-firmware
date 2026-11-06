@@ -91,6 +91,11 @@ Not yet implemented:
 Much of the ELM327 command set also remains unimplemented; `docs/at_commands.md` marks what is
 supported today.
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[developer guide](docs/developers.md), which also lists the open work.
+
 ## Disclaimer
 
 This software is provided **as-is, without warranty of any kind**, express or
