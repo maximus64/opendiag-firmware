@@ -32,6 +32,9 @@ This manual covers setting up and using the OpenDIAG adapter.
 - **A pulsing amber LED means a connector pin is energised.** Pins are released when the client
   that raised them disconnects. A pin raised from the debug shell stays on until you release it
   there. See [Releasing pins and buses](#releasing-pins-and-buses).
+- **Before clearing codes or writing to a module,** read
+  [Diagnostic services](diagnostics.md#before-you-change-anything): what each service does, and
+  what to back up first.
 - **Only work on vehicles you own or are authorised to modify.** Changing emissions-related
   calibrations is regulated in many places.
 
