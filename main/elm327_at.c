@@ -744,8 +744,8 @@ static uint8_t elm327_can_opts(const elm327_ctx_t *e) {
 /** 500 kbit/s over the AT PB divisor, times 8/7 if b4 asks. */
 static uint32_t elm327_user_bitrate(const elm327_ctx_t *e, int proto) {
     unsigned i = (unsigned)(proto - ELM327_PROTO_CAN_USER1);
-    uint32_t rate = 500000u / (e->settings.user_div[i] ? e->settings.user_div[i]
-                                                       : 1u);
+    uint32_t rate =
+        500000u / (e->settings.user_div[i] ? e->settings.user_div[i] : 1u);
     return (e->settings.user_opts[i] & ELM327_OPT_X87) ? rate * 8u / 7u : rate;
 }
 
@@ -2056,10 +2056,9 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
     /* Normal-fixed priority is not part of the transport address. */
     uint32_t address_mask =
         elm327_can_is_11bit(e) ? UINT32_MAX : ~ELM327_CAN_PRIORITY_MASK;
-    bool multicast = elm327_can_is_11bit(e)
-                         ? tx_frame.id == 0x7DF
-                         : (tx_frame.id & address_mask) ==
-                               (0x00DB33F1 | CAN_EFF_FLAG);
+    bool multicast = elm327_can_is_11bit(e) ? tx_frame.id == 0x7DF
+                                            : (tx_frame.id & address_mask) ==
+                                                  (0x00DB33F1 | CAN_EFF_FLAG);
 
     if (formatted) {
         if (len > sizeof(tx_frame.data) - 1 - a) {
