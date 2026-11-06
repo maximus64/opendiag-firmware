@@ -260,7 +260,8 @@ Apps that only support *Bluetooth Classic* ELM327 adapters won't find it. Look f
 | 7 | ISO 15765-4 CAN 29-bit, 500 kbaud | ✅ |
 | 8 | ISO 15765-4 CAN 11-bit, 250 kbaud | ✅ |
 | 9 | ISO 15765-4 CAN 29-bit, 250 kbaud | ✅ |
-| A–C | J1939, USER1, USER2 | not yet |
+| A | SAE J1939 | not yet |
+| B, C | USER1, USER2 CAN, rate and ID length set with `AT PB` | ✅ |
 
 Automatic search tries CAN first (500k before 250k), then K-Line, then J1850. Setting a protocol
 by hand skips the search and connects faster. `AT SS` switches to the SAE J1978 order, which
@@ -274,6 +275,28 @@ Citroën Jumper: frames sent at 500 kbit/s are errors to every module on it. A s
 only answers when asked, is tried as usual. `canguard off` in the debug shell turns this check off.
 
 The full list of supported AT commands is in [at_commands.md](at_commands.md).
+
+### Modules outside the OBD-II address ranges
+
+Body computers, instrument clusters and other non-emissions modules often answer on identifiers
+that OBD-II apps never use, sometimes on a slower bus and with an extended address byte in front
+of the data. By default the adapter only accepts replies on 7E8–7EF (11-bit) and 18DAF1xx
+(29-bit). These commands open it up:
+
+| Command | Use |
+| --- | --- |
+| `AT PB 81 0A` then `AT SP B` | 11-bit CAN at 50 kbit/s (500 ÷ 0A), ISO 15765-4 framing |
+| `AT SH 7B0` | the request identifier |
+| `AT CRA 7C0` | accept replies on 7C0 (`X` is a wildcard digit: `7CX`) |
+| `AT CEA hh` | put extended address `hh` in front of every request |
+| `AT FC SH`, `AT FC SD`, `AT FC SM 1` | send flow control on a header and with data you choose |
+| `AT MA` | watch the bus listen-only until any key |
+| `AT CS` | the CAN controller's error counters |
+
+With a reply filter set, the flow control for a long reply goes out on the request identifier,
+which is what most such modules expect. Protocols B and C listen before driving the bus, just
+like 6 to 9, so a wrong `AT PB` rate on a bus with traffic is caught before it transmits.
+`AT D` or `AT Z` puts all of this back to the defaults.
 
 ### OpenDIAG extensions
 
