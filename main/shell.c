@@ -28,6 +28,7 @@
 #include "utility.h"
 #include "vif.h"
 #include "vif_ctrl.h"
+#include "wifi_link.h"
 
 #define TAG "SHELL"
 
@@ -1343,7 +1344,7 @@ static void vif_command(int argc, char **argv) { vif_print_debug_info(); }
  * and is answered by nobody. This is how the link gets handed over.
  */
 static void link_command(int argc, char **argv) {
-    static const link_transport_t all[] = {LINK_USB, LINK_BLE};
+    static const link_transport_t all[] = {LINK_USB, LINK_BLE, LINK_WIFI};
     link_transport_t want;
     size_t i;
 
@@ -1358,7 +1359,7 @@ static void link_command(int argc, char **argv) {
     }
 
     if (argc != 2) {
-        printf("Usage: link [drop|usb|ble]\n");
+        printf("Usage: link [drop|usb|ble|wifi]\n");
         return;
     }
 
@@ -1368,8 +1369,10 @@ static void link_command(int argc, char **argv) {
         want = LINK_USB;
     } else if (strcmp(argv[1], "ble") == 0) {
         want = LINK_BLE;
+    } else if (strcmp(argv[1], "wifi") == 0) {
+        want = LINK_WIFI;
     } else {
-        printf("Usage: link [drop|usb|ble]\n");
+        printf("Usage: link [drop|usb|ble|wifi]\n");
         return;
     }
 
@@ -1502,6 +1505,39 @@ static void canguard_command(int argc, char **argv) {
 }
 
 /**
+ * @brief Command handler for 'wifi'
+ *
+ * The adapter's own access point, carrying the data link on TCP 35000.
+ */
+static void wifi_command(int argc, char **argv) {
+    esp_err_t err;
+
+    if (argc == 1) {
+        wifi_link_print_status();
+        return;
+    }
+    if (argc == 2 && strcmp(argv[1], "on") == 0)
+        err = wifi_link_set_enabled(true);
+    else if (argc == 2 && strcmp(argv[1], "off") == 0)
+        err = wifi_link_set_enabled(false);
+    else if (argc == 3 && strcmp(argv[1], "ssid") == 0)
+        err = wifi_link_set_ssid(argv[2]);
+    else if (argc == 3 && strcmp(argv[1], "pass") == 0)
+        err = wifi_link_set_password(argv[2]);
+    else {
+        printf("Usage: wifi [on|off | ssid <name> | pass <8-63 chars>]\n");
+        return;
+    }
+    if (err == ESP_ERR_INVALID_STATE)
+        printf("wifi: set a password first: wifi pass <8-63 chars>\n");
+    else if (err == ESP_ERR_INVALID_ARG)
+        printf("wifi: ssid 1-32 characters, password 8-63\n");
+    else if (err != ESP_OK)
+        printf("wifi: %s\n", esp_err_to_name(err));
+    wifi_link_print_status();
+}
+
+/**
  * @brief Command handler for 'power'
  *
  * Deep sleep while the vehicle is parked and nobody uses the adapter.
@@ -1598,7 +1634,8 @@ const shell_command_t commands[] = {
     {"comm", comm_command, "comm_iface ports. Usage: comm [trace|clear]"},
     {"vif", vif_command, "Show vehicle interface owners and claims"},
     {"link", link_command,
-     "Which transport carries the data link. Usage: link [drop|usb|ble]"},
+     "Which transport carries the data link. Usage: link "
+     "[drop|usb|ble|wifi]"},
     {"mode", mode_command,
      "Show or switch the link's grammar. Usage: mode [<name>]"},
     {"elmtrace", elmtrace_command,
@@ -1610,6 +1647,9 @@ const shell_command_t commands[] = {
     {"canguard", canguard_command,
      "ELM327: listen before transmitting on CAN, skip a bus at another bit "
      "rate. Usage: canguard [on|off]"},
+    {"wifi", wifi_command,
+     "Access point for the data link on TCP 35000. Usage: wifi [on|off | "
+     "ssid <name> | pass <password>]"},
     {"power", power_command,
      "Sleep while parked and idle. Usage: power [auto on|off | idle <min> | "
      "vrun <mV> | sleep]"},

@@ -16,6 +16,7 @@
 #include "pinout.h"
 #include "usb_cdc.h"
 #include "vif.h"
+#include "wifi_link.h"
 #include "ws2812_led.h"
 
 #define TAG "POWER"
@@ -95,7 +96,7 @@ static esp_err_t power_store(void) {
 
 static bool power_client(void) {
     return vif_link_port() != COMM_INVALID_PORT_ID || usb_cdc_host_present() ||
-           ble_uart_is_connected();
+           ble_uart_is_connected() || wifi_link_is_connected();
 }
 
 static bool power_busy(void) {
