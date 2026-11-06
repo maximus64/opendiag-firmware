@@ -91,7 +91,7 @@ sagged)` is this case, not a fault.
 An adapter left plugged in draws current from the battery all the time. To protect it, OpenDIAG
 goes into deep sleep when all of these are true for **10 minutes**:
 
-- nobody is connected: no USB host, no Bluetooth phone;
+- nobody is connected: no USB host, no Bluetooth phone, no WiFi client;
 - no bus is open and no pin is energised;
 - there is no traffic on the CAN bus (pins 6/14, or the AUX header);
 - the battery is below **13.2 V**, so the engine is off. Below 6 V the adapter assumes it is on
@@ -121,15 +121,15 @@ Change it in the [debug shell](#the-debug-shell). The settings are kept across p
 
 ---
 
-## One data link, two ways to reach it
+## One data link, three ways to reach it
 
-OpenDIAG has **one** data link, and it runs over either USB or Bluetooth. It doesn't use both at
-once. **The first one to connect gets it.** The other one can connect, but it gets no answer until
+OpenDIAG has **one** data link, and it runs over USB, Bluetooth or WiFi. It doesn't use more than
+one at once. **The first one to connect gets it.** The other one can connect, but it gets no answer until
 the first one disconnects.
 
 A computer that keeps the USB data port open therefore locks out a phone. To hand the link to the
-phone without closing the port, type `link ble` in the [debug shell](#the-debug-shell). To let
-whichever connects next take it, type `link drop`.
+phone without closing the port, type `link ble` (or `link wifi`) in the
+[debug shell](#the-debug-shell). To let whichever connects next take it, type `link drop`.
 
 Whenever the client holding the link disconnects, the adapter starts over. The link goes back to
 ELM327 mode, its settings are cleared, and every bus and pin that client opened is released. The
@@ -266,6 +266,42 @@ control characteristic.
 
 All three characteristics need an encrypted, bonded connection. Notifications are split to fit the
 negotiated MTU, so request a larger MTU for better throughput.
+
+---
+
+## Connecting over WiFi
+
+The adapter can run its own WiFi access point, the way WiFi ELM327 adapters do. A laptop or a phone
+joins it and opens a TCP connection to **192.168.0.10, port 35000**. That connection is the data
+link, the same one USB and Bluetooth carry, so ELM327 apps, SLCAN tools and scripts all work over
+it.
+
+WiFi is **off by default**. Turn it on once from the [debug shell](#the-debug-shell):
+
+```text
+wifi pass <8 to 63 characters>    choose the WPA2 password
+wifi on                           start the access point (remembered across power cycles)
+wifi                              show the network name, the address and who is connected
+```
+
+The network is called `OpenDiag-XXXX`, where XXXX is the end of the adapter's MAC address.
+Rename it with `wifi ssid <name>`. The adapter refuses to start an open network without a password:
+anyone in range could otherwise reach the vehicle's buses.
+
+Using it from a laptop:
+
+- **OBD-II apps and tools:** pick a WiFi adapter at 192.168.0.10:35000.
+- **Python (pyserial, python-can):** open `socket://192.168.0.10:35000` instead of a serial port.
+- **SLCAN:** send `AT VIF SLCAN` on the connection, then speak SLCAN. To use `slcand`, bridge the
+  socket to a pseudo-terminal first, for example
+  `socat pty,link=/tmp/odcan,raw tcp:192.168.0.10:35000`.
+
+One client at a time. A second one waits until the first disconnects. The debug shell stays on
+USB.
+
+WiFi uses more power than Bluetooth. The access point doesn't stop the adapter
+[sleeping while the vehicle is parked](#sleeping-while-the-vehicle-is-parked); a connected client
+does.
 
 ---
 
@@ -539,7 +575,8 @@ for the list of commands.
 | `version` | Show the firmware version and build, why the adapter last started (`power on`, `brownout (supply sagged)` - usually cranking -, `watchdog`, ...) and how long it has been up |
 | `board` | Show board information |
 | `link` | Show which transport holds the data link |
-| `link usb` / `link ble` / `link drop` | Hand the data link to USB or Bluetooth, or let go of it |
+| `link usb` / `link ble` / `link wifi` / `link drop` | Hand the data link to USB, Bluetooth or WiFi, or let go of it |
+| `wifi`, `wifi on` / `wifi off`, `wifi pass <p>`, `wifi ssid <n>` | The WiFi access point. See [Connecting over WiFi](#connecting-over-wifi) |
 | `power`, `power auto on\|off`, `power idle <min>`, `power vrun <mV>`, `power sleep` | Sleeping while parked. See [Sleeping while the vehicle is parked](#sleeping-while-the-vehicle-is-parked) |
 | `mode` | Show the current mode, the default, and every available mode |
 | `mode <name>` | Switch mode, for example `mode slcan` |

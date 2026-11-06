@@ -22,7 +22,7 @@ build and test it, how to add a command, and how to send a change.
 ## How the firmware is put together
 
 ```text
- USB CDC0 / BLE UART          USB CDC1                BLE control
+ USB CDC0 / BLE / WiFi        USB CDC1                BLE control
         │                        │                         │
    comm_iface ── link ──┐      shell ──── vif_ctrl ────────┘
                         │        │
@@ -34,7 +34,7 @@ build and test it, how to add a command, and how to send a change.
          can_bus · kline · j1850_pwm / j1850_vpw      board (pins, boost, sense)
 ```
 
-- **Transports** (`usb_cdc.c`, `ble_uart.c`) register with `comm_iface`. **`link`** decides
+- **Transports** (`usb_cdc.c`, `ble_uart.c`, `wifi_link.c`) register with `comm_iface`. **`link`** decides
   which one carries the single data link. The first to connect wins, and `link usb|ble|drop`
   overrides that.
 - **Front-ends** are the grammars the link speaks. Each one is a `vif_frontend_t` (`start`,
@@ -228,5 +228,7 @@ These are not implemented yet. A pull request for any of them is welcome.
 | ELM327 | Protocol A (SAE J1939) | Trucks |
 | ELM327 | STN/OBDLink extensions (`STI`, `STFAP`, `STCSEGT`…) | Check the STN reference manual for exact syntax |
 | Firmware | The second CAN transceiver | |
+| Firmware | The debug shell over WiFi | Only the data link is on TCP 35000 |
+| Firmware | Joining an existing WiFi network (station mode) | Only the adapter's own access point today |
 | Firmware | A persistent per-link default mode | A bench unit needs `mode usb slcan` after each power cycle |
 | Docs | Vehicle notes: buses, addresses, quirks | Add what you find on your vehicle to the manual's troubleshooting section |
