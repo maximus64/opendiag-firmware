@@ -66,7 +66,7 @@ Bluetooth.
 | `AR` | Automatically Receive | ✅ |
 | `AT0, 1, 2` | Adaptive Timing off, auto1, auto2 | ✅ |
 | `BD` | perform a Buffer Dump | |
-| `BI` | Bypass the Initialization sequence | ✅ |
+| `BI` | Bypass the Initialization sequence | ✅ K-Line, CAN and J1850 |
 | `DP` | Describe the current Protocol | ✅ |
 | `DPN` | Describe the Protocol by Number | ✅ |
 | `FT` | Filter for Transmitter off | ✅ |
@@ -196,6 +196,11 @@ Bluetooth.
 - **`BRD hh`**: USB and BLE have no baud rate, so only the handshake runs:
   `OK`, the ID string, then a bare carriage return from the client answers
   `OK` and a prompt.
+- **`BI` on CAN and J1850** answers `OK` and sends nothing: these buses have
+  no initiation to bypass, and a real ELM327 accepts it there too. Some tools
+  (Multiecuscan) send `AT BI` after `AT SP C` as their "ELM327 1.3 or later"
+  check and refuse every CAN module on `?`. With automatic search (`SP 0`) it
+  is still refused.
 - **`SD` / `RD`** and the PP values survive `AT Z` and a reconnect, but not
   a power cycle.
 - Long replies whose first consecutive frame is numbered 0 instead of 1 are
