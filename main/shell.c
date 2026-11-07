@@ -1469,22 +1469,26 @@ static void ctrl_command(int argc, char **argv) {
  * AUX_CAN header. AUX is always listen-only. Back to obd after a reset.
  */
 static void canport_command(int argc, char **argv) {
-    bool aux;
+    can_port_t port = CAN_PORT_OBD;
 
     if (argc == 2 && strcmp(argv[1], "aux") == 0)
-        aux = true;
+        port = CAN_PORT_AUX;
+    else if (argc == 2 && strcmp(argv[1], "ms") == 0)
+        port = CAN_PORT_MS;
     else if (argc == 2 && strcmp(argv[1], "obd") == 0)
-        aux = false;
+        port = CAN_PORT_OBD;
     else if (argc != 1) {
-        printf("Usage: canport [obd|aux]\n");
+        printf("Usage: canport [obd|aux|ms]\n");
         return;
     }
-    if (argc == 2 && can_bus_use_aux(aux) != ESP_OK) {
-        printf("canport: close the CAN bus first\n");
+    if (argc == 2 && vif_can_port_set(port) != ESP_OK) {
+        printf("canport: close the CAN bus and release pin 11 first\n");
         return;
     }
-    printf("canport: %s\n", can_bus_aux() ? "aux (J3, listen-only)"
-                                          : "obd (pins 6/14)");
+    if (argc == 2 && port == CAN_PORT_MS)
+        printf("canport: ms needs R18 and R19 fitted (0 ohm); pin 11 now "
+               "refuses programming voltage\n");
+    printf("canport: %s\n", can_bus_port_name(can_bus_port()));
 }
 
 /**
@@ -1506,7 +1510,7 @@ static void canbaud_command(int argc, char **argv) {
     if (n > sizeof(s) / sizeof(s[0]))
         n = sizeof(s) / sizeof(s[0]);
     printf("canbaud: %s, listen-only, %lu ms per rate\n",
-           can_bus_aux() ? "aux (J3)" : "obd (pins 6/14)", (unsigned long)ms);
+           can_bus_port_name(can_bus_port()), (unsigned long)ms);
     for (size_t i = 0; i < n; i++) {
         vif_bus_cfg_t cfg = {.bitrate = order[i], .listen_only = true};
 
@@ -1686,8 +1690,9 @@ const shell_command_t commands[] = {
      "Copy ELM327 requests/replies to this console. Usage: elmtrace [on|off]"},
     {"ctrl", ctrl_command, "Run a control command. Usage: ctrl <command>"},
     {"canport", canport_command,
-     "CAN transceiver for the next open: OBD socket or AUX_CAN header "
-     "(listen-only). Usage: canport [obd|aux]"},
+     "CAN port for the next open: OBD pins 6/14, AUX_CAN header "
+     "(listen-only) or pins 3/11 (needs R18/R19). Usage: canport "
+     "[obd|aux|ms]"},
     {"canbaud", canbaud_command,
      "Find the CAN bit rate listen-only, never transmitting. Usage: "
      "canbaud [ms per rate]"},

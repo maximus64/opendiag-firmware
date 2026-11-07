@@ -233,6 +233,20 @@ TEST(rates_near_an_offered_one_run_at_it_and_others_are_refused) {
     TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, can_bus_setup(0));
 }
 
+TEST(ms_port_uses_can1_pins_and_transmits) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_set_port(CAN_PORT_MS));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(125000));
+    TEST_ASSERT_EQUAL_INT(PIN_CAN1_TX, last_cfg.io_cfg.tx);
+    TEST_ASSERT_EQUAL_INT(PIN_CAN1_RX, last_cfg.io_cfg.rx);
+    TEST_ASSERT_FALSE(last_cfg.flags.enable_listen_only);
+    TEST_ASSERT_EQUAL_INT(0, silent1);
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_STATE,
+                          can_bus_set_port(CAN_PORT_OBD));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_teardown());
+    TEST_ASSERT_EQUAL_INT(1, silent1);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_set_port(CAN_PORT_OBD));
+}
+
 TEST(aux_port_uses_can1_pins_and_never_transmits) {
     TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_use_aux(true));
     TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000)); /* a normal open */

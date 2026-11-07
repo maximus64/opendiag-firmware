@@ -56,11 +56,13 @@ static struct {
 
 static uint8_t fake_tec, fake_rec;
 static uint32_t fake_frames, fake_errors;
+static can_port_t fake_port;
 
 void fake_can_reset(void) {
     memset(&g, 0, sizeof(g));
     fake_tec = fake_rec = 0;
     fake_frames = fake_errors = 0;
+    fake_port = CAN_PORT_OBD;
     g.baud = -1;
 }
 
@@ -179,6 +181,15 @@ void fake_can_set_error_counters(uint8_t tec, uint8_t rec) {
     fake_tec = tec;
     fake_rec = rec;
 }
+esp_err_t can_bus_set_port(can_port_t port) {
+    if (g.up)
+        return ESP_ERR_INVALID_STATE;
+    fake_port = port;
+    return ESP_OK;
+}
+
+can_port_t can_bus_port(void) { return fake_port; }
+
 void can_bus_activity(uint32_t *frames, uint32_t *errors) {
     *frames = g.up ? fake_frames : 0;
     *errors = g.up ? fake_errors : 0;

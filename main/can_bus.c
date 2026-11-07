@@ -64,7 +64,7 @@ static bool listen_only_active;
 /* The S3 has one TWAI controller; the GPIO matrix routes it to either
  * transceiver at open. ponytail: one bus at a time - two at once needs a
  * second controller (an external MCP2515 or a newer chip). */
-static bool aux_requested;
+static can_port_t port_requested = CAN_PORT_OBD;
 static gpio_num_t silent_pin = PIN_CAN0_SILENT; /* transceiver in use */
 static bool link_down_pending;
 static portMUX_TYPE task_notify_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -511,9 +511,10 @@ static esp_err_t can_setup(int baud_rate, bool manual, bool listen_only) {
     /* AUX_CAN is for tapping a bus that is not on the OBD socket (a C-CAN
      * with the engine and ABS on it): never drive it, whatever the client
      * asked for. */
-    if (aux_requested)
+    bool can1 = port_requested != CAN_PORT_OBD;
+    if (port_requested == CAN_PORT_AUX)
         listen_only = true;
-    silent_pin = aux_requested ? PIN_CAN1_SILENT : PIN_CAN0_SILENT;
+    silent_pin = can1 ? PIN_CAN1_SILENT : PIN_CAN0_SILENT;
     manual_recovery = manual;
     listen_only_active = listen_only;
     __atomic_store_n(&link_down_pending, false, __ATOMIC_RELAXED);
@@ -521,8 +522,8 @@ static esp_err_t can_setup(int baud_rate, bool manual, bool listen_only) {
     twai_onchip_node_config_t node_config = {
         .io_cfg =
             {
-                .tx = aux_requested ? PIN_CAN1_TX : PIN_CAN0_TX,
-                .rx = aux_requested ? PIN_CAN1_RX : PIN_CAN0_RX,
+                .tx = can1 ? PIN_CAN1_TX : PIN_CAN0_TX,
+                .rx = can1 ? PIN_CAN1_RX : PIN_CAN0_RX,
                 .quanta_clk_out = GPIO_NUM_NC,
                 .bus_off_indicator = GPIO_NUM_NC,
             },
@@ -669,16 +670,35 @@ esp_err_t can_bus_setup(int baud_rate) {
     return can_setup(baud_rate, false, false);
 }
 
-esp_err_t can_bus_use_aux(bool aux) {
+esp_err_t can_bus_set_port(can_port_t port) {
     /* The pins are taken at open; switching under an open bus would leave
      * the wrong transceiver un-silenced at close. */
     if (can_node)
         return ESP_ERR_INVALID_STATE;
-    aux_requested = aux;
+    if (port > CAN_PORT_MS)
+        return ESP_ERR_INVALID_ARG;
+    port_requested = port;
     return ESP_OK;
 }
 
-bool can_bus_aux(void) { return aux_requested; }
+can_port_t can_bus_port(void) { return port_requested; }
+
+const char *can_bus_port_name(can_port_t port) {
+    switch (port) {
+    case CAN_PORT_AUX:
+        return "aux (J3, listen-only)";
+    case CAN_PORT_MS:
+        return "ms (pins 3/11)";
+    default:
+        return "obd (pins 6/14)";
+    }
+}
+
+esp_err_t can_bus_use_aux(bool aux) {
+    return can_bus_set_port(aux ? CAN_PORT_AUX : CAN_PORT_OBD);
+}
+
+bool can_bus_aux(void) { return port_requested == CAN_PORT_AUX; }
 
 /* Dozens of frames on a running bus at either OBD bit rate. */
 #define CAN_LISTEN_FIRST_MS 150
