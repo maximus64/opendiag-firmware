@@ -495,7 +495,8 @@ doesn't acknowledge frames or send error frames, and refuses to transmit: `t`, `
 with a BELL. Received frames arrive as usual.
 
 Use it to sniff a bus you don't know yet, for example to find its bit rate: try each `S<n>` with
-`L`, and keep the one that shows frames. A wrong rate does no harm in listen-only.
+`L`, and keep the one that shows frames. A wrong rate does no harm in listen-only. The debug
+shell's `canbaud` does that search for you.
 
 - `O` still opens the channel normally, so nothing changes for tools that never send `L`.
 - To go from one mode to the other, close the channel with `C` first. Changing the bit rate with
@@ -589,6 +590,7 @@ for the list of commands.
 | `elmtrace on` / `elmtrace off` | Copy every ELM327 request (`ELMTRC: >`) and reply (`ELMTRC: <`) to this console, whether the link is on USB or Bluetooth. Closing the console turns it off |
 | `ctrl <command>` | Run a [control command](#control-commands) |
 | `canport obd` / `canport aux` | Choose where the next CAN open goes: the OBD socket (pins 6/14, default) or the AUX_CAN header J3 (pin 1 CAN-H, pin 2 CAN-L, pin 3 GND, no termination). `aux` is always listen-only, so a tapped bus is never driven. Only one CAN at a time. A reset goes back to `obd` |
+| `canbaud [ms]` | Find the bit rate of the CAN bus on the current `canport`. Opens it listen-only at every offered rate in turn (300 ms each by default, three times that below 50k), prints the valid frames and errors heard at each, and names the rate that matches. Never transmits, so it is safe on a bus you don't know. Close any open CAN session first |
 | `canguard on` / `canguard off` | Before the ELM327 front-end first transmits on a CAN protocol it listens for 150 ms without driving the bus. If it hears only errors and no valid frame, another bit rate is running on pins 6/14 (some vans carry a 50 kbit/s body bus there) and that protocol is skipped instead of flooding the bus. On by default; `off` restores the plain ELM327 behaviour |
 | `ble` | Show pairing status |
 | `ble pair` | Open the Bluetooth pairing window |
