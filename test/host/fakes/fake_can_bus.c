@@ -61,7 +61,10 @@ void fake_can_stage_overflow(void) {
     g.overflow_next = true;
 }
 
+static can_port_t fake_port;
+
 void fake_can_reset(void) {
+    fake_port = CAN_PORT_OBD;
     memset(&g, 0, sizeof(g));
     g.baud = -1;
 }
@@ -186,6 +189,16 @@ esp_err_t can_bus_teardown(void) {
 }
 
 void can_print_stat(void) {}
+
+esp_err_t can_bus_set_port(can_port_t port) {
+    if (g.up)
+        return ESP_ERR_INVALID_STATE;
+    fake_port = port;
+    return ESP_OK;
+}
+
+can_port_t can_bus_port(void) { return fake_port; }
+
 
 int can_send(const struct can_frame *frame) {
     if (!frame) {

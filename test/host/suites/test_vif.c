@@ -730,6 +730,27 @@ TEST(a_high_side_pin_is_driven_and_released) {
     TEST_ASSERT_FALSE(vif_any_pin_active());
 }
 
+TEST(the_ms_can_port_and_voltage_on_pin_11_exclude_each_other) {
+    /* With R18/R19 fitted pin 11 is CAN-L. */
+    TEST_ASSERT_EQUAL_INT(ESP_OK, vif_can_port_set(CAN_PORT_MS));
+    TEST_ASSERT_EQUAL_INT(
+        ESP_ERR_INVALID_STATE,
+        vif_pin_set(VIF_OWNER_SHELL, 11, VIF_PIN_VOLTAGE, 12000));
+    TEST_ASSERT_EQUAL_INT(-1, fake_board_hs_state(11));
+    /* Other pins are unaffected. */
+    TEST_ASSERT_EQUAL_INT(ESP_OK, vif_pin_set(VIF_OWNER_SHELL, OBD_PIN_HS,
+                                              VIF_PIN_VOLTAGE, 12000));
+    vif_pin_release_all(VIF_OWNER_SHELL);
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, vif_can_port_set(CAN_PORT_OBD));
+    TEST_ASSERT_EQUAL_INT(
+        ESP_OK, vif_pin_set(VIF_OWNER_SHELL, 11, VIF_PIN_VOLTAGE, 12000));
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_STATE, vif_can_port_set(CAN_PORT_MS));
+    vif_pin_release_all(VIF_OWNER_SHELL);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, vif_can_port_set(CAN_PORT_MS));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, vif_can_port_set(CAN_PORT_OBD));
+}
+
 TEST(one_high_side_pin_at_a_time_whoever_asks) {
     vif_pin_set(VIF_OWNER_LINK, OBD_PIN_HS, VIF_PIN_VOLTAGE, 12000);
 

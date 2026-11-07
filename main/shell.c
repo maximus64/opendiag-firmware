@@ -1468,29 +1468,26 @@ static void ctrl_command(int argc, char **argv) {
  * AUX_CAN header. AUX is always listen-only. Back to obd after a reset.
  */
 static void canport_command(int argc, char **argv) {
-    bool aux;
+    can_port_t port = CAN_PORT_OBD;
 
     if (argc == 2 && strcmp(argv[1], "aux") == 0)
-        aux = true;
+        port = CAN_PORT_AUX;
+    else if (argc == 2 && strcmp(argv[1], "ms") == 0)
+        port = CAN_PORT_MS;
     else if (argc == 2 && strcmp(argv[1], "obd") == 0)
-        aux = false;
+        port = CAN_PORT_OBD;
     else if (argc != 1) {
-        printf("Usage: canport [obd|aux]\n");
+        printf("Usage: canport [obd|aux|ms]\n");
         return;
     }
-    if (argc == 2) {
-        esp_err_t err = can_bus_use_aux(aux);
-        if (err == ESP_ERR_NOT_SUPPORTED) {
-            printf("canport: this board has no AUX_CAN header\n");
-            return;
-        }
-        if (err != ESP_OK) {
-            printf("canport: close the CAN bus first\n");
-            return;
-        }
+    if (argc == 2 && vif_can_port_set(port) != ESP_OK) {
+        printf("canport: close the CAN bus and release pin 11 first\n");
+        return;
     }
-    printf("canport: %s\n", can_bus_aux() ? "aux (J3, listen-only)"
-                                          : "obd (pins 6/14)");
+    if (argc == 2 && port == CAN_PORT_MS)
+        printf("canport: ms needs R18 and R19 fitted (0 ohm); pin 11 now "
+               "refuses programming voltage\n");
+    printf("canport: %s\n", can_bus_port_name(can_bus_port()));
 }
 
 /**
@@ -1579,7 +1576,7 @@ const shell_command_t commands[] = {
     {"ctrl", ctrl_command, "Run a control command. Usage: ctrl <command>"},
     {"canport", canport_command,
      "CAN transceiver for the next open: OBD socket or AUX_CAN header "
-     "(listen-only). Usage: canport [obd|aux]"},
+     "(listen-only). Usage: canport [obd|aux|ms]"},
     {"canguard", canguard_command,
      "ELM327: listen before transmitting on CAN, skip a bus at another bit "
      "rate. Usage: canguard [on|off]"},
