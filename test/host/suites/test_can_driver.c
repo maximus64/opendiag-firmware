@@ -220,6 +220,19 @@ TEST(listen_only_open_keeps_the_transceiver_silent_and_refuses_to_send) {
     TEST_ASSERT_EQUAL_INT(0, silent);
 }
 
+TEST(rates_near_an_offered_one_run_at_it_and_others_are_refused) {
+    /* 500 kbit/s / 6, as AT PB asks for it. */
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(83334));
+    TEST_ASSERT_EQUAL_INT(83333, last_cfg.bit_timing.bitrate);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_teardown());
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(33333));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_teardown());
+
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, can_bus_setup(57142));
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, can_bus_setup(0));
+}
+
 TEST(aux_port_uses_can1_pins_and_never_transmits) {
     TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_use_aux(true));
     TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000)); /* a normal open */

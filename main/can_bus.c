@@ -502,17 +502,12 @@ static esp_err_t can_setup(int baud_rate, bool manual, bool listen_only) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    switch (baud_rate) {
-    case 1000000:
-    case 500000:
-    case 250000:
-    case 125000:
-    case 50000:
-        break;
-    default:
+    uint32_t canonical = can_bitrate_canonical((uint32_t)baud_rate);
+    if (baud_rate <= 0 || canonical == 0) {
         ESP_LOGE(TAG, "Unsupported CAN baud rate %d\n", baud_rate);
         return ESP_ERR_INVALID_ARG;
     }
+    baud_rate = (int)canonical;
     /* AUX_CAN is for tapping a bus that is not on the OBD socket (a C-CAN
      * with the engine and ABS on it): never drive it, whatever the client
      * asked for. */

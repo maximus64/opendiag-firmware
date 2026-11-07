@@ -1318,6 +1318,13 @@ TEST(v1_sends_the_real_length) {
  * Protocols B and C: PB, PP, PPS
  * ------------------------------------------------------------------ */
 
+TEST(pb_divisor_six_runs_protocol_b_at_83k) {
+    elm_echo_off();
+    elm_ok("ATPB8106\r");
+    elm_ok("ATSPB\r");
+    TEST_ASSERT_EQUAL_INT(83333, fake_can_last_baud());
+}
+
 TEST(pb_sets_protocol_b_rate_and_id_length) {
     elm_echo_off();
     elm_ok("ATPB810A\r");
