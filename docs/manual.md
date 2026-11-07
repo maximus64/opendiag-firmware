@@ -603,3 +603,9 @@ for any damage arising from its use, including a bricked module, an immobilised 
 costs. You are responsible for everything you send to a vehicle. See the repository
 [README](https://github.com/maximus64/opendiag-firmware/blob/main/README.md) and
 [LICENSE](https://github.com/maximus64/opendiag-firmware/blob/main/LICENSE) for the full terms.
+
+### Medium-speed CAN on pins 3/11
+
+On OpenDIAG hardware v1, fit 0 ohm resistors at R18 and R19 before using `canport ms`. This routes CAN1 to OBD pin 3 (CAN-H) and pin 11 (CAN-L), enabling transmission after the listen-first guard. AUX remains listen-only. Boards without CAN1 refuse this port.
+
+Pin 11 cannot carry programming voltage while MS-CAN is selected; selecting MS-CAN is also refused while pin 11 is energised. Close the bus before changing ports with `canport obd|aux|ms`.
