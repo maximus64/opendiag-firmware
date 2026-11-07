@@ -172,6 +172,45 @@ TEST(a_search_does_not_transmit_into_a_bus_at_another_bit_rate) {
     TEST_ASSERT_TRUE(fake_bus_is_up(FAKE_BUS_KLINE));
 }
 
+/*
+ * The same van, with a client that fixes a CAN protocol - Multiecuscan asks
+ * for protocol B at 500k/29 bit for the ABS and then sends "10 03". The guard
+ * refuses the bus, and the request must fail as CAN ERROR. It used to drop
+ * the protocol back to automatic, search, find the K-Line and deliver the
+ * request to the engine.
+ */
+TEST(a_fixed_can_protocol_the_guard_refuses_never_falls_back_to_a_search) {
+    elm_echo_off();
+    elm_ok("ATH1\r");
+    fake_can_set_foreign_rate(true);
+    fake_bus_stage_response(FAKE_BUS_KLINE, bus_reply, sizeof(bus_reply), 5);
+
+    elm_ok("ATSP6\r");
+    TEST_ASSERT_EQUAL_STRING("6\r" ELM_PROMPT, elm_ask("ATDPN\r"));
+
+    TEST_ASSERT_EQUAL_STRING("CAN ERROR\r" ELM_PROMPT, elm_ask("1003\r"));
+    TEST_ASSERT_EQUAL_STRING("CAN ERROR\r" ELM_PROMPT, elm_ask("04021081\r"));
+
+    TEST_ASSERT_EQUAL_INT(0, fake_can_sent_count());
+    TEST_ASSERT_FALSE(fake_bus_is_up(FAKE_BUS_KLINE));
+    TEST_ASSERT_EQUAL_STRING("6\r" ELM_PROMPT, elm_ask("ATDPN\r"));
+}
+
+/* "A6" asks for a search when protocol 6 cannot be used, and gets one. */
+TEST(a_fixed_can_protocol_with_auto_fallback_still_searches) {
+    elm_echo_off();
+    elm_ok("ATH1\r");
+    fake_can_set_foreign_rate(true);
+    fake_bus_stage_response(FAKE_BUS_KLINE, bus_reply, sizeof(bus_reply), 5);
+
+    elm_ok("ATSPA6\r");
+
+    TEST_ASSERT_EQUAL_STRING(SEARCHING
+                             "48 6B 10 41 00 BE 3F B8 13 C4 \r" ELM_PROMPT,
+                             elm_ask("0100\r"));
+    TEST_ASSERT_EQUAL_INT(0, fake_can_sent_count());
+}
+
 TEST(with_canguard_off_can_is_opened_without_listening_first) {
     elm327_can_guard_set(false);
     elm_echo_off();

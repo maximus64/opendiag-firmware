@@ -895,6 +895,24 @@ static volatile bool can_guard = true;
 void elm327_can_guard_set(bool on) { can_guard = on; }
 bool elm327_can_guard_get(void) { return can_guard; }
 
+/**
+ * True when another owner (the shell) holds a bus. AT SP then has to say
+ * '?': the client cannot have CAN at all, which is not the same as a CAN
+ * that the listen-first guard keeps quiet for now.
+ */
+static bool elm327_bus_held_by_other(void) {
+    vif_bus_claim_t claims[VIF_BUS_GROUPS];
+
+    vif_bus_info(claims);
+    for (size_t i = 0; i < VIF_BUS_GROUPS; i++) {
+        if (claims[i].bus != VIF_BUS_NONE &&
+            claims[i].owner != VIF_OWNER_LINK) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static int elm327_set_protocol(elm327_ctx_t *e, int proto) {
     vif_bus_cfg_t cfg = {0};
     vif_bus_t bus = VIF_BUS_NONE;
@@ -973,6 +991,22 @@ static int elm327_set_protocol(elm327_ctx_t *e, int proto) {
     if (vif_bus_open(VIF_OWNER_LINK, bus, &cfg) != ESP_OK) {
         /* Startup failed; VIF may retain a claim until cleanup succeeds. */
         ESP_LOGE(TAG, "Protocol %d unavailable", proto);
+        if (bus == VIF_BUS_CAN && !elm327_bus_held_by_other()) {
+            /*
+             * Keep the protocol the client chose. Falling back to automatic
+             * here turned its next request into a search, and a search on a
+             * vehicle whose pins 6/14 run at another rate ends on the K-Line:
+             * a request meant for a CAN module - Multiecuscan's "10 03" for
+             * the ABS, or anything starting with 04 - reached the engine
+             * instead. A real ELM327 does not probe at AT SP; it answers
+             * CAN ERROR when the request is sent. elm327_can_ensure_open()
+             * tries again then, behind the same guard.
+             */
+            e->settings.header_id = header_id;
+            e->settings.header_digits = 8;
+            e->settings.current_protocol = proto;
+            return 1;
+        }
         e->settings.current_protocol = ELM327_PROTO_AUTO;
         return -1;
     }
@@ -1171,9 +1205,15 @@ static void elm327_select_protocol_cmd(elm327_ctx_t *e, const char *arg) {
     ESP_LOGI(TAG, "Set protocol: %d%s", proto,
              fallback ? " (auto fallback)" : "");
 
-    if (elm327_set_protocol(e, proto) != 0) {
+    int rc = elm327_set_protocol(e, proto);
+    if (rc < 0) {
         elm327_send_string(e, "?\r");
         return;
+    }
+    if (rc > 0 && fallback) {
+        /* "A6": the client asked for a search if protocol 6 cannot be used. */
+        e->settings.current_protocol = ELM327_PROTO_AUTO;
+        fallback = false;
     }
 
     /* After elm327_set_protocol(), which clears it on the way out of
