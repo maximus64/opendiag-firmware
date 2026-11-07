@@ -61,7 +61,10 @@ void fake_can_stage_overflow(void) {
     g.overflow_next = true;
 }
 
+static uint32_t fake_frames, fake_errors;
+
 void fake_can_reset(void) {
+    fake_frames = fake_errors = 0;
     memset(&g, 0, sizeof(g));
     g.baud = -1;
 }
@@ -186,6 +189,17 @@ esp_err_t can_bus_teardown(void) {
 }
 
 void can_print_stat(void) {}
+
+void can_bus_activity(uint32_t *frames, uint32_t *errors) {
+    *frames = g.up ? fake_frames : 0;
+    *errors = g.up ? fake_errors : 0;
+}
+
+void fake_can_set_activity(uint32_t frames, uint32_t errors) {
+    fake_frames = frames;
+    fake_errors = errors;
+}
+
 
 int can_send(const struct can_frame *frame) {
     if (!frame) {

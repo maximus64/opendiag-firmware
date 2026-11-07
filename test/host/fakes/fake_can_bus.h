@@ -97,3 +97,5 @@ const struct can_frame *fake_can_sent(int idx);
 
 void fake_can_fail_confirmed_send(void);
 void fake_can_abort_confirmed_send(void);
+
+void fake_can_set_activity(uint32_t frames, uint32_t errors);

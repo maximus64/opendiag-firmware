@@ -27,3 +27,6 @@ int can_receive(struct can_frame *frame, TickType_t ticks_to_wait);
  * that apply it.
  */
 extern const bus_ops_t can_bus_ops;
+
+/** Valid frames and errors since the current open; zero when closed. */
+void can_bus_activity(uint32_t *frames, uint32_t *errors);
