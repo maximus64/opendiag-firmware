@@ -14,6 +14,7 @@
 #include "esp_timer.h"
 #include "ble_uart.h"
 #include "board.h"
+#include "can_baud.h"
 #include "can_bus.h"
 #include "comm_iface.h"
 #include "common.h"
@@ -1487,6 +1488,49 @@ static void canport_command(int argc, char **argv) {
 }
 
 /**
+ * @brief Command handler for 'canbaud'
+ *
+ * Opens the CAN port listen-only at every offered rate and reports which
+ * one the bus runs at. Never transmits, so it is safe on an unknown bus.
+ */
+static void canbaud_command(int argc, char **argv) {
+    can_baud_sample_t s[16];
+    size_t n;
+    const uint32_t *order = can_baud_order(&n);
+    uint32_t ms = argc == 2 ? (uint32_t)atoi(argv[1]) : 300;
+
+    if (argc > 2 || ms < 50 || ms > 5000) {
+        printf("Usage: canbaud [ms per rate, 50-5000]\n");
+        return;
+    }
+    if (n > sizeof(s) / sizeof(s[0]))
+        n = sizeof(s) / sizeof(s[0]);
+    printf("canbaud: %s, listen-only, %lu ms per rate\n",
+           can_bus_aux() ? "aux (J3)" : "obd (pins 6/14)", (unsigned long)ms);
+    for (size_t i = 0; i < n; i++) {
+        vif_bus_cfg_t cfg = {.bitrate = order[i], .listen_only = true};
+
+        s[i] = (can_baud_sample_t){.rate = order[i]};
+        if (vif_bus_open(VIF_OWNER_SHELL, VIF_BUS_CAN, &cfg) != ESP_OK) {
+            printf("canbaud: the CAN bus is in use; close it first\n");
+            return;
+        }
+        /* The slow rates carry few frames: give them longer. */
+        vTaskDelay(pdMS_TO_TICKS(order[i] < 50000 ? ms * 3 : ms));
+        can_bus_activity(&s[i].frames, &s[i].errors);
+        vif_bus_close(VIF_OWNER_SHELL, VIF_BUS_CAN);
+        printf("  %7lu bit/s: %5lu frames, %5lu errors\n",
+               (unsigned long)s[i].rate, (unsigned long)s[i].frames,
+               (unsigned long)s[i].errors);
+    }
+    int best = can_baud_pick(s, n);
+    if (best < 0)
+        printf("canbaud: no rate matched (silent bus, or not CAN)\n");
+    else
+        printf("canbaud: %lu bit/s\n", (unsigned long)s[best].rate);
+}
+
+/**
  * @brief Command handler for 'canguard'
  *
  * Whether the ELM327 front-end listens before its first transmit on a CAN
@@ -1644,6 +1688,9 @@ const shell_command_t commands[] = {
     {"canport", canport_command,
      "CAN transceiver for the next open: OBD socket or AUX_CAN header "
      "(listen-only). Usage: canport [obd|aux]"},
+    {"canbaud", canbaud_command,
+     "Find the CAN bit rate listen-only, never transmitting. Usage: "
+     "canbaud [ms per rate]"},
     {"canguard", canguard_command,
      "ELM327: listen before transmitting on CAN, skip a bus at another bit "
      "rate. Usage: canguard [on|off]"},

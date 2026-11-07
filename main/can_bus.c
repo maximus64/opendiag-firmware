@@ -657,6 +657,14 @@ esp_err_t can_bus_teardown(void) {
  * translate: the length code goes in len, the id and its flags in id.
  * ------------------------------------------------------------------ */
 
+void can_bus_activity(uint32_t *frames, uint32_t *errors) {
+    bool up = can_node != NULL;
+
+    /* Every valid frame takes a receive sequence number, queued or dropped. */
+    *frames = up ? bus_rx_sequence(&rx_epoch) : 0;
+    *errors = up ? __atomic_load_n(&bus_errors, __ATOMIC_RELAXED) : 0;
+}
+
 esp_err_t can_bus_setup(int baud_rate) {
     return can_setup(baud_rate, false, false);
 }
