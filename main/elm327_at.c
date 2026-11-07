@@ -388,6 +388,8 @@ static void elm327_trace(char dir, const void *data, size_t len) {
  * the AT command table above needs them. */
 static bool elm327_is_kline(const elm327_ctx_t *e);
 static bool elm327_is_kwp(const elm327_ctx_t *e);
+static bool elm327_is_can(const elm327_ctx_t *e);
+static bool elm327_is_j1850(uint8_t proto);
 static bool elm327_kline_link(elm327_ctx_t *e, bus_link_t *out);
 static int elm327_kline_init(elm327_ctx_t *e, kline_init_mode_t mode);
 static void elm327_kline_reconcile(elm327_ctx_t *e);
@@ -1581,8 +1583,17 @@ static void elm327_at_command_handler(elm327_ctx_t *e, const char *cmd) {
     } else if (strcmp(cmd, "BI") == 0) {
         /* "allows an OBD protocol to be made active without requiring any
          * sort of initiation or handshaking to occur." Nothing goes on the
-         * wire; only our idea of the link changes. */
-        if (!elm327_is_kline(e)) {
+         * wire; only our idea of the link changes.
+         *
+         * CAN and J1850 have no initiation to bypass: a real ELM327 just
+         * says OK, and Multiecuscan sends AT BI on protocol C as its "ELM327
+         * 1.3 or later" check - a '?' there makes it refuse every CAN module.
+         * Only automatic search, where there is no protocol to make active,
+         * is still refused. */
+        if (elm327_is_can(e) ||
+            elm327_is_j1850(e->settings.current_protocol)) {
+            elm327_send_string(e, "OK\r");
+        } else if (!elm327_is_kline(e)) {
             elm327_send_string(e, "?\r");
         } else {
             kline_variant_t v =

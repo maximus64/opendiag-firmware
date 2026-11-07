@@ -1435,3 +1435,37 @@ TEST(brd_handshake_completes_on_a_bare_cr) {
     TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATBRD00\r"));
     elm_ok("ATBRT19\r");
 }
+
+/* ------------------------------------------------------------------ *
+ * AT BI on CAN
+ * ------------------------------------------------------------------ */
+
+/*
+ * CAN has no initiation to bypass, so a real ELM327 answers AT BI with OK.
+ * Multiecuscan sends exactly this after AT SP C as its "ELM327 1.3 or later"
+ * check and refuses every CAN module when the reply is '?'.
+ */
+TEST(bi_on_can_is_accepted_without_touching_the_bus) {
+    elm_echo_off();
+    elm_ok("ATSPC\r");
+
+    elm_ok("ATBI\r");
+
+    TEST_ASSERT_EQUAL_INT(0, fake_can_sent_count());
+}
+
+TEST(bi_on_can_leaves_the_protocol_active) {
+    on_can_11bit();
+
+    elm_ok("ATBI\r");
+
+    TEST_ASSERT_EQUAL_STRING("Y\r" ELM_PROMPT, elm_ask("ATIA\r"));
+}
+
+/* With automatic search there is no protocol for AT BI to make active. */
+TEST(bi_without_a_protocol_is_still_refused) {
+    elm_echo_off();
+    elm_ok("ATSP0\r");
+
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATBI\r"));
+}
