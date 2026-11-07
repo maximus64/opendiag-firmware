@@ -169,8 +169,9 @@ Bluetooth.
 ### Notes on the CAN additions
 
 - **Protocols B and C** run on the CAN transceiver at 500 kbit/s divided by
-  the `PB` divisor (or PP 2D / 2F). The driver takes 1000, 500, 250, 125 and
-  50 kbit/s; any other rate is refused when the bus opens. Like protocols 6
+  the `PB` divisor (or PP 2D / 2F). The driver takes 10, 20, 33.3, 50, 83.3,
+  95.2, 100, 125, 250, 500, 800 and 1000 kbit/s; any other rate is refused
+  when the bus opens. Like protocols 6
   to 9, they listen before driving the bus (`canguard`).
 - **`CRA` / `CF` / `CM`** replace the ISO 15765-4 reply ranges (7E8-7EF,
   18DAF1xx). With a filter set, a flow control for a physical request goes

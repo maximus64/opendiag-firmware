@@ -357,7 +357,7 @@ of the data. By default the adapter only accepts replies on 7E8–7EF (11-bit) a
 
 | Command | Use |
 | --- | --- |
-| `AT PB 81 0A` then `AT SP B` | 11-bit CAN at 50 kbit/s (500 ÷ 0A), ISO 15765-4 framing |
+| `AT PB 81 0A` then `AT SP B` | 11-bit CAN at 50 kbit/s (500 ÷ 0A), ISO 15765-4 framing. Divisors that give an offered rate work too: `06` is 83.3k, `05` 100k, `0F` 33.3k, `19` 20k, `32` 10k |
 | `AT SH 7B0` | the request identifier |
 | `AT CRA 7C0` | accept replies on 7C0 (`X` is a wildcard digit: `7CX`) |
 | `AT CEA hh` | put extended address `hh` in front of every request |
@@ -412,7 +412,7 @@ applications**. That covers nearly all J2534 software. A native 64-bit applicati
 
 | J2534 protocol | Baud rates |
 | --- | --- |
-| CAN, ISO 15765 | 50k, 125k, 250k, 500k, 1M |
+| CAN, ISO 15765 | 10k, 20k, 33.3k, 50k, 83.3k, 95.2k, 100k, 125k, 250k, 500k, 800k, 1M |
 | J1850 PWM | 41.6k |
 | J1850 VPW | 10.4k |
 | ISO 9141, ISO 14230 | K-Line, with L-Line on pin 15 unless the application asks for K-only |
@@ -474,13 +474,19 @@ Supported bit rates:
 
 | Command | Rate |
 | --- | --- |
+| `S0` | 10 kbit/s |
+| `S1` | 20 kbit/s |
 | `S2` | 50 kbit/s |
+| `S3` | 100 kbit/s |
 | `S4` | 125 kbit/s |
 | `S5` | 250 kbit/s |
 | `S6` | 500 kbit/s |
+| `S7` | 800 kbit/s |
 | `S8` | 1 Mbit/s |
+| `sXXYY` | The rate SJA1000 registers BTR0 = `XX`, BTR1 = `YY` describe at 16 MHz, as CANUSB tools send it. For example `s052B` is 83.3 kbit/s |
 
-The adapter refuses other rates rather than substituting a nearby one.
+`s` also reaches 33.3, 83.3 and 95.2 kbit/s, which some makes use on comfort and medium-speed
+buses. The adapter refuses any other rate rather than substituting a nearby one.
 
 ### Listen-only
 
