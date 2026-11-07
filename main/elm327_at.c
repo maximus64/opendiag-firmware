@@ -3451,12 +3451,35 @@ static bool elm327_at_extra_command(elm327_ctx_t *e, const char *cmd) {
             reply = bad;
     } else if (strcmp(cmd, "MA") == 0 || strncmp(cmd, "MR", 2) == 0 ||
                strncmp(cmd, "MT", 2) == 0) {
-        /* ponytail: CAN only, and MR/MT on 29 bit IDs only, where the
-         * receiver and transmitter are the second and last ID bytes. */
+        /* ponytail: CAN and K-Line. On CAN, MR/MT on 29 bit IDs only,
+         * where the receiver and transmitter are the second and last ID
+         * bytes; on K-Line they are the target and source header bytes. */
         vif_bus_cfg_t cfg = {0};
-        if (!elm327_is_can(e) ||
-            (cmd[1] != 'A' &&
-             (elm327_can_is_11bit(e) || at_parse_byte(&cmd[2], &b)))) {
+        bool kline = elm327_bus(e) == VIF_BUS_KLINE;
+        if (cmd[1] != 'A' && at_parse_byte(&cmd[2], &b)) {
+            reply = bad;
+        } else if (kline) {
+            /* Opened with no initialisation, so the adapter never drives
+             * pin 7: it only frames what others say, by the P1max gap,
+             * without dropping messages whose checksum fails. */
+            if (vif_bus_release_all(VIF_OWNER_LINK) != ESP_OK ||
+                vif_bus_open(VIF_OWNER_LINK, VIF_BUS_KLINE, NULL) != ESP_OK ||
+                vif_bus_param_set(VIF_OWNER_LINK, VIF_BUS_KLINE,
+                                  BUS_P_DATA_RATE, 10400) != 0 ||
+                vif_bus_param_set(VIF_OWNER_LINK, VIF_BUS_KLINE,
+                                  BUS_P_KLINE_FRAME_MODE,
+                                  BUS_KLINE_FRAME_DISCOVERY) != 0 ||
+                vif_bus_param_set(VIF_OWNER_LINK, VIF_BUS_KLINE,
+                                  BUS_P_CHECKSUM_RX, 0) != 0) {
+                vif_bus_release_all(VIF_OWNER_LINK);
+                reply = bad;
+            } else {
+                e->monitor = cmd[1];
+                e->monitor_addr = b;
+                reply = NULL;
+            }
+        } else if (!elm327_is_can(e) ||
+                   (cmd[1] != 'A' && elm327_can_is_11bit(e))) {
             reply = bad;
         } else {
             /* Silent monitoring, the ELM327's CSM1 default: reopened
@@ -3489,9 +3512,39 @@ static bool elm327_at_extra_command(elm327_ctx_t *e, const char *cmd) {
  * ponytail: drained every poll (50 ms) from a 32 frame queue. A busy 500k bus
  * overflows it and frames are lost; SLCAN is the tool for a full capture.
  */
+/** The K-Line half of the monitor: whole messages, as framed by the gap. */
+static void elm327_monitor_poll_kline(elm327_ctx_t *e) {
+    uint8_t data[64];
+    char line[3 * sizeof(data) + 2];
+    bool printed = false;
+
+    for (unsigned i = 0; i < 16; i++) {
+        bus_msg_t msg = {.data = data, .cap = sizeof(data)};
+        if (vif_bus_recv(VIF_OWNER_LINK, VIF_BUS_KLINE, &msg, 0) < 0)
+            break;
+        if (msg.len == 0)
+            continue; /* a loss marker */
+        /* Header: format, target, source. MR/MT need all three. */
+        if (e->monitor != 'A' &&
+            (msg.len < 3 || data[e->monitor == 'R' ? 1 : 2] != e->monitor_addr))
+            continue;
+        *elm327_append_hex(e, line, data, msg.len) = '\0';
+        elm327_send_string(e, line);
+        elm327_send_string(e, "\r");
+        printed = true;
+    }
+    if (printed)
+        elm327_uart_flush(e);
+}
+
 static void elm327_monitor_poll(elm327_ctx_t *e) {
     struct can_frame rx;
     bool printed = false;
+
+    if (elm327_bus(e) == VIF_BUS_KLINE) {
+        elm327_monitor_poll_kline(e);
+        return;
+    }
 
     for (unsigned i = 0; i < 64 && can_frame_recv(&rx, 0) == 0; i++) {
         bool ext = (rx.id & CAN_EFF_FLAG) != 0;
