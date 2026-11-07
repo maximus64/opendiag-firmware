@@ -87,7 +87,8 @@ Implemented and working:
 Not yet implemented:
 
 - Protocol 10 (SAE J1939)
-- The second CAN transceiver
+- Two CAN buses at once (the second transceiver serves the AUX header or, after a rework,
+  OBD-II pins 3/11, one at a time)
 - A persistent per-link default, so a bench unit has to be told `mode usb slcan` after each
   power cycle
 

@@ -521,6 +521,26 @@ back to the OBD-II connector, and so does a restart.
 - `canport` is refused while a CAN bus is open. Close it first.
 - Keep the tap short and twisted, and don't add a terminating resistor.
 
+### A second CAN on OBD-II pins 3 and 11 (board rework)
+
+Ford, Mazda and Volvo, among others, put a medium speed CAN on OBD-II pins 3 (CAN-H) and 11
+(CAN-L), next to the high speed one on 6 and 14. The board can reach it through the second
+transceiver, which the auxiliary port also uses, but the two links are left unpopulated:
+
+1. Fit **0 Ω resistors (0402) on R18 and R19**. R18 joins pin 3 to CAN1-H, R19 joins pin 11 to
+   CAN1-L.
+2. In the debug shell, before opening CAN: `canport ms`.
+
+The next CAN open then goes to pins 3/11 and **transmits** like the OBD-II port, after the same
+listen-first check. Find its rate with `canbaud`; 125 kbit/s is common. `canport obd` or a restart
+goes back to pins 6/14.
+
+> [!CAUTION]
+> After the rework, pin 11 also carries CAN-L. The adapter refuses programming voltage on pin 11
+> while `canport ms` is selected, and refuses `canport ms` while pin 11 is energised. With the
+> resistors fitted and `canport obd` selected, don't put voltage on pin 11 of a vehicle that uses
+> it for CAN.
+
 ---
 
 ## Switching modes
@@ -589,7 +609,7 @@ for the list of commands.
 | `mode <name>` | Switch mode, for example `mode slcan` |
 | `elmtrace on` / `elmtrace off` | Copy every ELM327 request (`ELMTRC: >`) and reply (`ELMTRC: <`) to this console, whether the link is on USB or Bluetooth. Closing the console turns it off |
 | `ctrl <command>` | Run a [control command](#control-commands) |
-| `canport obd` / `canport aux` | Choose where the next CAN open goes: the OBD socket (pins 6/14, default) or the AUX_CAN header J3 (pin 1 CAN-H, pin 2 CAN-L, pin 3 GND, no termination). `aux` is always listen-only, so a tapped bus is never driven. Only one CAN at a time. A reset goes back to `obd` |
+| `canport obd` / `canport aux` / `canport ms` | Choose where the next CAN open goes: the OBD socket (pins 6/14, default), the AUX_CAN header J3 (pin 1 CAN-H, pin 2 CAN-L, pin 3 GND, no termination), or OBD pins 3/11 after [fitting R18 and R19](#a-second-can-on-obd-ii-pins-3-and-11-board-rework). `aux` is always listen-only, so a tapped bus is never driven. Only one CAN at a time. A reset goes back to `obd` |
 | `canbaud [ms]` | Find the bit rate of the CAN bus on the current `canport`. Opens it listen-only at every offered rate in turn (300 ms each by default, three times that below 50k), prints the valid frames and errors heard at each, and names the rate that matches. Never transmits, so it is safe on a bus you don't know. Close any open CAN session first |
 | `canguard on` / `canguard off` | Before the ELM327 front-end first transmits on a CAN protocol it listens for 150 ms without driving the bus. If it hears only errors and no valid frame, another bit rate is running on pins 6/14 (some vans carry a 50 kbit/s body bus there) and that protocol is skipped instead of flooding the bus. On by default; `off` restores the plain ELM327 behaviour |
 | `ble` | Show pairing status |

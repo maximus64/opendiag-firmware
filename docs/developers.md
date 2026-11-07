@@ -227,7 +227,7 @@ These are not implemented yet. A pull request for any of them is welcome.
 | ELM327 | `CV` voltage calibration, `@2`/`@3`, `RTR`, `C0`/`C1`, `CTM`/`JTM`, `IFR4–6`, `PP 00–2B` | Smaller items |
 | ELM327 | Protocol A (SAE J1939) | Trucks |
 | ELM327 | STN/OBDLink extensions (`STI`, `STFAP`, `STCSEGT`…) | Check the STN reference manual for exact syntax |
-| Firmware | The second CAN transceiver | |
+| Firmware | Two CAN buses at once | One TWAI controller; the second transceiver serves AUX or pins 3/11 in turn |
 | Firmware | The debug shell over WiFi | Only the data link is on TCP 35000 |
 | Firmware | Joining an existing WiFi network (station mode) | Only the adapter's own access point today |
 | Firmware | A persistent per-link default mode | A bench unit needs `mode usb slcan` after each power cycle |
