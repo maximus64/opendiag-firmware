@@ -2231,6 +2231,23 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
             elm327_print_can_frame(e, rx.id, rx.dlc, rx.data);
             return 0;
         }
+        /* CAF0 without AT CEA: a reply whose first byte is not an ISO-TP
+         * PCI is an extended address the client handles itself - the Fiat
+         * body computer answers 7B0 "04 02 10 81" from 7C0 as "F1 02 50 81".
+         * The ISO-TP stream would ignore it and the client would read NO
+         * DATA; a real ELM327 shows every frame that passes the filter, so
+         * print it as it arrived and keep collecting. */
+        if (!formatted && !a && rx.data[0] >> 4 > 3) {
+            elm327_print_can_frame(e, rx.id, rx.dlc, rx.data);
+            elm327_timing_reply(e, (uint32_t)Timer_elapsed_ms(&since_request),
+                                false);
+            frame_counter++;
+            if (num_frame > 0 && frame_counter >= (unsigned)num_frame)
+                return 0;
+            if (!response_pending)
+                Timer_start(&timer, elm327_collection_window(e));
+            continue;
+        }
         isotp_rx_t *stream = NULL;
         isotp_rx_t *free_stream = NULL;
         for (unsigned i = 0; i < 8; i++) {

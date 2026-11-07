@@ -1469,3 +1469,58 @@ TEST(bi_without_a_protocol_is_still_refused) {
 
     TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATBI\r"));
 }
+
+/* ------------------------------------------------------------------ *
+ * CAF0 with an extended address the client handles itself
+ * ------------------------------------------------------------------ */
+
+/*
+ * Multiecuscan's set-up for the Fiat/PSA body computer on the 50 kbit/s
+ * B-CAN, as captured on a Jumper X250: no AT CEA, CAF0, and the extended
+ * address written as the first data byte. The ECU answers with its own
+ * extended address (F1) first, which is not an ISO-TP PCI. It must be shown,
+ * not dropped as NO DATA.
+ */
+static void on_bcan_raw_like_multiecuscan(void) {
+    elm_echo_off();
+    elm_ok("ATPP2CSV81\r");
+    elm_ok("ATPP2CON\r");
+    elm_ok("ATPP2DSV0A\r");
+    elm_ok("ATPP2DON\r");
+    /* PP values take effect at the next reset, so Multiecuscan sends ATZ. */
+    elm_ask("ATZ\r");
+    elm_echo_off();
+    elm_ok("ATH0\r");
+    elm_ok("ATSPB\r");
+    elm_ok("ATS0\r");
+    elm_ok("ATCAF0\r");
+    elm_ok("ATCFC0\r");
+    elm_ok("ATCRA7C0\r");
+    elm_ok("ATSH7B0\r");
+    elm_ok("ATST29\r");
+}
+
+TEST(caf0_shows_a_reply_that_starts_with_an_extended_address) {
+    static const uint8_t reply[8] = {0xF1, 0x02, 0x50, 0x81,
+                                     0x00, 0x00, 0x00, 0x00};
+    on_bcan_raw_like_multiecuscan();
+    fake_can_stage_response(0x7C0, 8, reply, 10);
+
+    TEST_ASSERT_EQUAL_STRING("F102508100000000\r" ELM_PROMPT,
+                             elm_ask("04021081\r"));
+
+    const struct can_frame *tx = fake_can_sent(0);
+    TEST_ASSERT_NOT_NULL(tx);
+    TEST_ASSERT_EQUAL_HEX32(0x7B0, tx->id);
+    TEST_ASSERT_EQUAL_INT(8, tx->dlc);
+    TEST_ASSERT_EQUAL_MEM("\x04\x02\x10\x81\x00\x00\x00\x00", tx->data, 8);
+}
+
+TEST(caf0_with_an_extended_address_still_honours_the_receive_filter) {
+    static const uint8_t other[8] = {0xF1, 0x02, 0x50, 0x81,
+                                     0x00, 0x00, 0x00, 0x00};
+    on_bcan_raw_like_multiecuscan();
+    fake_can_stage_response(0x7C3, 8, other, 10);
+
+    TEST_ASSERT_EQUAL_STRING("NO DATA\r" ELM_PROMPT, elm_ask("04021081\r"));
+}
