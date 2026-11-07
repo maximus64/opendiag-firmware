@@ -201,6 +201,24 @@ Bluetooth.
 - Long replies whose first consecutive frame is numbered 0 instead of 1 are
   accepted.
 
+### Error messages
+
+What a request can answer besides its data, as the ELM327 words it:
+
+| Message | When |
+| --- | --- |
+| `NO DATA` | Nothing answered within the timeout |
+| `?` | The request itself is wrong: not hex, or too long for one CAN frame |
+| `CAN ERROR` | The CAN bus could not be opened (for example, the listen-first check found another bit rate on it) or a frame or flow control could not be sent |
+| `BUS ERROR` | A K-Line or J1850 transmission failed: a collision, a broken echo, the driver refused it |
+| `BUS BUSY` | The K-Line or J1850 bus never went idle long enough to start |
+| `DATA ERROR` | A multi-frame CAN reply arrived broken: out of sequence or longer than it said |
+| `<DATA ERROR` | At the end of a K-Line or J1850 line: that message's checksum failed. The data is shown anyway |
+| `BUFFER FULL` | Before a line: replies were lost because they arrived faster than they were read |
+| `BUS INIT: ...ERROR` | The K-Line initialisation failed |
+
+A failed automatic search still answers `NO DATA` or `?` as before.
+
 ### Custom Extensions (Not in ELM327 Spec)
 
 | CMD | Description |
