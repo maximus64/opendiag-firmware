@@ -156,6 +156,37 @@ TEST(the_five_baud_init_runs_on_the_first_request) {
     TEST_ASSERT_EQUAL_INT(1, fake_bus_sync_count());
 }
 
+TEST(a_bus_that_never_goes_idle_is_bus_busy) {
+    elm_echo_off();
+    elm_kline_select("ATSP3\r");
+    fake_bus_fail_next_send_rc(FAKE_BUS_KLINE, BUS_ERR_BUS_BUSY);
+
+    TEST_ASSERT_EQUAL_STRING("BUS BUSY\r" ELM_PROMPT, elm_ask("0100\r"));
+}
+
+TEST(a_reply_with_a_bad_checksum_is_shown_and_marked) {
+    static const uint8_t reply[] = {0x48, 0x6B, 0x10, 0x41, 0x00, 0xBE, 0x23};
+
+    elm_echo_off();
+    elm_kline_select("ATSP3\r");
+    elm_ok("ATH1\r");
+    fake_bus_stage_response_status(FAKE_BUS_KLINE, reply, sizeof(reply), 5,
+                                   BUS_RX_BAD_CHECKSUM);
+    TEST_ASSERT_EQUAL_STRING("48 6B 10 41 00 BE 23 <DATA ERROR\r" ELM_PROMPT,
+                             elm_ask("0100\r"));
+}
+
+TEST(lost_data_before_a_reply_is_buffer_full) {
+    static const uint8_t reply[] = {0x48, 0x6B, 0x10, 0x41, 0x00, 0xBE, 0x22};
+
+    elm_echo_off();
+    elm_kline_select("ATSP3\r");
+    fake_bus_stage_response_status(FAKE_BUS_KLINE, reply, sizeof(reply), 5,
+                                   BUS_RX_BUFFER_OVERFLOW);
+    TEST_ASSERT_EQUAL_STRING("BUFFER FULL\r41 00 BE \r" ELM_PROMPT,
+                             elm_ask("0100\r"));
+}
+
 TEST(the_link_is_initialised_once_and_then_left_alone) {
     static const uint8_t reply[] = {0x48, 0x6B, 0x10, 0x41, 0x00, 0xBE, 0x22};
 
@@ -197,7 +228,7 @@ TEST(a_failed_pwm_transmit_is_reported) {
     elm_ok("ATSP1\r");
     fake_bus_fail_next_send(FAKE_BUS_J1850_PWM);
 
-    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("0100\r"));
+    TEST_ASSERT_EQUAL_STRING("BUS ERROR\r" ELM_PROMPT, elm_ask("0100\r"));
 }
 
 TEST(a_failed_vpw_transmit_is_reported) {
@@ -205,7 +236,7 @@ TEST(a_failed_vpw_transmit_is_reported) {
     elm_ok("ATSP2\r");
     fake_bus_fail_next_send(FAKE_BUS_J1850_VPW);
 
-    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("0100\r"));
+    TEST_ASSERT_EQUAL_STRING("BUS ERROR\r" ELM_PROMPT, elm_ask("0100\r"));
 }
 
 TEST(a_failed_kline_transmit_is_reported) {
@@ -213,7 +244,7 @@ TEST(a_failed_kline_transmit_is_reported) {
     elm_kline_select("ATSP3\r");
     fake_bus_fail_next_send(FAKE_BUS_KLINE);
 
-    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("0100\r"));
+    TEST_ASSERT_EQUAL_STRING("BUS ERROR\r" ELM_PROMPT, elm_ask("0100\r"));
 }
 
 /* ------------------------------------------------------------------ *
@@ -1315,7 +1346,7 @@ TEST(disabled_responses_count_zero_and_send_failure_do_not_train) {
     elm_ok("ATR1\r");
     TEST_ASSERT_EQUAL_STRING(ELM_PROMPT, elm_ask("01000\r"));
     fake_bus_fail_next_send(FAKE_BUS_KLINE);
-    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("0100\r"));
+    TEST_ASSERT_EQUAL_STRING("BUS ERROR\r" ELM_PROMPT, elm_ask("0100\r"));
     TEST_ASSERT_EQUAL_INT(30, g_elm->timing.estimate_ms);
     TEST_ASSERT_EQUAL_INT(4, g_elm->timing.count);
     TEST_ASSERT_FALSE(g_elm->timing.watch.active);
