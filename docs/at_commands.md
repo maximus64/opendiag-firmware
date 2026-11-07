@@ -73,9 +73,9 @@ Bluetooth.
 | `FT hh` | Filter for Transmitter = hh | ✅ |
 | `H0, H1` | Headers off, or on | ✅ |
 | `IA` | Is the protocol Active? | ✅ |
-| `MA` | Monitor All | ✅ CAN only |
-| `MR hh` | Monitor for Receiver = hh | ✅ CAN 29 bit only |
-| `MT hh` | Monitor for Transmitter = hh | ✅ CAN 29 bit only |
+| `MA` | Monitor All | ✅ CAN and K-Line |
+| `MR hh` | Monitor for Receiver = hh | ✅ CAN 29 bit and K-Line |
+| `MT hh` | Monitor for Transmitter = hh | ✅ CAN 29 bit and K-Line |
 | `NL` | Normal Length messages | ✅ |
 | `PC` | Protocol Close | ✅ |
 | `R0, R1` | Responses off, or on | ✅ |
@@ -185,6 +185,12 @@ Bluetooth.
   default `CSM1`, and release it when stopped. Frames are taken from a
   32-frame queue every 50 ms, so a busy 500 kbit/s bus drops frames: use
   SLCAN for a full capture.
+- **`MA` / `MR` / `MT` on K-Line** (protocols 3, 4 and 5) listen on pin 7 at
+  10.4 kbaud without initialising, so the adapter never drives the line. Each
+  message, as the gap between bytes delimits it, is printed as it was on the
+  wire: header, data and checksum, also when the checksum is wrong. `MR hh` and
+  `MT hh` keep messages whose target or source header byte is `hh`. Use it to
+  watch what another scan tool asks an ECU.
 - **`CS`** prints `T:hh R:hh`, the controller's transmit and receive error
   counters, read while the bus is open.
 - **`BRD hh`**: USB and BLE have no baud rate, so only the handshake runs:
