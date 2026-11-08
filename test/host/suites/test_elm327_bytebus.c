@@ -946,6 +946,62 @@ TEST(at_fi_runs_a_fast_init_and_only_on_protocol_5) {
     TEST_ASSERT_EQUAL_INT(1, fake_bus_sync_count());
 }
 
+TEST(fast_init_is_functional_to_the_obd_group_by_default) {
+    elm_echo_off();
+    elm_ok("ATSP5\r");
+    TEST_ASSERT_EQUAL_STRING("BUS INIT: OK\r" ELM_PROMPT, elm_ask("ATFI\r"));
+
+    const bus_init_t *init = fake_bus_kline_last_init();
+    TEST_ASSERT_EQUAL_INT(4, init->msg_len);
+    TEST_ASSERT_EQUAL_MEM("\xc1\x33\xf1\x81", init->msg, 4);
+    TEST_ASSERT_EQUAL_INT(0x33, init->address);
+}
+
+TEST(a_physical_header_starts_the_session_on_that_ecu) {
+    elm_echo_off();
+    elm_ok("ATSP5\r");
+    elm_ok("ATSH8120F1\r");
+    TEST_ASSERT_EQUAL_STRING("BUS INIT: OK\r" ELM_PROMPT, elm_ask("ATFI\r"));
+
+    const bus_init_t *init = fake_bus_kline_last_init();
+    TEST_ASSERT_EQUAL_INT(4, init->msg_len);
+    TEST_ASSERT_EQUAL_MEM("\x81\x20\xf1\x81", init->msg, 4);
+    TEST_ASSERT_EQUAL_INT(0x20, init->address);
+}
+
+TEST(a_physical_header_with_its_own_source_keeps_it) {
+    elm_echo_off();
+    elm_ok("ATSP5\r");
+    elm_ok("ATSH80E9FA\r");
+    TEST_ASSERT_EQUAL_STRING("BUS INIT: OK\r" ELM_PROMPT, elm_ask("ATFI\r"));
+
+    const bus_init_t *init = fake_bus_kline_last_init();
+    TEST_ASSERT_EQUAL_MEM("\x81\xe9\xfa\x81", init->msg, 4);
+    TEST_ASSERT_EQUAL_INT(0xE9, init->address);
+}
+
+TEST(a_functional_header_still_uses_the_iso_init_address) {
+    elm_echo_off();
+    elm_ok("ATSP5\r");
+    elm_ok("ATSHC133F1\r");
+    elm_ok("ATIIA20\r");
+    TEST_ASSERT_EQUAL_STRING("BUS INIT: OK\r" ELM_PROMPT, elm_ask("ATFI\r"));
+
+    TEST_ASSERT_EQUAL_MEM("\xc1\x20\xf1\x81", fake_bus_kline_last_init()->msg,
+                          4);
+}
+
+TEST(a_physical_header_reaches_the_ecu_through_the_lazy_init_too) {
+    elm_echo_off();
+    elm_ok("ATSP5\r");
+    elm_ok("ATSH8120F1\r");
+    elm_ask("1081\r");
+
+    TEST_ASSERT_EQUAL_INT(1, fake_bus_sync_count());
+    TEST_ASSERT_EQUAL_MEM("\x81\x20\xf1\x81", fake_bus_kline_last_init()->msg,
+                          4);
+}
+
 TEST(at_kw_reports_the_key_bytes_the_vehicle_sent) {
     elm_echo_off();
     elm_kline_select("ATSP3\r");

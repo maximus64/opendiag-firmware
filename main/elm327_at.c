@@ -2848,6 +2848,23 @@ static void elm327_kline_init_args(const elm327_ctx_t *e,
         return;
     }
 
+    /* A header whose format byte asks for physical addressing (A1 A0 = 1 0,
+     * ISO 14230-2 clause 4.1.1) names one ECU, and a manufacturer tool
+     * starts that ECU's session with a physically addressed request:
+     * AT SH 81 20 F1 then 81 20 F1 81 for the ABS at $20. Most body and
+     * chassis ECUs on a K-Line answer nothing else, because they are not
+     * members of the functional OBD group $33. The target and source come
+     * from the header, which is also what every later request carries. */
+    if ((e->settings.header_id >> 16 & 0xC0) == 0x80) {
+        io->address = (uint8_t)(e->settings.header_id >> 8);
+        io->msg[0] = 0x81;
+        io->msg[1] = io->address;
+        io->msg[2] = (uint8_t)e->settings.header_id;
+        io->msg[3] = KLINE_SVC_START_COMM;
+        io->msg_len = 4;
+        return;
+    }
+
     /* C1 33 F1 81: functional addressing, every emission related ECU, this
      * tester, StartCommunication. ISO 14230-2 clause 5.1.5.3, and the only
      * form ISO 14230-4 allows for legislated OBD. The address word is what a

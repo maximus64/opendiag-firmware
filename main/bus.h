@@ -356,6 +356,8 @@ typedef struct {
     uint8_t key[2];
     uint16_t key_code; /**< ISO 14230-2 Table 5 identifier, 2000..2031. */
     uint8_t address;   /**< The address the handshake was directed to. */
+    bool physical;     /**< K-Line: the session was started physically
+                            addressed, so it is ended the same way. */
     uint32_t baud;
 
     uint32_t w1_us; /**< Address word to synchronisation pattern. */
