@@ -120,6 +120,20 @@ Bluetooth.
 | `SW 00` | Stop sending Wakeup messages | ✅ |
 | `WM [1 - 6 bytes]` | set the Wakeup Message | ✅ |
 
+On protocol 5 the fast initiation follows the header. By default, and with any
+functional header (`AT SH C1 33 F1`, format byte `Cx`), it is the OBD request
+`C1 33 F1 81`, and `AT IIA hh` changes its target. With a physical header
+(format byte `8x`, for example `AT SH 81 20 F1`), the session is started on that
+one ECU, `81 20 F1 81`, and is ended the same way. Body and chassis ECUs that
+are not in the OBD group `$33`, such as the ABS at `$20` on Fiat/PSA vehicles,
+answer nothing else:
+
+```
+AT SP 5
+AT SH 81 20 F1
+10 81            -> BUS INIT: OK, then 50 81 from the ABS
+```
+
 ### CAN Specific Commands (protocols 6 to C)
 
 | CMD | Description | Supported |
