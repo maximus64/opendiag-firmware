@@ -650,3 +650,38 @@ TEST(a_well_formed_message_is_always_recognised_at_its_own_length) {
         TEST_ASSERT_TRUE(kline_frame_ok(buf, n));
     }
 }
+
+/* ------------------------------------------------------------------ *
+ * Bit banged characters, for a KKL host's 5 baud address word
+ * ------------------------------------------------------------------ */
+
+static void assert_levels(const char *want, uint8_t byte, unsigned bits,
+                          unsigned parity) {
+    bool got[KLINE_CHAR_LEVELS_MAX];
+    size_t n = kline_char_levels(byte, bits, parity, got);
+
+    TEST_ASSERT_EQUAL_INT(strlen(want), n);
+    for (size_t i = 0; i < n; i++) {
+        TEST_ASSERT_MSG(got[i] == (want[i] == '1'), "byte %02X level %u",
+                        byte, (unsigned)i);
+    }
+}
+
+TEST(a_character_is_start_data_lsb_first_parity_and_stop) {
+    /* VAG engine address $01 as 8N1, and as the 7O1 address word KW1281
+     * defines - one data bit set already, so the odd parity bit is 0. */
+    assert_levels("0100000001", 0x01, 8, KLINE_PARITY_NONE);
+    assert_levels("0100000001", 0x01, 7, KLINE_PARITY_ODD);
+    assert_levels("01100000001", 0x03, 8, KLINE_PARITY_EVEN);
+    assert_levels("01100000011", 0x03, 8, KLINE_PARITY_ODD);
+    assert_levels("01111111", 0xFF, 5, KLINE_PARITY_MARK);
+    assert_levels("00000001", 0x00, 5, KLINE_PARITY_SPACE);
+}
+
+TEST(a_character_refuses_what_a_uart_cannot_frame) {
+    bool levels[KLINE_CHAR_LEVELS_MAX];
+
+    TEST_ASSERT_EQUAL_INT(0, kline_char_levels(0x55, 4, 0, levels));
+    TEST_ASSERT_EQUAL_INT(0, kline_char_levels(0x55, 9, 0, levels));
+    TEST_ASSERT_EQUAL_INT(0, kline_char_levels(0x55, 8, 5, levels));
+}

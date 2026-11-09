@@ -81,6 +81,18 @@ _Static_assert(BUS_INIT_MSG_MAX <= KLINE_MAX_MSG,
 #define KLINE_5BAUD_BIT_MS 200
 
 /*
+ * Raw (KKL cable) mode: the rates BUS_P_DATA_RATE accepts, and where the UART
+ * stops and bit banging starts. The UART divider bottoms out near 38 baud on
+ * the 40 MHz clock; nothing uses a UART below 300, and a host that asks for
+ * less - 5 baud, for an address word - wants the bits timed one by one.
+ * The top is the UART's limit, not the transceiver's: the TJA1027 is only
+ * specified to 20 kBd, and the documentation says so rather than this code.
+ */
+#define KLINE_RAW_BAUD_MIN 1
+#define KLINE_RAW_BAUD_MAX 250000
+#define KLINE_RAW_UART_MIN 300
+
+/*
  * Slack added to every window before it is treated as expired.
  * Some ECUs might not strictly follow the timing specification, so give them
  * some slack to ensure proper operation.
@@ -123,6 +135,7 @@ typedef enum {
     CMD_FIVE_BAUD,
     CMD_FAST_INIT,
     CMD_STOP_COMM,
+    CMD_BREAK,
 } kline_cmd_t;
 
 /**
@@ -174,6 +187,9 @@ typedef struct {
     /* L-Line carries initialization only; UART traffic stays on K-Line. */
     bool k_line_only;
     uint32_t frame_mode;
+
+    /** BUS_P_KLINE_RAW: behave as a KKL cable. Off. */
+    bool raw;
 
     /**
      * Retransmissions after a corrupted transmission. Zero.
@@ -244,6 +260,7 @@ static struct {
     bus_tx_control_t *active_control;
     bus_rx_epoch_t rx_epoch;
     bus_init_t req_init;
+    bool req_break;
     int result;
 
     kline_cfg_t cfg;
@@ -259,6 +276,7 @@ static struct {
     bool tx_answered;    /**< Something replied to the last transmission. */
     int64_t suppress_until_us;
     uint16_t pending_status; /**< Flags owed to the next delivered message. */
+    bool break_on;           /**< Raw mode: K-Line held low by the host. */
 
     /* Receive assembly. */
     uint8_t uart_pending[64];
@@ -376,15 +394,20 @@ static esp_err_t apply_line_cfg(void) {
     uart_parity_t par = UART_PARITY_DISABLE;
     esp_err_t err;
 
+    /* Mark and space parity exist only in raw mode and only for the bit
+     * banged rates; the UART has neither. */
     if (g.cfg.parity == BUS_PARITY_ODD) {
         par = UART_PARITY_ODD;
     } else if (g.cfg.parity == BUS_PARITY_EVEN) {
         par = UART_PARITY_EVEN;
     }
 
-    err = uart_set_baudrate(KLINE_UART, (int)g.active_baud);
-    if (err != ESP_OK) {
-        return err;
+    /* A raw rate below the UART's is bit banged; the UART keeps its last. */
+    if (g.active_baud >= KLINE_RAW_UART_MIN) {
+        err = uart_set_baudrate(KLINE_UART, (int)g.active_baud);
+        if (err != ESP_OK) {
+            return err;
+        }
     }
     err = uart_set_word_length(KLINE_UART, bits);
     if (err != ESP_OK) {
@@ -725,11 +748,49 @@ validate:
     return true;
 }
 
+/**
+ * @brief Raw mode: whatever has arrived, as it arrived.
+ *
+ * No framing, and no echo to strip - a KKL host expects to read back what it
+ * wrote, because that is what a single wire does. While the host holds the
+ * line in break, what the receiver sees is our own low level, not data.
+ */
+static bool rx_drain_raw(kline_frame_t *out) {
+    size_t n = 0;
+
+    /* Whatever the framer had half built before raw mode began is not a
+     * message to deliver later, when it ends. */
+    g.asm_len = 0;
+    g.rx_invalid = false;
+
+    if (g.break_on) {
+        rx_discard();
+        return false;
+    }
+
+    while (n < KLINE_MAX_MSG && uart_receive(0)) {
+        out->data[n++] = g.uart_pending[g.uart_pending_pos++];
+    }
+    if (n == 0) {
+        return false;
+    }
+
+    g.stats.rx_bytes += n;
+    g.last_bus_us = g.uart_pending_us;
+    out->len = (uint16_t)n;
+    out->status = 0;
+    out->start_us = out->end_us = g.uart_pending_us;
+    return true;
+}
+
 /** Read up to one frame, retaining the rest of the UART batch. */
 static bool rx_drain(kline_frame_t *out) {
     if (__atomic_load_n(&g.uart_tx_unresolved, __ATOMIC_ACQUIRE)) {
         rx_discard();
         return false;
+    }
+    if (g.cfg.raw) {
+        return rx_drain_raw(out);
     }
     while (uart_receive(0)) {
         uint8_t byte = g.uart_pending[g.uart_pending_pos++];
@@ -1190,7 +1251,8 @@ static int tx_message(const uint8_t *buf, size_t len, bool wait,
  */
 static size_t frame_for_tx(const uint8_t *data, size_t len, uint32_t flags,
                            uint8_t *out) {
-    bool add = g.cfg.checksum_tx && !(flags & BUS_TX_NO_CHECKSUM);
+    bool add =
+        g.cfg.checksum_tx && !g.cfg.raw && !(flags & BUS_TX_NO_CHECKSUM);
 
     if (len == 0 || len + (add ? 1u : 0u) > KLINE_MAX_MSG) {
         return 0;
@@ -1219,6 +1281,23 @@ static void init_set_level(bool high) {
 }
 
 /**
+ * @brief Drive @p n line levels for @p bit_us each, starting at @p *at.
+ *
+ * Every edge is placed against the running deadline rather than after the
+ * previous delay, so a 200 ms bit does not pick up the tick rounding of the
+ * one before it. The caller owns the pin handover; @p *at ends past the last
+ * level.
+ */
+static void bitbang_levels(const bool *levels, size_t n, int64_t bit_us,
+                           int64_t *at) {
+    for (size_t b = 0; b < n; b++) {
+        init_set_level(levels[b]);
+        *at += bit_us;
+        delay_until_us(*at);
+    }
+}
+
+/**
  * @brief The 5 baud address word, clause 5.1.5.2.2.
  *
  * Start bit, eight data bits least significant first, stop bit, 200 ms each:
@@ -1228,22 +1307,98 @@ static void init_set_level(bool high) {
  * the byte "exactly as provided".
  */
 static void send_5baud_address(uint8_t addr) {
-    const TickType_t bit = pdMS_TO_TICKS(KLINE_5BAUD_BIT_MS);
+    bool levels[KLINE_CHAR_LEVELS_MAX];
+    size_t n = kline_char_levels(addr, 8, KLINE_PARITY_NONE, levels);
+    int64_t at = now_us();
 
     tx_pin_to_gpio();
+    bitbang_levels(levels, n, (int64_t)KLINE_5BAUD_BIT_MS * 1000, &at);
+    tx_pin_to_uart();
+}
 
-    init_set_level(false);
-    vTaskDelay(bit);
+/* ------------------------------------------------------------------ *
+ * Raw mode: a KKL cable
+ * ------------------------------------------------------------------ */
 
-    for (int i = 0; i < 8; i++) {
-        init_set_level(((addr >> i) & 1u) != 0);
-        vTaskDelay(bit);
+/** @brief Characters at a rate below the UART's, one timed bit at a time. */
+static void raw_tx_slow(const uint8_t *buf, size_t len) {
+    bool levels[KLINE_CHAR_LEVELS_MAX];
+    unsigned bits = g.cfg.data_bits == BUS_DATA_BITS_7 ? 7 : 8;
+    int64_t bit_us = 1000000 / g.active_baud;
+    int64_t at = now_us();
+
+    tx_pin_to_gpio();
+    for (size_t i = 0; i < len; i++) {
+        size_t n = kline_char_levels(buf[i], bits, g.cfg.parity, levels);
+
+        bitbang_levels(levels, n, bit_us, &at);
+        g.stats.tx_bytes++;
+    }
+    tx_pin_to_uart();
+
+    /* What came back was our own bits at a rate the UART was not set to. */
+    uart_events();
+    rx_discard();
+    g.tx_end_us = g.last_bus_us = now_us();
+}
+
+/**
+ * @brief Raw mode transmit: the bytes as given, nothing waited for.
+ *
+ * The echo is left for the receive path, which hands it to the host. A line
+ * held in break sends nothing, as a UART in break would not.
+ */
+static int raw_tx(const uint8_t *buf, size_t len) {
+    if (g.break_on) {
+        return BUS_ERR_BUS_BUSY;
+    }
+    if (g.active_baud < KLINE_RAW_UART_MIN) {
+        raw_tx_slow(buf, len);
+        return 0;
     }
 
-    init_set_level(true);
-    vTaskDelay(bit);
+    if (uart_write_bytes(KLINE_UART, buf, len) != (int)len) {
+        return BUS_ERR_TX_FAILED;
+    }
 
-    tx_pin_to_uart();
+    TickType_t wait = pdMS_TO_TICKS(
+        KLINE_UART_TIMEOUT_MS + len * byte_time_at_baud(g.active_baud) / 1000);
+    if (uart_wait_tx_done(KLINE_UART, wait) != ESP_OK) {
+        __atomic_store_n(&g.uart_tx_unresolved, true, __ATOMIC_RELEASE);
+        return BUS_ERR_TX_FAILED;
+    }
+
+    g.stats.tx_bytes += len;
+    g.tx_end_us = g.last_bus_us = now_us();
+    return 0;
+}
+
+/**
+ * @brief Raw mode break: hold the line low, or let it go.
+ *
+ * What a serial port's break does to a KKL cable, and how a host times a
+ * 5 baud address word or a fast init pulse itself. Releasing it throws away
+ * what the receiver made of the low level.
+ */
+static int raw_break(bool on) {
+    if (on == g.break_on) {
+        return 0;
+    }
+
+    if (on) {
+        tx_pin_to_gpio();
+        init_set_level(false);
+    } else {
+        init_set_level(true);
+        tx_pin_to_uart();
+        uart_events();
+        rx_discard();
+        g.pending_status = 0;
+    }
+
+    g.break_on = on;
+    g.last_bus_us = now_us();
+    return 0;
 }
 
 /** @brief Bus idle owed before an initialisation pattern, microseconds.
@@ -1643,7 +1798,9 @@ static int do_stop_comm(void) {
  * ------------------------------------------------------------------ */
 
 static bool periodic_due(int64_t now) {
-    return !command_blocked() && g.cfg.periodic_ms && g.cfg.periodic_len &&
+    /* Raw mode is the host's line: nothing goes out on our account. */
+    return !g.cfg.raw && !command_blocked() && g.cfg.periodic_ms &&
+           g.cfg.periodic_len &&
            now - g.last_bus_us >= (int64_t)g.cfg.periodic_ms * 1000;
 }
 
@@ -1701,7 +1858,8 @@ static void kline_task(void *arg) {
         }
 
         deadline = now_us() + 200000;
-        if (!command_blocked() && g.cfg.periodic_ms && g.cfg.periodic_len) {
+        if (!g.cfg.raw && !command_blocked() && g.cfg.periodic_ms &&
+            g.cfg.periodic_len) {
             int64_t at = g.last_bus_us + (int64_t)g.cfg.periodic_ms * 1000;
             if (at < deadline) {
                 deadline = at;
@@ -1722,9 +1880,16 @@ static void kline_task(void *arg) {
         g.command_pending = false;
         switch (g.cmd) {
         case CMD_TX:
+            if (g.cfg.raw) {
+                g.result = raw_tx(g.req, g.req_len);
+                break;
+            }
             g.active_control = g.req_control;
             g.result = tx_message(g.req, g.req_len, true, g.req_flags);
             g.active_control = NULL;
+            break;
+        case CMD_BREAK:
+            g.result = raw_break(g.req_break);
             break;
         case CMD_FIVE_BAUD:
         case CMD_FAST_INIT:
@@ -1896,6 +2061,7 @@ static esp_err_t kline_open(const bus_cfg_t *cfg) {
     g.rx_invalid = false;
     g.suppress_until_us = 0;
     g.pending_status = 0;
+    g.break_on = false;
     g.tx_answered = true;
     memset(&g.rx_epoch, 0, sizeof(g.rx_epoch));
     g.req_control = g.active_control = NULL;
@@ -2053,8 +2219,14 @@ static int kline_tx_controlled(const bus_msg_t *msg, uint32_t flags,
     g.req_control = control;
 
     /* The quiet time owed plus the message itself, with room for a
-     * retransmission and the collision wait in front of it. */
-    rc = run_cmd(CMD_TX, control ? portMAX_DELAY : pdMS_TO_TICKS(3000));
+     * retransmission and the collision wait in front of it. Raw mode owes no
+     * quiet time but may be bit banging at 5 baud: two seconds a byte. */
+    TickType_t wait = pdMS_TO_TICKS(3000);
+    if (g.cfg.raw) {
+        wait = pdMS_TO_TICKS(1000 + (uint64_t)n * KLINE_CHAR_LEVELS_MAX *
+                                        1000 / g.active_baud);
+    }
+    rc = run_cmd(CMD_TX, control ? portMAX_DELAY : wait);
 
     xSemaphoreGive(g.api_lock);
     return rc;
@@ -2109,8 +2281,8 @@ static uint32_t *cfg_slot(bus_param_t p, uint32_t *lo, uint32_t *hi) {
 
     switch (p) {
     case BUS_P_DATA_RATE:
-        *lo = KLINE_BAUD_MIN;
-        *hi = KLINE_BAUD_HW_MAX;
+        *lo = g.cfg.raw ? KLINE_RAW_BAUD_MIN : KLINE_BAUD_MIN;
+        *hi = g.cfg.raw ? KLINE_RAW_BAUD_MAX : KLINE_BAUD_HW_MAX;
         return &g.cfg.baud;
     case BUS_P_P1_MAX:
         *lo = 1;
@@ -2142,7 +2314,7 @@ static uint32_t *cfg_slot(bus_param_t p, uint32_t *lo, uint32_t *hi) {
     case BUS_P_TWUP:
         return &g.cfg.twup;
     case BUS_P_PARITY:
-        *hi = BUS_PARITY_EVEN;
+        *hi = g.cfg.raw ? KLINE_PARITY_SPACE : BUS_PARITY_EVEN;
         return &g.cfg.parity;
     case BUS_P_DATA_BITS:
         *hi = BUS_DATA_BITS_7;
@@ -2179,6 +2351,8 @@ static bool *cfg_flag(bus_param_t p) {
         return &g.cfg.periodic_quiet;
     case BUS_P_TIMING_FROM_KEYBYTES:
         return &g.cfg.timing_from_keybytes;
+    case BUS_P_KLINE_RAW:
+        return &g.cfg.raw;
     default:
         return NULL;
     }
@@ -2211,6 +2385,24 @@ static int kline_set_param(bus_param_t p, uint32_t value) {
             }
             /* Release before enabling L-Line or returning its pin to VIF. */
             gpio_set_level(PIN_LS_OBD_15, 0);
+        }
+        if (p == BUS_P_KLINE_RAW && !value && g.cfg.raw) {
+            if (g.break_on) {
+                rc = BUS_ERR_BUS_BUSY;
+                goto done;
+            }
+            /* Back inside what the protocols accept. */
+            if (g.cfg.baud < KLINE_BAUD_MIN || g.cfg.baud > KLINE_BAUD_HW_MAX) {
+                g.cfg.baud = g.active_baud = KLINE_BAUD_DEFAULT;
+            }
+            if (g.cfg.parity > BUS_PARITY_EVEN) {
+                g.cfg.parity = BUS_PARITY_NONE;
+            }
+            *flag = false;
+            if (apply_line_cfg() != ESP_OK) {
+                rc = BUS_ERR_BAD_ARG;
+            }
+            goto done;
         }
         *flag = value != 0;
         goto done;
@@ -2315,6 +2507,19 @@ static int kline_ioctl(bus_ioctl_t id, const void *in, void *out) {
         xSemaphoreGive(g.api_lock);
         return rc;
     }
+
+    case BUS_IOCTL_KLINE_BREAK:
+        if (!in) {
+            return BUS_ERR_BAD_ARG;
+        }
+        if (!g.cfg.raw) {
+            return BUS_ERR_UNSUPPORTED;
+        }
+        xSemaphoreTake(g.api_lock, portMAX_DELAY);
+        g.req_break = *(const bool *)in;
+        rc = run_cmd(CMD_BREAK, pdMS_TO_TICKS(500));
+        xSemaphoreGive(g.api_lock);
+        return rc;
 
     case BUS_IOCTL_STOP_COMM:
         xSemaphoreTake(g.api_lock, portMAX_DELAY);

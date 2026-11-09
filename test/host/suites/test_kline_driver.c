@@ -116,6 +116,16 @@ int uart_read_bytes(uart_port_t port, void *buf, uint32_t length,
     return (int)n;
 }
 int uart_write_bytes(uart_port_t port, const void *buf, size_t length) {
+    if (g.cfg.raw) {
+        /* Raw mode hands the UART the whole buffer and checks no echo. */
+        TEST_ASSERT_TRUE(uart_tx_count + length <= BUS_INIT_MSG_MAX);
+        for (size_t i = 0; i < length; i++) {
+            uart_tx_times[uart_tx_count++] = now_us();
+            if (uart_immediate_echo)
+                uart_rx_data[uart_rx_len++] = ((const uint8_t *)buf)[i];
+        }
+        return (int)length;
+    }
     TEST_ASSERT_EQUAL_INT(1, length);
     TEST_ASSERT_TRUE(uart_tx_count < BUS_INIT_MSG_MAX);
     uart_tx_times[uart_tx_count++] = now_us();
@@ -1138,4 +1148,132 @@ TEST(kline_uart_overflow_blocks_repeat_admission_without_a_later_response) {
     TEST_ASSERT_EQUAL_INT(BUS_RX_BUFFER_OVERFLOW, message.status);
     TEST_ASSERT_EQUAL_INT(1, message.sequence);
     TEST_ASSERT_EQUAL_INT(0, uart_tx_count);
+}
+
+/* ------------------------------------------------------------------ *
+ * Raw mode: a KKL cable
+ * ------------------------------------------------------------------ */
+
+static void raw_open(void) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, kline_open(NULL));
+    TEST_ASSERT_EQUAL_INT(0, kline_set_param(BUS_P_KLINE_RAW, 1));
+}
+
+TEST(raw_mode_hands_over_bytes_as_they_arrive_echo_included) {
+    static const uint8_t req[] = {0x01, 0x02};
+    uint8_t out[8];
+    kline_frame_t f;
+
+    raw_open();
+    uart_immediate_echo = true;
+
+    /* No checksum appended and nothing consumed as an echo. */
+    TEST_ASSERT_EQUAL_INT(2, frame_for_tx(req, sizeof(req), 0, out));
+    TEST_ASSERT_EQUAL_INT(0, raw_tx(req, sizeof(req)));
+    TEST_ASSERT_EQUAL_INT(2, uart_tx_count);
+
+    uart_rx_data[uart_rx_len++] = 0xFD; /* the ECU's complement */
+    TEST_ASSERT_TRUE(rx_drain(&f));
+    TEST_ASSERT_EQUAL_INT(3, f.len);
+    TEST_ASSERT_EQUAL_MEM("\x01\x02\xFD", f.data, 3);
+    TEST_ASSERT_FALSE(rx_drain(&f));
+}
+
+TEST(raw_break_holds_the_lines_low_and_discards_what_they_read) {
+    kline_frame_t f;
+
+    raw_open();
+    TEST_ASSERT_EQUAL_INT(0, kline_set_param(BUS_P_K_LINE_ONLY, 0));
+    capture_edges = true;
+
+    TEST_ASSERT_EQUAL_INT(0, raw_break(true));
+    TEST_ASSERT_EQUAL_INT(PIN_KLINE_TX, edges[edge_count - 2].pin);
+    TEST_ASSERT_EQUAL_INT(0, edges[edge_count - 2].level);
+    TEST_ASSERT_EQUAL_INT(1, l_line_level);
+
+    /* Our own low level, read back as nulls, is not data. */
+    uart_rx_data[uart_rx_len++] = 0x00;
+    TEST_ASSERT_FALSE(rx_drain(&f));
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_BUS_BUSY, raw_tx((const uint8_t *)"\x55", 1));
+    TEST_ASSERT_EQUAL_INT(0, uart_tx_count);
+
+    /* The mode cannot be left with the line held. */
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_BUS_BUSY,
+                          kline_set_param(BUS_P_KLINE_RAW, 0));
+
+    uart_rx_data[uart_rx_len++] = 0x00;
+    TEST_ASSERT_EQUAL_INT(0, raw_break(false));
+    TEST_ASSERT_EQUAL_INT(1, edges[edge_count - 2].level);
+    TEST_ASSERT_EQUAL_INT(0, l_line_level);
+    TEST_ASSERT_EQUAL_INT(0, uart_rx_len);
+    capture_edges = false;
+}
+
+TEST(raw_rates_below_the_uart_are_bit_banged) {
+    raw_open();
+    TEST_ASSERT_EQUAL_INT(0, kline_set_param(BUS_P_DATA_RATE, 5));
+    TEST_ASSERT_EQUAL_INT(0, kline_set_param(BUS_P_DATA_BITS, BUS_DATA_BITS_7));
+    TEST_ASSERT_EQUAL_INT(0, kline_set_param(BUS_P_PARITY, BUS_PARITY_ODD));
+    capture_edges = true;
+
+    /* KW1281's engine address word: $01, 7O1, 200 ms a bit. */
+    TEST_ASSERT_EQUAL_INT(0, raw_tx((const uint8_t *)"\x01", 1));
+    capture_edges = false;
+
+    /* The handover to the GPIO idles high first, then the ten bits. */
+    TEST_ASSERT_EQUAL_INT(11, edge_count);
+    static const uint32_t want[] = {1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1};
+    for (unsigned i = 0; i < edge_count; i++) {
+        TEST_ASSERT_EQUAL_INT(PIN_KLINE_TX, edges[i].pin);
+        TEST_ASSERT_EQUAL_INT(want[i], edges[i].level);
+    }
+    int64_t bit = edges[2].time - edges[1].time;
+    TEST_ASSERT_MSG(bit >= 199990 && bit <= 200010, "bit of %lld us",
+                    (long long)bit);
+    TEST_ASSERT_EQUAL_INT(0, uart_tx_count);
+    TEST_ASSERT_EQUAL_INT(1, g.stats.tx_bytes);
+}
+
+TEST(raw_rates_and_parities_are_only_accepted_in_raw_mode) {
+    uint32_t v;
+    bool on = true;
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, kline_open(NULL));
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_BAD_ARG, kline_set_param(BUS_P_DATA_RATE, 5));
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_BAD_ARG,
+                          kline_set_param(BUS_P_PARITY, KLINE_PARITY_MARK));
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_UNSUPPORTED,
+                          kline_ioctl(BUS_IOCTL_KLINE_BREAK, &on, NULL));
+
+    TEST_ASSERT_EQUAL_INT(0, kline_set_param(BUS_P_KLINE_RAW, 1));
+    TEST_ASSERT_EQUAL_INT(0, kline_set_param(BUS_P_DATA_RATE, 57600));
+    TEST_ASSERT_EQUAL_INT(0, kline_set_param(BUS_P_PARITY, KLINE_PARITY_MARK));
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_BAD_ARG,
+                          kline_set_param(BUS_P_DATA_RATE, 250001));
+
+    /* Leaving puts the line back where a protocol would accept it. */
+    TEST_ASSERT_EQUAL_INT(0, kline_set_param(BUS_P_KLINE_RAW, 0));
+    TEST_ASSERT_EQUAL_INT(0, kline_get_param(BUS_P_DATA_RATE, &v));
+    TEST_ASSERT_EQUAL_INT(KLINE_BAUD_DEFAULT, v);
+    TEST_ASSERT_EQUAL_INT(0, kline_get_param(BUS_P_PARITY, &v));
+    TEST_ASSERT_EQUAL_INT(BUS_PARITY_NONE, v);
+}
+
+TEST(raw_mode_sends_nothing_on_its_own_account) {
+    raw_open();
+    g.cfg.periodic_ms = 100;
+    g.cfg.periodic_len = 1;
+    g.cfg.periodic[0] = 0x3E;
+    g.last_bus_us = now_us() - 1000000;
+
+    /* A half built frame from before raw mode is not delivered later. */
+    g.asm_len = 3;
+    kline_frame_t f;
+    TEST_ASSERT_FALSE(rx_drain(&f));
+    TEST_ASSERT_EQUAL_INT(0, g.asm_len);
+
+    /* Overdue by a second, and still not sent. */
+    TEST_ASSERT_FALSE(periodic_due(now_us()));
+    TEST_ASSERT_EQUAL_INT(0, kline_set_param(BUS_P_KLINE_RAW, 0));
+    TEST_ASSERT_TRUE(periodic_due(now_us()));
 }
