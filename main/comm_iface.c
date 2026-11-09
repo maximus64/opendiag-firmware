@@ -21,6 +21,8 @@ typedef struct {
     uint32_t rx_dropped;       /* Chunks lost to a full rx_stream */
     uint32_t rx_discarded;     /* Bytes dropped when a client went away */
     size_t rx_pending;         /* Received and not yet read */
+    uint32_t rx_position;      /* Bytes ever accepted; wraps */
+    uint32_t read_position;    /* Bytes ever read or discarded; wraps */
     bool muted;                /* Client gone; nothing may be written yet */
 } port_t;
 
@@ -96,6 +98,8 @@ comm_port_id_t comm_port_register(const char *name, const comm_port_ops_t *ops,
         port->rx_dropped = 0;
         port->rx_discarded = 0;
         port->rx_pending = 0;
+        port->rx_position = 0;
+        port->read_position = 0;
         port->muted = false;
         copy_name(port->name, name);
     }
@@ -136,6 +140,7 @@ esp_err_t comm_port_rx(comm_port_id_t port_id, const uint8_t *data,
     bool queued = xRingbufferSend(port->rx_stream, data, length, 0) == pdTRUE;
     if (queued) {
         port->rx_pending += length;
+        port->rx_position += (uint32_t)length;
     } else {
         port->rx_dropped++;
         ESP_LOGW(TAG,
@@ -189,10 +194,43 @@ size_t comm_port_read(comm_port_id_t port_id, uint8_t *buf, size_t length,
         port_t *port = &g_comm.ports[port_id];
 
         port->rx_pending -= size < port->rx_pending ? size : port->rx_pending;
+        port->read_position += (uint32_t)size;
     }
     UNLOCK();
 
     return size;
+}
+
+uint32_t comm_port_rx_position(comm_port_id_t port_id) {
+    uint32_t pos = 0;
+
+    if (!g_comm.initialized) {
+        return 0;
+    }
+
+    LOCK();
+    if (port_valid(port_id)) {
+        pos = g_comm.ports[port_id].rx_position;
+    }
+    UNLOCK();
+
+    return pos;
+}
+
+uint32_t comm_port_read_position(comm_port_id_t port_id) {
+    uint32_t pos = 0;
+
+    if (!g_comm.initialized) {
+        return 0;
+    }
+
+    LOCK();
+    if (port_valid(port_id)) {
+        pos = g_comm.ports[port_id].read_position;
+    }
+    UNLOCK();
+
+    return pos;
 }
 
 size_t comm_port_rx_pending(comm_port_id_t port_id) {
@@ -248,6 +286,8 @@ void comm_port_client_gone(comm_port_id_t port_id) {
     dropped = rx_stream_drain(port->rx_stream);
     port->rx_discarded += dropped;
     port->rx_pending = 0;
+    /* Discarded counts as consumed, so the two positions meet again. */
+    port->read_position = port->rx_position;
     port->muted = true;
     UNLOCK();
 
