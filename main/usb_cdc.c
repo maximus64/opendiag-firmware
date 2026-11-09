@@ -251,14 +251,13 @@ void usb_cdc_setup(void) {
 
     /* CDC 0 is the data link: its receive callback drains the FIFO and hands
      * the bytes to comm_iface. */
-    tinyusb_config_cdcacm_t acm_cfg = {.usb_dev = TINYUSB_USBDEV_0,
-                                       .cdc_port = TINYUSB_CDC_ACM_0,
-                                       .callback_rx = tinyusb_cdc_rx_cb,
-                                       .callback_rx_wanted_char = NULL,
-                                       .callback_line_state_changed =
-                                           tinyusb_cdc_line_state_cb,
-                                       .callback_line_coding_changed =
-                                           tinyusb_cdc_line_coding_cb};
+    tinyusb_config_cdcacm_t acm_cfg = {
+        .usb_dev = TINYUSB_USBDEV_0,
+        .cdc_port = TINYUSB_CDC_ACM_0,
+        .callback_rx = tinyusb_cdc_rx_cb,
+        .callback_rx_wanted_char = NULL,
+        .callback_line_state_changed = tinyusb_cdc_line_state_cb,
+        .callback_line_coding_changed = tinyusb_cdc_line_coding_cb};
     ESP_ERROR_CHECK(tusb_cdc_acm_init(&acm_cfg));
 
     /*

@@ -8,7 +8,7 @@
  * Bytes from the host go onto the K-Line as they are, and everything the
  * K-Line carries - our own echo included - comes back as it arrives. The
  * host's serial port settings drive the line: the baud rate, data bits and
- * parity it sets reach the UART (or the bit banger, below 300 baud), and its
+ * parity it sets reach the UART (or the bit banger, below 40 baud), and its
  * break holds the line low. That is all a VAG KW1281 tool, VCDS-Lite style,
  * expects of an FTDI KKL cable, and the 5 baud address word and the timing
  * stay the host's business.

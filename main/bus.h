@@ -204,7 +204,7 @@ typedef enum {
     /*
      * K-Line: a dumb KKL cable. Bytes go out as given and come back as they
      * arrive - echo included, no framing, no checksum, no P3/P4 waits - and
-     * BUS_P_DATA_RATE accepts 5 to 250000, bit banging below 300. Default
+     * BUS_P_DATA_RATE accepts 5 to 250000, bit banging below 40. Default
      * false. See BUS_IOCTL_KLINE_BREAK.
      */
     BUS_P_KLINE_RAW,

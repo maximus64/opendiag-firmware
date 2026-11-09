@@ -32,8 +32,8 @@ static comm_port_id_t g_port = COMM_INVALID_PORT_ID;
 
 /** @brief The host wrote @p s; the USB task hands it to the port. */
 static void host_writes(const char *s) {
-    TEST_ASSERT_EQUAL_INT(
-        ESP_OK, comm_port_rx(g_port, (const uint8_t *)s, strlen(s)));
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+                          comm_port_rx(g_port, (const uint8_t *)s, strlen(s)));
 }
 
 /** @brief The link task's loop body: read what arrived, feed it, poll. */

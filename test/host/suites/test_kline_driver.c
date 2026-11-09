@@ -31,6 +31,8 @@ static int64_t uart_batch_ready_us;
 static bool uart_hold_all_echoes;
 static bool uart_immediate_echo;
 static unsigned uart_tx_count, uart_omit_echo_at;
+static unsigned uart_write_calls;
+static uint32_t uart_baud;
 static int64_t uart_tx_times[BUS_INIT_MSG_MAX];
 static size_t uart_read_limit;
 static int uart_injected_event;
@@ -89,7 +91,10 @@ esp_err_t uart_set_rx_full_threshold(uart_port_t port, int threshold) {
     uart_rx_threshold = threshold;
     return config_result;
 }
-esp_err_t uart_set_baudrate(uart_port_t port, uint32_t baud) { return ESP_OK; }
+esp_err_t uart_set_baudrate(uart_port_t port, uint32_t baud) {
+    uart_baud = baud;
+    return ESP_OK;
+}
 esp_err_t uart_set_word_length(uart_port_t port, uart_word_length_t bits) {
     return ESP_OK;
 }
@@ -116,6 +121,7 @@ int uart_read_bytes(uart_port_t port, void *buf, uint32_t length,
     return (int)n;
 }
 int uart_write_bytes(uart_port_t port, const void *buf, size_t length) {
+    uart_write_calls++;
     if (g.cfg.raw) {
         /* Raw mode hands the UART the whole buffer and checks no echo. */
         TEST_ASSERT_TRUE(uart_tx_count + length <= BUS_INIT_MSG_MAX);
@@ -191,6 +197,8 @@ void td_setup(void) {
     uart_hold_all_echoes = false;
     uart_immediate_echo = false;
     uart_tx_count = uart_omit_echo_at = 0;
+    uart_write_calls = 0;
+    uart_baud = 0;
     uart_read_limit = 0;
     uart_injected_event = 0;
     uart_error_after_data = 0;
@@ -1237,6 +1245,24 @@ TEST(raw_rates_below_the_uart_are_bit_banged) {
     __atomic_store_n(&g.stop_requested, true, __ATOMIC_RELEASE);
     TEST_ASSERT_EQUAL_INT(0, raw_tx((const uint8_t *)"", 3));
     TEST_ASSERT_EQUAL_INT(1, g.stats.tx_bytes);
+    __atomic_store_n(&g.stop_requested, false, __ATOMIC_RELEASE);
+}
+
+TEST(raw_240_baud_goes_through_the_uart_a_piece_at_a_time) {
+    static const uint8_t req[12] = {0x01};
+
+    raw_open();
+    TEST_ASSERT_EQUAL_INT(0, kline_set_param(BUS_P_DATA_RATE, 240));
+    TEST_ASSERT_EQUAL_INT(240, uart_baud); /* the reply comes back at 240 */
+
+    /* Five characters (229 ms) a piece, so a close is never kept waiting. */
+    TEST_ASSERT_EQUAL_INT(0, raw_tx(req, sizeof(req)));
+    TEST_ASSERT_EQUAL_INT(12, uart_tx_count);
+    TEST_ASSERT_EQUAL_INT(3, uart_write_calls);
+
+    __atomic_store_n(&g.stop_requested, true, __ATOMIC_RELEASE);
+    TEST_ASSERT_EQUAL_INT(0, raw_tx(req, sizeof(req)));
+    TEST_ASSERT_EQUAL_INT(12, uart_tx_count);
     __atomic_store_n(&g.stop_requested, false, __ATOMIC_RELEASE);
 }
 

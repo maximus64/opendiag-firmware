@@ -564,9 +564,10 @@ Then point the program at the **data** port (on Windows, the COM port named "COM
 - **Break drives the line.** While the program holds a break (`SetCommBreak`, `TIOCSBRK`), pin 7
   is held low. That is how most KKL software sends the 5 baud address word and the 25 ms fast
   init pulse. What the receiver sees during the break is thrown away.
-- **Rates below 300 baud are bit banged.** A program that sets the port to 5 baud (7O1 for KW1281)
-  and writes the address byte gets it sent bit by bit, 200 ms per bit. Mark and space parity work
-  at these rates only.
+- **Rates below 40 baud are bit banged.** A program that sets the port to 5 baud (7O1 for KW1281)
+  and writes the address byte gets it sent bit by bit, 200 ms per bit; nothing is received at
+  these rates. Mark and space parity work at these rates only. From 40 baud up the UART sends and
+  receives, which covers the 240 bps some older VAG diesel ECUs use.
 - **Use `default`.** KKL programs often open and close the port several times in one session.
   `mode kkl default` keeps the link in KKL mode when the port closes; `mode elm327 default` goes
   back. Plain `mode kkl` reverts to ELM327 the first time the port closes.

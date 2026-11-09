@@ -82,8 +82,9 @@ _Static_assert(BUS_INIT_MSG_MAX <= KLINE_MAX_MSG,
 
 /*
  * Raw (KKL cable) mode: the rates BUS_P_DATA_RATE accepts, and where the UART
- * stops and bit banging starts. The UART divider bottoms out near 38 baud on
- * the 40 MHz clock; nothing uses a UART below 300, and a host that asks for
+ * stops and bit banging starts. The UART divider bottoms out at 39 baud on
+ * the 40 MHz clock (12 bit divider, 256 prescaler), low enough for the 240 bps
+ * some VAG diesel ECUs answer at, in both directions. A host that asks for
  * less - 5 baud, for an address word - wants the bits timed one by one.
  * The floor is that 5 baud: nothing on a K-Line goes slower, and one bit
  * banged character (2.2 s) must end inside kline_close()'s 4 s wait.
@@ -92,7 +93,7 @@ _Static_assert(BUS_INIT_MSG_MAX <= KLINE_MAX_MSG,
  */
 #define KLINE_RAW_BAUD_MIN 5
 #define KLINE_RAW_BAUD_MAX 250000
-#define KLINE_RAW_UART_MIN 300
+#define KLINE_RAW_UART_MIN 40
 
 /*
  * Slack added to every window before it is treated as expired.
@@ -1253,8 +1254,7 @@ static int tx_message(const uint8_t *buf, size_t len, bool wait,
  */
 static size_t frame_for_tx(const uint8_t *data, size_t len, uint32_t flags,
                            uint8_t *out) {
-    bool add =
-        g.cfg.checksum_tx && !g.cfg.raw && !(flags & BUS_TX_NO_CHECKSUM);
+    bool add = g.cfg.checksum_tx && !g.cfg.raw && !(flags & BUS_TX_NO_CHECKSUM);
 
     if (len == 0 || len + (add ? 1u : 0u) > KLINE_MAX_MSG) {
         return 0;
@@ -1363,18 +1363,30 @@ static int raw_tx(const uint8_t *buf, size_t len) {
         return 0;
     }
 
-    if (uart_write_bytes(KLINE_UART, buf, len) != (int)len) {
-        return BUS_ERR_TX_FAILED;
+    /* kline_close() waits 4 s for the task, and 260 bytes take 70 s at 40
+     * baud: write about a quarter of a second at a time (11 bits a
+     * character) and stop between pieces. At 1200 baud and up it is one. */
+    size_t piece = g.active_baud / 44 ? g.active_baud / 44 : 1;
+
+    for (size_t off = 0, n; off < len; off += n) {
+        if (__atomic_load_n(&g.stop_requested, __ATOMIC_ACQUIRE)) {
+            break;
+        }
+        n = len - off < piece ? len - off : piece;
+        if (uart_write_bytes(KLINE_UART, buf + off, n) != (int)n) {
+            return BUS_ERR_TX_FAILED;
+        }
+
+        TickType_t wait =
+            pdMS_TO_TICKS(KLINE_UART_TIMEOUT_MS +
+                          n * byte_time_at_baud(g.active_baud) / 1000);
+        if (uart_wait_tx_done(KLINE_UART, wait) != ESP_OK) {
+            __atomic_store_n(&g.uart_tx_unresolved, true, __ATOMIC_RELEASE);
+            return BUS_ERR_TX_FAILED;
+        }
+        g.stats.tx_bytes += n;
     }
 
-    TickType_t wait = pdMS_TO_TICKS(
-        KLINE_UART_TIMEOUT_MS + len * byte_time_at_baud(g.active_baud) / 1000);
-    if (uart_wait_tx_done(KLINE_UART, wait) != ESP_OK) {
-        __atomic_store_n(&g.uart_tx_unresolved, true, __ATOMIC_RELEASE);
-        return BUS_ERR_TX_FAILED;
-    }
-
-    g.stats.tx_bytes += len;
     g.tx_end_us = g.last_bus_us = now_us();
     return 0;
 }
@@ -2229,8 +2241,8 @@ static int kline_tx_controlled(const bus_msg_t *msg, uint32_t flags,
      * quiet time but may be bit banging at 5 baud: two seconds a byte. */
     TickType_t wait = pdMS_TO_TICKS(3000);
     if (g.cfg.raw) {
-        wait = pdMS_TO_TICKS(1000 + (uint64_t)n * KLINE_CHAR_LEVELS_MAX *
-                                        1000 / g.active_baud);
+        wait = pdMS_TO_TICKS(1000 + (uint64_t)n * KLINE_CHAR_LEVELS_MAX * 1000 /
+                                        g.active_baud);
     }
     rc = run_cmd(CMD_TX, control ? portMAX_DELAY : wait);
 

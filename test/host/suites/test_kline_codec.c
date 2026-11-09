@@ -662,8 +662,8 @@ static void assert_levels(const char *want, uint8_t byte, unsigned bits,
 
     TEST_ASSERT_EQUAL_INT(strlen(want), n);
     for (size_t i = 0; i < n; i++) {
-        TEST_ASSERT_MSG(got[i] == (want[i] == '1'), "byte %02X level %u",
-                        byte, (unsigned)i);
+        TEST_ASSERT_MSG(got[i] == (want[i] == '1'), "byte %02X level %u", byte,
+                        (unsigned)i);
     }
 }
 
