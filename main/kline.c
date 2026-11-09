@@ -1587,6 +1587,15 @@ static int do_init(kline_cmd_t which, bus_init_t *io) {
     io->key[0] = g.link.key[0];
     io->key[1] = g.link.key[1];
 
+    /* The init ended on the ECU's answer - StartCommunication's, or the
+     * inverted address of a 5 baud init - which the init consumed itself
+     * rather than publish()ing. The first request owes P3min after it, not
+     * the P2max of a request nobody answered: 50 ms into a 55 ms P3min is
+     * early enough for a strict ECU to ignore the first request after every
+     * fast init. */
+    if (which == CMD_FIVE_BAUD || io->reply_len)
+        g.tx_answered = true;
+
     link_established();
     if (which != CMD_FAST_INIT || !io->raw_response) {
         rx_discard();

@@ -592,6 +592,29 @@ TEST(fast_init_automatic_checksum_is_appended_once) {
     TEST_ASSERT_EQUAL_MEM(previous_reply, init.reply, sizeof(previous_reply));
 }
 
+TEST(the_first_request_after_an_answered_fast_init_waits_p3_min) {
+    /* StartCommunication's positive response, key bytes EF 8F. */
+    const uint8_t reply[] = {0x83, 0xf1, 0x10, 0xc1, 0xef, 0x8f, 0xc3};
+    bus_init_t init = raw_init(false, reply, sizeof(reply));
+    TEST_ASSERT_EQUAL_INT(0, do_init(CMD_FAST_INIT, &init));
+    int64_t answer_end = g.last_bus_us;
+
+    TEST_ASSERT_EQUAL_INT(0, wait_before_tx(false));
+
+    TEST_ASSERT_TRUE(now_us() >= answer_end + P_TO_US(g.cfg.p3_min));
+}
+
+TEST(a_fast_init_nobody_answered_still_waits_only_p2_max) {
+    bus_init_t init = raw_init(false, NULL, 0);
+    init.no_response = true;
+    TEST_ASSERT_EQUAL_INT(0, do_init(CMD_FAST_INIT, &init));
+    int64_t last = g.last_bus_us;
+
+    TEST_ASSERT_EQUAL_INT(0, wait_before_tx(false));
+
+    TEST_ASSERT_TRUE(now_us() < last + P_TO_US(g.cfg.p3_min));
+}
+
 TEST(fast_init_no_response_preserves_uart_reply_for_normal_receive) {
     bus_init_t init = raw_init(false, previous_reply, sizeof(previous_reply));
     init.no_response = true;
