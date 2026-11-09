@@ -1232,6 +1232,12 @@ TEST(raw_rates_below_the_uart_are_bit_banged) {
                     (long long)bit);
     TEST_ASSERT_EQUAL_INT(0, uart_tx_count);
     TEST_ASSERT_EQUAL_INT(1, g.stats.tx_bytes);
+
+    /* A close in progress stops a long slow write between characters. */
+    __atomic_store_n(&g.stop_requested, true, __ATOMIC_RELEASE);
+    TEST_ASSERT_EQUAL_INT(0, raw_tx((const uint8_t *)"", 3));
+    TEST_ASSERT_EQUAL_INT(1, g.stats.tx_bytes);
+    __atomic_store_n(&g.stop_requested, false, __ATOMIC_RELEASE);
 }
 
 TEST(raw_rates_and_parities_are_only_accepted_in_raw_mode) {
@@ -1250,6 +1256,7 @@ TEST(raw_rates_and_parities_are_only_accepted_in_raw_mode) {
     TEST_ASSERT_EQUAL_INT(0, kline_set_param(BUS_P_PARITY, KLINE_PARITY_MARK));
     TEST_ASSERT_EQUAL_INT(BUS_ERR_BAD_ARG,
                           kline_set_param(BUS_P_DATA_RATE, 250001));
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_BAD_ARG, kline_set_param(BUS_P_DATA_RATE, 4));
 
     /* Leaving puts the line back where a protocol would accept it. */
     TEST_ASSERT_EQUAL_INT(0, kline_set_param(BUS_P_KLINE_RAW, 0));

@@ -85,10 +85,12 @@ _Static_assert(BUS_INIT_MSG_MAX <= KLINE_MAX_MSG,
  * stops and bit banging starts. The UART divider bottoms out near 38 baud on
  * the 40 MHz clock; nothing uses a UART below 300, and a host that asks for
  * less - 5 baud, for an address word - wants the bits timed one by one.
+ * The floor is that 5 baud: nothing on a K-Line goes slower, and one bit
+ * banged character (2.2 s) must end inside kline_close()'s 4 s wait.
  * The top is the UART's limit, not the transceiver's: the TJA1027 is only
  * specified to 20 kBd, and the documentation says so rather than this code.
  */
-#define KLINE_RAW_BAUD_MIN 1
+#define KLINE_RAW_BAUD_MIN 5
 #define KLINE_RAW_BAUD_MAX 250000
 #define KLINE_RAW_UART_MIN 300
 
@@ -1329,6 +1331,10 @@ static void raw_tx_slow(const uint8_t *buf, size_t len) {
 
     tx_pin_to_gpio();
     for (size_t i = 0; i < len; i++) {
+        /* A close waits for the task: stop at the next character. */
+        if (__atomic_load_n(&g.stop_requested, __ATOMIC_ACQUIRE)) {
+            break;
+        }
         size_t n = kline_char_levels(buf[i], bits, g.cfg.parity, levels);
 
         bitbang_levels(levels, n, bit_us, &at);
