@@ -24,6 +24,8 @@
 static volatile bool line_status[USB_CDC_INTERFACE_NUM];
 static usb_cdc_rx_cb_t rx_callback[USB_CDC_INTERFACE_NUM];
 static usb_cdc_line_cb_t line_callback;
+static usb_cdc_coding_cb_t coding_callback;
+static usb_cdc_break_cb_t break_callback;
 
 enum {
     ITF_NUM_CDC_0 = 0,
@@ -136,7 +138,10 @@ static const tinyusb_config_t tusb_cfg = {
 static void tinyusb_cdc_line_state_cb(int itf, cdcacm_event_t *event) {
     bool open = false;
 
-    if (event->line_state_changed_data.dtr &&
+    /* Either line held up means a program has the port open. Requiring both
+     * locked out tools that leave RTS low - KKL software among them, some of
+     * which drive RTS as a cable control line. Closing drops both. */
+    if (event->line_state_changed_data.dtr ||
         event->line_state_changed_data.rts) {
         ESP_LOGI(TAG, "Serial terminal connected on CDC interface %d", itf);
         open = true;
@@ -148,6 +153,23 @@ static void tinyusb_cdc_line_state_cb(int itf, cdcacm_event_t *event) {
 
     if (line_callback) {
         line_callback(itf, open);
+    }
+}
+
+/** @brief The host changed a port's baud rate, data bits or parity. */
+static void tinyusb_cdc_line_coding_cb(int itf, cdcacm_event_t *event) {
+    const cdc_line_coding_t *c = event->line_coding_changed_data.p_line_coding;
+
+    if (coding_callback) {
+        coding_callback(itf, c->bit_rate, c->data_bits, c->parity);
+    }
+}
+
+/* TinyUSB's weak hook for SEND_BREAK, which the ACM descriptor announces and
+ * esp_tinyusb does not wrap. */
+void tud_cdc_send_break_cb(uint8_t itf, uint16_t duration_ms) {
+    if (break_callback) {
+        break_callback(itf, duration_ms);
     }
 }
 
@@ -177,6 +199,14 @@ static void tinyusb_cdc_rx_cb(int itf, cdcacm_event_t *event) {
 
 void usb_cdc_set_line_callback(usb_cdc_line_cb_t callback) {
     line_callback = callback;
+}
+
+void usb_cdc_set_coding_callback(usb_cdc_coding_cb_t callback) {
+    coding_callback = callback;
+}
+
+void usb_cdc_set_break_callback(usb_cdc_break_cb_t callback) {
+    break_callback = callback;
 }
 
 void usb_cdc_rx_set_callback(int itf, usb_cdc_rx_cb_t callback) {
@@ -227,7 +257,8 @@ void usb_cdc_setup(void) {
                                        .callback_rx_wanted_char = NULL,
                                        .callback_line_state_changed =
                                            tinyusb_cdc_line_state_cb,
-                                       .callback_line_coding_changed = NULL};
+                                       .callback_line_coding_changed =
+                                           tinyusb_cdc_line_coding_cb};
     ESP_ERROR_CHECK(tusb_cdc_acm_init(&acm_cfg));
 
     /*
