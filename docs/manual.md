@@ -360,6 +360,20 @@ Supported bit rates:
 
 The adapter refuses other rates rather than substituting a nearby one.
 
+### Listen-only
+
+Open the channel with `L` instead of `O` to receive without ever driving the bus. The adapter then
+doesn't acknowledge frames or send error frames, and refuses to transmit: `t`, `T` and `r` answer
+with a BELL. Received frames arrive as usual.
+
+Use it to sniff a bus you don't know yet, for example to find its bit rate: try each `S<n>` with
+`L`, and keep the one that shows frames. A wrong rate does no harm in listen-only.
+
+- `O` still opens the channel normally, so nothing changes for tools that never send `L`.
+- To go from one mode to the other, close the channel with `C` first. Changing the bit rate with
+  `S<n>` keeps the mode.
+- In the debug shell, `vif` shows `listen-only` next to the CAN bus while it is open that way.
+
 ---
 
 ## Switching modes

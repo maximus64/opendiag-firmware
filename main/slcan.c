@@ -111,6 +111,24 @@ static bool slcan_is_open(const slcan_ctx_t *c) {
 }
 
 /**
+ * @brief Was the channel opened with 'L'?
+ *
+ * Asked of the claim for the same reason as slcan_is_open(): a front-end
+ * restart clears this context while the bus stays up, and a cached flag would
+ * then let 'S' reopen a listen-only channel as a transmitting one.
+ */
+static bool slcan_is_listen_only(void) {
+    vif_bus_claim_t claim[VIF_BUS_GROUPS];
+
+    vif_bus_info(claim);
+    for (int i = 0; i < VIF_BUS_GROUPS; i++) {
+        if (claim[i].bus == VIF_BUS_CAN && claim[i].owner == VIF_OWNER_LINK)
+            return claim[i].listen_only;
+    }
+    return false;
+}
+
+/**
  * @brief LAWICEL bit rate digit to bits per second.
  *
  * The four rates the TWAI timing tables here do not carry - 10k, 20k, 100k and
@@ -181,7 +199,7 @@ static void slcan_send_frame(slcan_ctx_t *c, const char *buf, bool rtr,
                              bool ext) {
     struct can_frame frame;
 
-    if (!slcan_is_open(c)) {
+    if (!slcan_is_open(c) || slcan_is_listen_only()) {
         slcan_nack(c);
         return;
     }
@@ -200,10 +218,15 @@ static void slcan_send_frame(slcan_ctx_t *c, const char *buf, bool rtr,
     slcan_ack(c);
 }
 
-static void slcan_open_bus(slcan_ctx_t *c) {
-    vif_bus_cfg_t cfg = {.bitrate = c->bitrate};
+static void slcan_open_bus(slcan_ctx_t *c, bool listen_only) {
+    vif_bus_cfg_t cfg = {.bitrate = c->bitrate, .listen_only = listen_only};
 
     if (slcan_is_open(c)) {
+        /* Already open in the other mode: refuse rather than mix them. */
+        if (slcan_is_listen_only() != listen_only) {
+            slcan_nack(c);
+            return;
+        }
         slcan_ack(c);
         return;
     }
@@ -229,7 +252,10 @@ static void slcan_close_bus(slcan_ctx_t *c) {
 static void slcan_parse_command(slcan_ctx_t *c, const char *buf) {
     switch (buf[0]) {
     case 'O': /* open the channel */
-        slcan_open_bus(c);
+        slcan_open_bus(c, false);
+        break;
+    case 'L': /* open the channel listen-only (LAWICEL) */
+        slcan_open_bus(c, true);
         break;
     case 'C': /* close the channel */
         slcan_close_bus(c);
@@ -267,7 +293,8 @@ static void slcan_parse_command(slcan_ctx_t *c, const char *buf) {
          * the new one up, and the claim never leaves the link.
          */
         if (slcan_is_open(c)) {
-            vif_bus_cfg_t cfg = {.bitrate = rate};
+            vif_bus_cfg_t cfg = {.bitrate = rate,
+                                 .listen_only = slcan_is_listen_only()};
 
             if (vif_bus_open(VIF_OWNER_LINK, VIF_BUS_CAN, &cfg) != ESP_OK) {
                 slcan_nack(c);

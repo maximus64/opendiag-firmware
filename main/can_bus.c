@@ -55,6 +55,9 @@ static TaskHandle_t can_bus_task_handle;
 static bool task_should_exit;
 static _Atomic bool can_started;
 static bool manual_recovery;
+/* Listen-only: the controller never drives a bit and the transceiver stays
+ * silent, so an unknown bus can be probed at any rate without disturbing it. */
+static bool listen_only_active;
 static bool link_down_pending;
 static portMUX_TYPE task_notify_lock = portMUX_INITIALIZER_UNLOCKED;
 static SemaphoreHandle_t task_exit_semaphore = NULL;
@@ -442,7 +445,7 @@ static uint16_t can_sample_point_permille(int baud_rate) {
     return (baud_rate == 50000) ? 800 : 750;
 }
 
-static esp_err_t can_setup(int baud_rate, bool manual) {
+static esp_err_t can_setup(int baud_rate, bool manual, bool listen_only) {
     esp_err_t err;
 
     if (can_bus_task_handle || can_node || rx_frame_queue ||
@@ -463,6 +466,7 @@ static esp_err_t can_setup(int baud_rate, bool manual) {
         return ESP_ERR_INVALID_ARG;
     }
     manual_recovery = manual;
+    listen_only_active = listen_only;
     __atomic_store_n(&link_down_pending, false, __ATOMIC_RELAXED);
 
     twai_onchip_node_config_t node_config = {
@@ -485,6 +489,7 @@ static esp_err_t can_setup(int baud_rate, bool manual) {
          * protocol search depends on getting there rather than on being told
          * about a single failed frame. */
         .fail_retry_cnt = -1,
+        .flags.enable_listen_only = listen_only,
     };
 
     ESP_LOGI(TAG, "Init CAN driver\n");
@@ -562,8 +567,9 @@ static esp_err_t can_setup(int baud_rate, bool manual) {
         goto fail;
     }
 
-    /* Let the transceiver drive the bus. Active high, so low is not silent. */
-    gpio_set_level(PIN_CAN0_SILENT, 0);
+    /* Let the transceiver drive the bus. Active high, so low is not silent.
+     * In listen-only it stays silent: a second guard besides the controller. */
+    gpio_set_level(PIN_CAN0_SILENT, listen_only ? 1 : 0);
     can_started = true;
 
     ESP_LOGI(TAG, "Init CAN driver - Done!\n");
@@ -601,7 +607,9 @@ esp_err_t can_bus_teardown(void) {
  * translate: the length code goes in len, the id and its flags in id.
  * ------------------------------------------------------------------ */
 
-esp_err_t can_bus_setup(int baud_rate) { return can_setup(baud_rate, false); }
+esp_err_t can_bus_setup(int baud_rate) {
+    return can_setup(baud_rate, false, false);
+}
 
 static esp_err_t can_ops_open(const bus_cfg_t *cfg) {
     /* The controller takes its rate at install time and cannot be retimed
@@ -611,7 +619,8 @@ static esp_err_t can_ops_open(const bus_cfg_t *cfg) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    return can_setup((int)cfg->bitrate, cfg->manual_recovery);
+    return can_setup((int)cfg->bitrate, cfg->manual_recovery,
+                     cfg->listen_only);
 }
 
 static esp_err_t can_ops_close(void) { return can_bus_teardown(); }
@@ -619,6 +628,9 @@ static esp_err_t can_ops_close(void) { return can_bus_teardown(); }
 static int can_ops_send_controlled(const bus_msg_t *msg, uint32_t flags,
                                    bus_tx_control_t *control) {
     struct can_frame f = {0};
+
+    if (listen_only_active)
+        return BUS_ERR_TX_FAILED;
 
     f.id = msg->id;
     f.dlc = (uint8_t)msg->len;

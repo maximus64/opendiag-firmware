@@ -74,6 +74,7 @@ static struct {
         bool open;
         bool l_line_reserved;
         uint32_t bitrate;
+        bool listen_only;
         vif_owner_t owner;
         bus_tx_worker_t *tx_worker;
     } claim[VIF_RES_COUNT];
@@ -578,6 +579,7 @@ void vif_bus_info(vif_bus_claim_t out[VIF_BUS_GROUPS]) {
     for (int i = 0; i < VIF_RES_COUNT; i++) {
         out[i].bus = g.claim[i].bus;
         out[i].bitrate = g.claim[i].bitrate;
+        out[i].listen_only = g.claim[i].listen_only;
         out[i].owner = g.claim[i].owner;
     }
     UNLOCK();
@@ -704,6 +706,7 @@ esp_err_t vif_bus_open(vif_owner_t owner, vif_bus_t bus,
     g.claim[grp].bus = bus;
     g.claim[grp].l_line_reserved = false;
     g.claim[grp].bitrate = cfg ? cfg->bitrate : 0;
+    g.claim[grp].listen_only = cfg && cfg->listen_only;
     g.claim[grp].owner = owner;
     UNLOCK();
 
@@ -1313,6 +1316,7 @@ void vif_print_debug_info(void) {
     for (int i = 0; i < VIF_RES_COUNT; i++) {
         claim[i].bus = g.claim[i].bus;
         claim[i].bitrate = g.claim[i].bitrate;
+        claim[i].listen_only = g.claim[i].listen_only;
         claim[i].owner = g.claim[i].owner;
     }
     for (int i = 0; i < VIF_OWNER_COUNT; i++) {
@@ -1343,6 +1347,9 @@ void vif_print_debug_info(void) {
         printf("  %s", vif_bus_name(claim[i].bus));
         if (claim[i].bitrate) {
             printf(" @ %u", (unsigned)claim[i].bitrate);
+        }
+        if (claim[i].listen_only) {
+            printf(" listen-only");
         }
         printf(", held by %s\n", vif_owner_name(claim[i].owner));
     }

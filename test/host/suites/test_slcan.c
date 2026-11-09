@@ -186,6 +186,43 @@ TEST(close_stops_the_driver) {
     TEST_ASSERT_FALSE(fake_can_is_up());
 }
 
+TEST(listen_only_opens_the_driver_without_driving_the_bus) {
+    TEST_ASSERT_EQUAL_STRING(SLCAN_ACK, slcan_ask("S2\r"));
+    TEST_ASSERT_EQUAL_STRING(SLCAN_ACK, slcan_ask("L\r"));
+
+    TEST_ASSERT_TRUE(fake_can_is_up());
+    TEST_ASSERT_TRUE(fake_can_last_listen_only());
+    TEST_ASSERT_EQUAL_INT(50000, fake_can_last_baud());
+
+    /* Received traffic still flows... */
+    fake_can_stage_stale(0x281, 1, (const uint8_t *)"\x11");
+    TEST_ASSERT_EQUAL_STRING("t281111\r", slcan_listen());
+
+    /* ...but nothing goes out. */
+    TEST_ASSERT_EQUAL_STRING(SLCAN_NACK, slcan_ask("t7DF3010203\r"));
+    TEST_ASSERT_EQUAL_INT(0, fake_can_sent_count());
+}
+
+TEST(a_bit_rate_change_keeps_listen_only) {
+    TEST_ASSERT_EQUAL_STRING(SLCAN_ACK, slcan_ask("L\r"));
+
+    TEST_ASSERT_EQUAL_STRING(SLCAN_ACK, slcan_ask("S2\r"));
+
+    TEST_ASSERT_EQUAL_INT(50000, fake_can_last_baud());
+    TEST_ASSERT_TRUE(fake_can_last_listen_only());
+}
+
+TEST(opening_in_the_other_mode_is_refused_until_closed) {
+    TEST_ASSERT_EQUAL_STRING(SLCAN_ACK, slcan_ask("L\r"));
+    TEST_ASSERT_EQUAL_STRING(SLCAN_NACK, slcan_ask("O\r"));
+    TEST_ASSERT_TRUE(fake_can_last_listen_only());
+
+    TEST_ASSERT_EQUAL_STRING(SLCAN_ACK, slcan_ask("C\r"));
+    slcan_open();
+    TEST_ASSERT_FALSE(fake_can_last_listen_only());
+    TEST_ASSERT_EQUAL_STRING(SLCAN_NACK, slcan_ask("L\r"));
+}
+
 TEST(open_is_refused_while_the_shell_holds_the_bus) {
     const vif_bus_cfg_t cfg = {.bitrate = 500000};
 
@@ -446,6 +483,20 @@ TEST(the_channel_survives_a_front_end_switch) {
 
     TEST_ASSERT_EQUAL_INT(0, fake_can_teardown_count());
     TEST_ASSERT_EQUAL_STRING(SLCAN_ACK, slcan_ask("t7DF1AA\r"));
+}
+
+TEST(listen_only_survives_a_front_end_switch) {
+    TEST_ASSERT_EQUAL_STRING(SLCAN_ACK, slcan_ask("L\r"));
+
+    slcan_frontend.stop();
+    TEST_ASSERT_TRUE(slcan_frontend.start());
+
+    /* The restart cleared the context, not the claim: still no transmit, and
+     * a bit rate change must not reopen the bus as a transmitting one. */
+    TEST_ASSERT_EQUAL_STRING(SLCAN_NACK, slcan_ask("t7DF1AA\r"));
+    TEST_ASSERT_EQUAL_STRING(SLCAN_ACK, slcan_ask("S2\r"));
+    TEST_ASSERT_TRUE(fake_can_last_listen_only());
+    TEST_ASSERT_EQUAL_INT(0, fake_can_sent_count());
 }
 
 TEST(close_without_a_claim_leaves_the_other_owners_bus_running) {

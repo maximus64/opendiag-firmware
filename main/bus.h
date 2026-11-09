@@ -17,6 +17,7 @@
 typedef struct {
     uint32_t bitrate;     /* Bits per second. */
     bool manual_recovery; /* CAN bus-off recovery requires BUS_ON (J2534). */
+    bool listen_only;     /* CAN: never drive the bus (no ACK, no error frames). */
 } bus_cfg_t;
 
 typedef struct {
