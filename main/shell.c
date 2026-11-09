@@ -223,6 +223,42 @@ static void pinoff_command(int argc, char **argv) {
 static void board_command(int argc, char **argv) { board_print_info(); }
 
 /** @brief Print the embedded firmware version and build details. */
+/**
+ * @brief Why the adapter last started, in words.
+ *
+ * The boot log says nothing to a console that attaches afterwards, which is
+ * always the case after a reset: USB enumerates again. A brownout here is the
+ * vehicle's supply sagging - typically while cranking - not a firmware fault.
+ */
+static const char *reset_reason_name(esp_reset_reason_t reason) {
+    switch (reason) {
+    case ESP_RST_POWERON:
+        return "power on";
+    case ESP_RST_EXT:
+        return "external pin";
+    case ESP_RST_SW:
+        return "software";
+    case ESP_RST_PANIC:
+        return "panic";
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT:
+        return "watchdog";
+    case ESP_RST_DEEPSLEEP:
+        return "deep sleep";
+    case ESP_RST_BROWNOUT:
+        return "brownout (supply sagged)";
+    case ESP_RST_USB:
+        return "USB";
+    case ESP_RST_JTAG:
+        return "JTAG";
+    case ESP_RST_PWR_GLITCH:
+        return "power glitch";
+    default:
+        return "unknown";
+    }
+}
+
 static void version_command(int argc, char **argv) {
     const esp_app_desc_t *desc = esp_app_get_description();
 
@@ -231,6 +267,8 @@ static void version_command(int argc, char **argv) {
     printf("\tbuilt  : %s %s\n", desc->date, desc->time);
 #endif
     printf("\tidf    : %s\n", desc->idf_ver);
+    printf("\treset  : %s\n", reset_reason_name(esp_reset_reason()));
+    printf("\tuptime : %lld s\n", (long long)(esp_timer_get_time() / 1000000));
 }
 
 /**

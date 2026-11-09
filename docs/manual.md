@@ -76,6 +76,10 @@ The adapter runs from either the OBD-II port or USB:
 
 Both can be connected at the same time. When they are, the adapter runs from the OBD-II port.
 
+Cranking the engine can pull the vehicle supply low enough to restart the adapter, even with USB
+connected. `version` in the debug shell says why the adapter last started: `brownout (supply
+sagged)` is this case, not a fault.
+
 ---
 
 ## One data link, two ways to reach it
@@ -432,7 +436,7 @@ for the list of commands.
 | Command | Description |
 | --- | --- |
 | `help` | List all commands |
-| `version` | Show the firmware version and build |
+| `version` | Show the firmware version and build, why the adapter last started (`power on`, `brownout (supply sagged)` - usually cranking -, `watchdog`, ...) and how long it has been up |
 | `board` | Show board information |
 | `link` | Show which transport holds the data link |
 | `link usb` / `link ble` / `link drop` | Hand the data link to USB or Bluetooth, or let go of it |
@@ -533,6 +537,7 @@ Updating keeps your paired phones and the unit's voltage calibration.
 | LED pulsing amber unexpectedly | A pin is still energised. Type `vif` in the shell to see who holds it, then `pinoff` if it's the shell. |
 | Shell port prints but doesn't accept typing | Make sure you opened the **DEBUG** port, and that your terminal sends a carriage return (Enter). |
 | Nothing enumerates on USB | Try another cable (some are charge-only) and another USB port. |
+| Adapter restarts or disconnects when the engine starts | Type `version` in the shell. `reset: brownout` means cranking pulled the supply down (see [Power](#power)). Plug the adapter in, or reconnect your app, once the engine is running. Any other reason is worth reporting. |
 
 ---
 
