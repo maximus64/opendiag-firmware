@@ -55,6 +55,14 @@ TEST(echo_is_on_by_default) {
     TEST_ASSERT_EQUAL_STRING("ATI\r" ELM_ID "\r" ELM_PROMPT, elm_ask("ATI\r"));
 }
 
+TEST(trace_copies_without_changing_what_the_client_sees) {
+    elm327_trace_set(true);
+    TEST_ASSERT_TRUE(elm327_trace_get());
+    TEST_ASSERT_EQUAL_STRING("ATI\r" ELM_ID "\r" ELM_PROMPT, elm_ask("ATI\r"));
+    elm327_trace_set(false);
+    TEST_ASSERT_FALSE(elm327_trace_get());
+}
+
 TEST(echo_off_suppresses_the_command) {
     elm_echo_off();
 

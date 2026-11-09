@@ -237,6 +237,10 @@ void link_set(link_transport_t t) {
  * would make the whole feature unusable.
  */
 static void usb_line_state_changed(int itf, bool connected) {
+    /* Nobody reading the console: stop the ELM trace before it blocks. */
+    if (itf == USB_CDC_INTERFACE_SHELL && !connected) {
+        elm327_trace_set(false);
+    }
     if (itf != USB_CDC_INTERFACE_DATA) {
         return;
     }
