@@ -543,15 +543,60 @@ goes back to pins 6/14.
 
 ---
 
+## KKL cable mode (VAG KW1281 and other K-Line tools)
+
+In **kkl** mode the adapter behaves like a "dumb" USB KKL cable on OBD-II pin 7. Programs written
+for an FTDI KKL cable, such as VCDS-Lite, VAG-COM 311 and other KW1281 or KWP2000 tools, talk to
+the ECU themselves: they time the 5 baud address word, answer each KW1281 byte with its
+complement and choose the baud rate. The adapter only moves the bytes.
+
+```
+mode kkl default
+```
+
+Then point the program at the **data** port (on Windows, the COM port named "COM").
+
+- **Bytes pass through as they are.** What the host writes goes onto pin 7 unchanged: no
+  checksum, no framing, no P3/P4 waits. What the line carries comes back as it arrives, **echo
+  included**, because a single wire echoes and KKL software expects it.
+- **The port settings drive the line.** The baud rate, data bits (7 or 8) and parity (none, odd,
+  even) the program sets on the COM port reach the K-Line UART.
+- **Break drives the line.** While the program holds a break (`SetCommBreak`, `TIOCSBRK`), pin 7
+  is held low. That is how most KKL software sends the 5 baud address word and the 25 ms fast
+  init pulse. What the receiver sees during the break is thrown away.
+- **Rates below 300 baud are bit banged.** A program that sets the port to 5 baud (7O1 for KW1281)
+  and writes the address byte gets it sent bit by bit, 200 ms per bit. Mark and space parity work
+  at these rates only.
+- **Use `default`.** KKL programs often open and close the port several times in one session.
+  `mode kkl default` keeps the link in KKL mode when the port closes; `mode elm327 default` goes
+  back. Plain `mode kkl` reverts to ELM327 the first time the port closes.
+
+Limits:
+
+- **K-Line only.** Pin 15 is never driven in KKL mode, and there is no receiver on pin 15, so
+  "dual K-Line" VAG cars (second K-Line on pin 15) can't be read.
+- **20 kbit/s.** The TJA1027 transceiver is specified up to 20 kBd. The UART accepts up to
+  250000 baud, but don't expect tools that run the K-Line faster (ME7 logging or flashing at
+  38400 baud and up) to work.
+- **No FTDI emulation.** Programs that need the FTDI D2XX driver or check for an FTDI chip won't
+  see the adapter. Anything that opens an ordinary COM port works. Full VCDS only works with
+  Ross-Tech interfaces.
+- **Line settings are USB only.** Over BLE or WiFi, which have no line settings, kkl mode is a
+  raw bridge at the last rate a USB host set (10400 baud by default).
+- **Master pull-up.** The board has no tester-side pull-up on pin 7, only the transceiver's
+  ~30 kΩ. Most ECUs provide their own. If an init fails or bytes arrive corrupted, check the
+  K-Line rising edges with an oscilloscope; a 1 kΩ resistor in series with a diode from +BATT to
+  pin 7 is the usual fix.
+
 ## Switching modes
 
-The data link runs one of three modes at a time: **elm327** (the default), **j2534**, or
-**slcan**.
+The data link runs one of four modes at a time: **elm327** (the default), **j2534**, **slcan**,
+or **kkl**.
 
 | From | How to switch |
 | --- | --- |
-| Debug shell | `mode <name>`, for example `mode slcan` |
-| BLE control characteristic | `MODE=<name>` |
+| Debug shell | `mode <name>`, for example `mode slcan`. `mode <name> default` also makes it the mode the link returns to |
+| BLE control characteristic | `MODE=<name>`, or `DEFAULT=<name>` |
 | Inside ELM327 | `AT VIF PASSTHRU` or `AT VIF SLCAN` |
 
 Keep in mind:
@@ -559,8 +604,9 @@ Keep in mind:
 - **Switching modes is a fresh start.** Every bus and pin the link holds is released on the way
   through. Set up programming voltages *after* you switch, from the mode that will use them.
 - **The mode reverts when the client disconnects.** Closing the data port or dropping the BLE
-  connection puts the link back in ELM327 mode. That keeps an ordinary OBD app working next time
-  without anyone switching it back.
+  connection puts the link back in its default mode, ELM327 unless `mode <name> default` or
+  `DEFAULT=<name>` changed it. That keeps an ordinary OBD app working next time without anyone
+  switching it back.
 - **Switch before you open the port.** Opening the port doesn't reset the mode. `mode slcan`
   followed by starting `slcand` works as expected.
 - **The mode doesn't survive a power cycle.** After a reboot, the link starts in ELM327 mode.
@@ -581,8 +627,9 @@ from two places:
 | `ID` | `OpenDiag rev1 fw=… link=… mode=elm327 modes=…` | Identifies the adapter, its firmware, and the available modes |
 | `MODE` | `MODE elm327` | Shows the current mode |
 | `MODE=<name>` | `MODE slcan` | Switches mode, releasing every bus and pin the link holds |
+| `DEFAULT=<name>` | `DEFAULT kkl` | As `MODE=`, and also makes it the mode the link returns to when its client leaves (until the next reboot) |
 | `BUS` | `BUS can@500000/link` | Lists every open vehicle bus, its bit rate, and who holds it (`link` or `shell`) |
-| `RESET` | `RESET elm327` | Releases the link's buses and pins and goes back to ELM327 |
+| `RESET` | `RESET elm327` | Releases the link's buses and pins and goes back to the default mode |
 
 Commands are case-insensitive. A failed command replies with `ERR` and a reason.
 
@@ -608,6 +655,7 @@ for the list of commands.
 | `mode` | Show the current mode, the default, and every available mode |
 | `mode <name>` | Switch mode, for example `mode slcan` |
 | `elmtrace on` / `elmtrace off` | Copy every ELM327 request (`ELMTRC: >`) and reply (`ELMTRC: <`) to this console, whether the link is on USB or Bluetooth. Closing the console turns it off |
+| `mode <name> default` | Switch mode and keep it when the client leaves, for example `mode kkl default` |
 | `ctrl <command>` | Run a [control command](#control-commands) |
 | `canport obd` / `canport aux` / `canport ms` | Choose where the next CAN open goes: the OBD socket (pins 6/14, default), the AUX_CAN header J3 (pin 1 CAN-H, pin 2 CAN-L, pin 3 GND, no termination), or OBD pins 3/11 after [fitting R18 and R19](#a-second-can-on-obd-ii-pins-3-and-11-board-rework). `aux` is always listen-only, so a tapped bus is never driven. Only one CAN at a time. A reset goes back to `obd` |
 | `canbaud [ms]` | Find the bit rate of the CAN bus on the current `canport`. Opens it listen-only at every offered rate in turn (300 ms each by default, three times that below 50k), prints the valid frames and errors heard at each, and names the rate that matches. Never transmits, so it is safe on a bus you don't know. Close any open CAN session first |
