@@ -14,6 +14,7 @@
 #include "common.h"
 #include "elm327_at.h"
 #include "j2534.h"
+#include "kkl.h"
 #include "link.h"
 #include "nvs_flash.h"
 #include "pinout.h"
@@ -334,10 +335,26 @@ static void wifi_conn_changed(bool connected) {
     }
 }
 
+/* The data port's serial settings and break drive the KKL cable mode. The
+ * console's are the console's business. */
+static void usb_coding_changed(int itf, uint32_t baud, uint8_t data_bits,
+                               uint8_t parity) {
+    if (itf == USB_CDC_INTERFACE_DATA) {
+        kkl_line_coding(g_port_usb_cdc0, baud, data_bits, parity);
+    }
+}
+
+static void usb_break(int itf, uint16_t duration_ms) {
+    if (itf == USB_CDC_INTERFACE_DATA) {
+        kkl_break(g_port_usb_cdc0, duration_ms);
+    }
+}
+
 static void links_setup(void) {
     elm327_register();
     slcan_register();
     j2534_register();
+    kkl_register();
 
     if (vif_link_start(&elm327_frontend) != ESP_OK) {
         ESP_LOGE(TAG, "failed to start the data link");
@@ -350,6 +367,8 @@ static void links_setup(void) {
      * themselves, so nothing has to poll.
      */
     usb_cdc_set_line_callback(usb_line_state_changed);
+    usb_cdc_set_coding_callback(usb_coding_changed);
+    usb_cdc_set_break_callback(usb_break);
     ble_uart_set_conn_callback(ble_conn_changed);
     wifi_link_set_callbacks(wifi_rx_callback, wifi_conn_changed);
 

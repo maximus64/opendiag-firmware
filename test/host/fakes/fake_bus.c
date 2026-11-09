@@ -8,6 +8,8 @@
 #include "esp_timer.h"
 #include "bus_tx.h"
 
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -73,8 +75,26 @@ static uint32_t g_node_address;
 static bus_init_t g_init_request, g_init_reply;
 static uint8_t g_wakeup[KLINE_WAKEUP_MAX];
 static uint8_t g_wakeup_len;
+static char g_kline_log[512];
+static int g_kline_raw_result;
+
+/* The K-Line operations a raw (KKL) client depends on the order of. */
+static void kline_log(const char *fmt, ...) {
+    size_t used = strlen(g_kline_log);
+    va_list ap;
+
+    va_start(ap, fmt);
+    vsnprintf(g_kline_log + used, sizeof(g_kline_log) - used, fmt, ap);
+    va_end(ap);
+}
+
+const char *fake_bus_kline_log(void) { return g_kline_log; }
+
+void fake_bus_kline_raw_result(int rc) { g_kline_raw_result = rc; }
 
 void fake_bus_reset_all(void) {
+    g_kline_log[0] = '\0';
+    g_kline_raw_result = 0;
     memset(g_bus, 0, sizeof(g_bus));
     memset(&g_link, 0, sizeof(g_link));
     g_sync_count = 0;
@@ -262,6 +282,13 @@ static int bus_send(fake_bus_id_t id, const uint8_t *data, uint8_t len,
     if (b->sent_count < MAX_FRAMES) {
         stage(&b->sent[b->sent_count++], data, len, 0);
     }
+    if (id == FAKE_BUS_KLINE) {
+        kline_log("tx:");
+        for (uint8_t i = 0; i < len; i++) {
+            kline_log("%02X", data[i]);
+        }
+        kline_log(" ");
+    }
     fake_clock_advance_ms(b->send_duration_ms);
 
     if (id == FAKE_BUS_KLINE && (flags & BUS_TX_CLEAR_RX_QUEUE)) {
@@ -442,6 +469,19 @@ static int fake_set_param(bus_param_t p, uint32_t value) {
         return 0;
     case BUS_P_DATA_RATE:
         g_kline_baud = value;
+        kline_log("baud=%u ", (unsigned)value);
+        return 0;
+    case BUS_P_PARITY:
+        kline_log("parity=%u ", (unsigned)value);
+        return 0;
+    case BUS_P_DATA_BITS:
+        kline_log("bits=%u ", (unsigned)value);
+        return 0;
+    case BUS_P_KLINE_RAW:
+        if (g_kline_raw_result) {
+            return g_kline_raw_result;
+        }
+        kline_log("raw=%u ", (unsigned)value);
         return 0;
     case BUS_P_PERIODIC_MS:
         g_wakeup_ms = value;
@@ -566,6 +606,10 @@ static int fake_kline_ioctl(bus_ioctl_t id, const void *in, void *out) {
 
     case BUS_IOCTL_CLEAR_PERIODIC:
         g_wakeup_ms = 0;
+        return 0;
+
+    case BUS_IOCTL_KLINE_BREAK:
+        kline_log("break=%d ", in ? *(const bool *)in : -1);
         return 0;
 
     default:

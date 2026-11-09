@@ -121,6 +121,7 @@ set(SUITES
     test_kline_codec
     test_power_policy
     test_can_baud
+    test_kkl
 )
 
 set(test_elm327_at_FW      ${ELM327_FW})
@@ -169,6 +170,14 @@ set(test_slcan_FW
     ${FW_DIR}/kline_codec.c
     ${FW_DIR}/bus.c
     ${FW_DIR}/slcan.c
+    ${FW_DIR}/utility.c
+    ${FW_DIR}/vif.c
+)
+set(test_kkl_FW
+    ${FW_DIR}/comm_iface.c
+    ${FW_DIR}/kline_codec.c
+    ${FW_DIR}/bus.c
+    ${FW_DIR}/kkl.c
     ${FW_DIR}/utility.c
     ${FW_DIR}/vif.c
 )
