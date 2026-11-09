@@ -205,6 +205,17 @@ const char *vif_link_frontend_name(void);
 /** @brief The front-end the link reverts to. Set by vif_link_start(). */
 const vif_frontend_t *vif_link_default_frontend(void);
 
+/**
+ * @brief vif_link_set_frontend(), and make @p fe what the link reverts to
+ *        when its client leaves - once it has started.
+ *
+ * For a grammar that has to outlive its client: a KKL tool opens and closes
+ * the port several times in one session, and each close would otherwise put
+ * the link back on ELM327 underneath it. A grammar that refuses to start
+ * leaves the default where it was.
+ */
+void vif_link_set_default_frontend(const vif_frontend_t *fe);
+
 /** @brief The transport the link speaks on, or COMM_INVALID_PORT_ID. */
 comm_port_id_t vif_link_port(void);
 

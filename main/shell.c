@@ -1416,12 +1416,15 @@ static void mode_command(int argc, char **argv) {
         return;
     }
 
-    if (argc != 2) {
-        printf("Usage: mode [<name>]\n");
+    if (argc < 2 || argc > 3 || (argc == 3 && strcmp(argv[2], "default"))) {
+        printf("Usage: mode [<name> [default]]\n");
         return;
     }
 
-    snprintf(cmd, sizeof(cmd), "MODE=%s", argv[1]);
+    /* "default" keeps it across clients: the link returns to it, not to
+     * ELM327, whenever the port closes. */
+    snprintf(cmd, sizeof(cmd), "%s=%s", argc == 3 ? "DEFAULT" : "MODE",
+             argv[1]);
     vif_ctrl_exec(cmd, strlen(cmd), out, sizeof(out));
     printf("%s\n", out);
 }
@@ -1685,7 +1688,8 @@ const shell_command_t commands[] = {
      "Which transport carries the data link. Usage: link "
      "[drop|usb|ble|wifi]"},
     {"mode", mode_command,
-     "Show or switch the link's grammar. Usage: mode [<name>]"},
+      "Show or switch the link's grammar; 'default' keeps it after the "
+      "client leaves. Usage: mode [<name> [default]]"},
     {"elmtrace", elmtrace_command,
      "Copy ELM327 requests/replies to this console. Usage: elmtrace [on|off]"},
     {"ctrl", ctrl_command, "Run a control command. Usage: ctrl <command>"},
