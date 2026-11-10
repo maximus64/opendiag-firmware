@@ -6,10 +6,11 @@
 #define PIN_CAN0_RX 5
 #define PIN_CAN0_SILENT 8 /* Active High */
 
-/* CAN1 Transceiver */
+/* CAN1 Transceiver (TJA1051T-3 U6, AUX_CAN header J3: 1 = H, 2 = L, 3 = GND,
+ * no termination fitted) */
 #define PIN_CAN1_TX 6
 #define PIN_CAN1_RX 7
-#define PIN_CAN1_SILENT 47 /* Active Low */
+#define PIN_CAN1_SILENT 47 /* Active High, same part as CAN0 */
 
 /* K-Line Transceiver */
 #define PIN_KLINE_TX 17

@@ -8,6 +8,8 @@ nav:
   - Home: index.md
   - User manual: manual.md
   - ELM327 commands: at_commands.md
+  - Diagnostic services: diagnostics.md
+  - Developer guide: developers.md
   - Firmware update: update/index.html
 
 theme:

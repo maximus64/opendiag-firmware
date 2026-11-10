@@ -131,25 +131,30 @@ static bool slcan_is_listen_only(void) {
 /**
  * @brief LAWICEL bit rate digit to bits per second.
  *
- * The four rates the TWAI timing tables here do not carry - 10k, 20k, 100k and
- * 800k - return 0 and are refused, rather than quietly running at some other
- * speed on a live vehicle bus.
+ * S0 to S8, the full LAWICEL table. Anything else returns 0 and is refused.
  */
 static uint32_t slcan_bitrate(char digit) {
-    switch (digit) {
-    case '2':
-        return 50000;
-    case '4':
-        return 125000;
-    case '5':
-        return 250000;
-    case '6':
-        return 500000;
-    case '8':
-        return 1000000;
-    default:
+    static const uint32_t rates[] = {10000,  20000,  50000,  100000, 125000,
+                                     250000, 500000, 800000, 1000000};
+
+    return (digit >= '0' && digit <= '8') ? rates[digit - '0'] : 0;
+}
+
+/**
+ * @brief 's' + BTR0 BTR1, as for an SJA1000 clocked at 16 MHz (CANUSB).
+ *
+ * How tools ask for a rate the S table lacks, such as 83.3 kbit/s. The rate
+ * the registers describe must be one the adapter offers; 0 otherwise.
+ */
+static uint32_t slcan_btr_bitrate(const char *hex) {
+    unsigned btr0, btr1;
+    char tail;
+
+    if (strlen(hex) != 4 || sscanf(hex, "%2x%2x%c", &btr0, &btr1, &tail) != 2)
         return 0;
-    }
+    uint32_t brp = (btr0 & 0x3F) + 1;
+    uint32_t tq = 1 + ((btr1 & 0x0F) + 1) + (((btr1 >> 4) & 0x07) + 1);
+    return can_bitrate_canonical(16000000u / (2u * brp * tq));
 }
 
 /** @brief Parse a t/T/r/R command into @p f. 0 on success. */
@@ -272,8 +277,10 @@ static void slcan_parse_command(slcan_ctx_t *c, const char *buf) {
     case 'R': /* extended remote request */
         slcan_send_frame(c, buf, true, true);
         break;
-    case 'S': { /* bit rate */
-        uint32_t rate = slcan_bitrate(buf[1]);
+    case 'S':   /* bit rate from the table */
+    case 's': { /* bit rate from SJA1000 registers */
+        uint32_t rate =
+            buf[0] == 'S' ? slcan_bitrate(buf[1]) : slcan_btr_bitrate(buf + 1);
 
         if (rate == 0) {
             /* A rate the timing tables do not carry is refused rather than
