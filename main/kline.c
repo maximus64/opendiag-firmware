@@ -1399,6 +1399,7 @@ static int init_5baud(const bus_init_t *in) {
     g.link.key[1] = kb2;
     g.link.key_code = keys.code;
     g.link.address = in->address;
+    g.link.physical = false;
     g.link.w1_us = g.stats.last_w1_us;
     g.link.w2_us = g.stats.last_w2_us;
     g.link.w3_us = g.stats.last_w3_us;
@@ -1470,6 +1471,7 @@ static int init_fast(bus_init_t *io) {
             g.stats.tx_msgs++;
     }
     g.link.address = io->address;
+    g.link.physical = io->msg_len && (io->msg[0] & 0xC0u) == 0x80u;
     if (io->no_response || (!io->raw_response && !io->msg_len)) {
         return 0;
     }
@@ -1522,6 +1524,7 @@ static int init_fast(bus_init_t *io) {
     g.link.key[1] = keys.kb2;
     g.link.key_code = keys.code;
     g.link.address = io->address;
+    g.link.physical = io->msg_len && (io->msg[0] & 0xC0u) == 0x80u;
 
     ESP_LOGI(TAG, "fast init ok, key bytes %02X %02X", keys.kb1, keys.kb2);
     return 0;
@@ -1620,8 +1623,10 @@ static int do_stop_comm(void) {
 
     if (g.link.variant == KLINE_VARIANT_KWP) {
         /* Clause 5.2. ISO 9141-2 has no equivalent; there the ECU simply
-         * times out at P3max. */
-        msg[n++] = 0xC1;
+         * times out at P3max. A session started on one ECU's physical
+         * address is ended on it too: the functional form would reach the
+         * OBD group, which that ECU is not in. */
+        msg[n++] = g.link.physical ? 0x81 : 0xC1;
         msg[n++] = g.link.address ? g.link.address : KLINE_INIT_ADDR_OBD;
         msg[n++] = 0xF1;
         msg[n++] = KLINE_SVC_STOP_COMM;

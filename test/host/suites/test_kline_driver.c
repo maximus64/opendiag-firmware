@@ -615,6 +615,46 @@ TEST(a_fast_init_nobody_answered_still_waits_only_p2_max) {
     TEST_ASSERT_TRUE(now_us() < last + P_TO_US(g.cfg.p3_min));
 }
 
+TEST(a_physically_addressed_fast_init_is_ended_on_the_same_address) {
+    /* The ABS at $20 answers StartCommunication from its own address. */
+    const uint8_t reply[] = {0x83, 0xf1, 0x20, 0xc1, 0xef, 0x8f, 0xd3};
+    bus_init_t init = raw_init(true, reply, sizeof(reply));
+    init.raw_response = false;
+    init.address = 0x20;
+    memcpy(init.msg, "\x81\x20\xf1\x81", 4);
+    init.msg_len = 4;
+    init_test_request_len = 5;
+    TEST_ASSERT_EQUAL_INT(0, do_init(CMD_FAST_INIT, &init));
+    TEST_ASSERT_EQUAL_MEM("\x81\x20\xf1\x81\x13", init_test_sent, 5);
+    TEST_ASSERT_TRUE(g.link.connected);
+    TEST_ASSERT_TRUE(g.link.physical);
+    TEST_ASSERT_EQUAL_INT(0x20, g.link.address);
+
+    init_test_sent_len = 0;
+    init_test_reply_len = 0;
+    TEST_ASSERT_EQUAL_INT(0, do_stop_comm());
+    TEST_ASSERT_EQUAL_INT(5, init_test_sent_len);
+    TEST_ASSERT_EQUAL_MEM("\x81\x20\xf1\x82\x14", init_test_sent, 5);
+    TEST_ASSERT_FALSE(g.link.physical);
+}
+
+TEST(a_functional_fast_init_is_ended_functionally) {
+    const uint8_t reply[] = {0x83, 0xf1, 0x10, 0xc1, 0xef, 0x8f, 0xc3};
+    bus_init_t init = raw_init(true, reply, sizeof(reply));
+    init.raw_response = false;
+    init.address = 0x33;
+    memcpy(init.msg, "\xc1\x33\xf1\x81", 4);
+    init.msg_len = 4;
+    init_test_request_len = 5;
+    TEST_ASSERT_EQUAL_INT(0, do_init(CMD_FAST_INIT, &init));
+    TEST_ASSERT_FALSE(g.link.physical);
+
+    init_test_sent_len = 0;
+    init_test_reply_len = 0;
+    TEST_ASSERT_EQUAL_INT(0, do_stop_comm());
+    TEST_ASSERT_EQUAL_MEM("\xc1\x33\xf1\x82\x67", init_test_sent, 5);
+}
+
 TEST(fast_init_no_response_preserves_uart_reply_for_normal_receive) {
     bus_init_t init = raw_init(false, previous_reply, sizeof(previous_reply));
     init.no_response = true;

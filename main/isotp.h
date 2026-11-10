@@ -35,6 +35,9 @@ typedef struct {
     uint8_t tx_address;
     uint8_t rx_address;
     bool functional;
+    /* Accept a first consecutive frame numbered 0 instead of 1, as some
+     * non-compliant ECUs send. Strict (false) by default; J2534 keeps it so. */
+    bool lenient_first_sn;
     bool pad;
     uint8_t pad_value;
     uint8_t block_size;
