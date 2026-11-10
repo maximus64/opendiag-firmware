@@ -145,13 +145,40 @@ TEST(the_default_bit_rate_is_five_hundred_kilobit) {
     TEST_ASSERT_EQUAL_INT(500000, fake_can_last_baud());
 }
 
-TEST(a_bit_rate_the_driver_cannot_produce_is_refused) {
-    /* S7 is 800 kbit/s, which the TWAI timing tables here do not carry.
-     * Accepting it would run a vehicle bus at the wrong speed. */
-    TEST_ASSERT_EQUAL_STRING(SLCAN_NACK, slcan_ask("S7\r"));
+TEST(a_bit_rate_outside_the_table_is_refused) {
+    /* Accepting it would run a vehicle bus at the wrong speed. */
+    TEST_ASSERT_EQUAL_STRING(SLCAN_NACK, slcan_ask("S9\r"));
 
     slcan_open();
     TEST_ASSERT_EQUAL_INT(500000, fake_can_last_baud());
+}
+
+TEST(the_whole_lawicel_table_is_offered) {
+    static const struct {
+        const char *cmd;
+        int rate;
+    } table[] = {
+        {"S0\r", 10000}, {"S1\r", 20000}, {"S3\r", 100000}, {"S7\r", 800000}};
+
+    for (unsigned i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
+        TEST_ASSERT_EQUAL_STRING(SLCAN_ACK, slcan_ask(table[i].cmd));
+        slcan_open();
+        TEST_ASSERT_EQUAL_INT(table[i].rate, fake_can_last_baud());
+        TEST_ASSERT_EQUAL_STRING(SLCAN_ACK, slcan_ask("C\r"));
+    }
+}
+
+TEST(btr_registers_select_a_rate_the_table_lacks) {
+    /* SJA1000 at 16 MHz: BRP 6, 16 quanta -> 83.3 kbit/s. */
+    TEST_ASSERT_EQUAL_STRING(SLCAN_ACK, slcan_ask("s052B\r"));
+    slcan_open();
+    TEST_ASSERT_EQUAL_INT(83333, fake_can_last_baud());
+}
+
+TEST(btr_registers_for_a_rate_not_offered_are_refused) {
+    /* BRP 1, 9 quanta: 888.9 kbit/s. */
+    TEST_ASSERT_EQUAL_STRING(SLCAN_NACK, slcan_ask("s0015\r"));
+    TEST_ASSERT_EQUAL_STRING(SLCAN_NACK, slcan_ask("s05\r"));
 }
 
 TEST(the_bit_rate_reconfigures_a_channel_this_session_holds) {
