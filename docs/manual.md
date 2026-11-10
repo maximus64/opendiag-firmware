@@ -32,6 +32,9 @@ This manual covers setting up and using the OpenDIAG adapter.
 - **A pulsing amber LED means a connector pin is energised.** Pins are released when the client
   that raised them disconnects. A pin raised from the debug shell stays on until you release it
   there. See [Releasing pins and buses](#releasing-pins-and-buses).
+- **Before clearing codes or writing to a module,** read
+  [Diagnostic services](diagnostics.md#before-you-change-anything): what each service does, and
+  what to back up first.
 - **Only work on vehicles you own or are authorised to modify.** Changing emissions-related
   calibrations is regulated in many places.
 
@@ -61,7 +64,10 @@ This manual covers setting up and using the OpenDIAG adapter.
 - **OBD-II plug** – connects to the vehicle's diagnostic port.
 - **USB-C** – connects to a computer and provides the serial ports. It can also power the adapter
   (see [Power](#power)).
-- **Auxiliary CAN port** (side of the unit) – connects to the second CAN transceiver.
+- **Auxiliary CAN port** (side of the unit) – connects to the second CAN transceiver. It is a
+  3-pin JST PH connector (2.0 mm): pin 1 CAN-H, pin 2 CAN-L, pin 3 ground. No termination
+  resistor is fitted, so it can be tapped onto a running bus without loading it. See
+  [Listening on the auxiliary CAN port](#listening-on-the-auxiliary-can-port).
 
 ---
 
@@ -80,17 +86,50 @@ Cranking the engine can pull the vehicle supply low enough to restart the adapte
 connected. `version` in the debug shell says why the adapter last started: `brownout (supply
 sagged)` is this case, not a fault.
 
+### Sleeping while the vehicle is parked
+
+An adapter left plugged in draws current from the battery all the time. To protect it, OpenDIAG
+goes into deep sleep when all of these are true for **10 minutes**:
+
+- nobody is connected: no USB host, no Bluetooth phone, no WiFi client;
+- no bus is open and no pin is energised;
+- there is no traffic on the CAN bus (pins 6/14, or the AUX header);
+- the battery is below **13.2 V**, so the engine is off. Below 6 V the adapter assumes it is on
+  USB power only, on the bench, and never sleeps.
+
+The LED goes out. The adapter wakes up, which is a full restart, when:
+
+- **CAN traffic** appears. On most vehicles that happens when you unlock or open a door.
+- you press the **button**.
+- it sees a **charging voltage**, 13.2 V or more. It checks once a minute, and goes straight back
+  to sleep if the engine is still off.
+
+Change it in the [debug shell](#the-debug-shell). The settings are kept across power cycles:
+
+| Command | What it does |
+| --- | --- |
+| `power` | Show the settings, why the adapter is staying awake, and what woke it last |
+| `power auto on` / `power auto off` | Turn sleeping on (default) or off |
+| `power idle <minutes>` | Quiet time before sleeping, 1 to 240 |
+| `power vrun <mV>` | Battery voltage that means "engine running", 12000 to 15500. Lower it for a vehicle with a smart alternator that charges at 12.5 V |
+| `power sleep` | Sleep now, if no bus or pin is in use. For testing |
+
+> [!NOTE]
+> On a vehicle whose CAN bus stays silent when it wakes up, start the engine or press the
+> button to wake the adapter. The once-a-minute check catches a running engine by its charging
+> voltage.
+
 ---
 
-## One data link, two ways to reach it
+## One data link, three ways to reach it
 
-OpenDIAG has **one** data link, and it runs over either USB or Bluetooth. It doesn't use both at
-once. **The first one to connect gets it.** The other one can connect, but it gets no answer until
+OpenDIAG has **one** data link, and it runs over USB, Bluetooth or WiFi. It doesn't use more than
+one at once. **The first one to connect gets it.** The other one can connect, but it gets no answer until
 the first one disconnects.
 
 A computer that keeps the USB data port open therefore locks out a phone. To hand the link to the
-phone without closing the port, type `link ble` in the [debug shell](#the-debug-shell). To let
-whichever connects next take it, type `link drop`.
+phone without closing the port, type `link ble` (or `link wifi`) in the
+[debug shell](#the-debug-shell). To let whichever connects next take it, type `link drop`.
 
 Whenever the client holding the link disconnects, the adapter starts over. The link goes back to
 ELM327 mode, its settings are cleared, and every bus and pin that client opened is released. The
@@ -230,6 +269,42 @@ negotiated MTU, so request a larger MTU for better throughput.
 
 ---
 
+## Connecting over WiFi
+
+The adapter can run its own WiFi access point, the way WiFi ELM327 adapters do. A laptop or a phone
+joins it and opens a TCP connection to **192.168.0.10, port 35000**. That connection is the data
+link, the same one USB and Bluetooth carry, so ELM327 apps, SLCAN tools and scripts all work over
+it.
+
+WiFi is **off by default**. Turn it on once from the [debug shell](#the-debug-shell):
+
+```text
+wifi pass <8 to 63 characters>    choose the WPA2 password
+wifi on                           start the access point (remembered across power cycles)
+wifi                              show the network name, the address and who is connected
+```
+
+The network is called `OpenDiag-XXXX`, where XXXX is the end of the adapter's MAC address.
+Rename it with `wifi ssid <name>`. The adapter refuses to start an open network without a password:
+anyone in range could otherwise reach the vehicle's buses.
+
+Using it from a laptop:
+
+- **OBD-II apps and tools:** pick a WiFi adapter at 192.168.0.10:35000.
+- **Python (pyserial, python-can):** open `socket://192.168.0.10:35000` instead of a serial port.
+- **SLCAN:** send `AT VIF SLCAN` on the connection, then speak SLCAN. To use `slcand`, bridge the
+  socket to a pseudo-terminal first, for example
+  `socat pty,link=/tmp/odcan,raw tcp:192.168.0.10:35000`.
+
+One client at a time. A second one waits until the first disconnects. The debug shell stays on
+USB.
+
+WiFi uses more power than Bluetooth. The access point doesn't stop the adapter
+[sleeping while the vehicle is parked](#sleeping-while-the-vehicle-is-parked); a connected client
+does.
+
+---
+
 ## Using OpenDIAG with an OBD-II app (ELM327)
 
 Any app or program that supports an ELM327 adapter should work, over USB or over Bluetooth LE.
@@ -257,13 +332,43 @@ Apps that only support *Bluetooth Classic* ELM327 adapters won't find it. Look f
 | 7 | ISO 15765-4 CAN 29-bit, 500 kbaud | ✅ |
 | 8 | ISO 15765-4 CAN 11-bit, 250 kbaud | ✅ |
 | 9 | ISO 15765-4 CAN 29-bit, 250 kbaud | ✅ |
-| A–C | J1939, USER1, USER2 | not yet |
+| A | SAE J1939 | not yet |
+| B, C | USER1, USER2 CAN, rate and ID length set with `AT PB` | ✅ |
 
 Automatic search tries CAN first (500k before 250k), then K-Line, then J1850. Setting a protocol
 by hand skips the search and connects faster. `AT SS` switches to the SAE J1978 order, which
 starts with J1850.
 
+Before its first transmission on a CAN protocol, searched or set by hand, the adapter listens for
+150 ms without driving the bus. If it hears only errors and not one valid frame, a bus at another
+bit rate is running on pins 6/14, and the adapter skips that protocol instead of transmitting into
+it. Some vehicles carry a low-speed body bus there, for example 50 kbit/s on a Fiat Ducato or
+Citroën Jumper: frames sent at 500 kbit/s are errors to every module on it. A silent bus, one that
+only answers when asked, is tried as usual. `canguard off` in the debug shell turns this check off.
+
 The full list of supported AT commands is in [at_commands.md](at_commands.md).
+
+### Modules outside the OBD-II address ranges
+
+Body computers, instrument clusters and other non-emissions modules often answer on identifiers
+that OBD-II apps never use, sometimes on a slower bus and with an extended address byte in front
+of the data. By default the adapter only accepts replies on 7E8–7EF (11-bit) and 18DAF1xx
+(29-bit). These commands open it up:
+
+| Command | Use |
+| --- | --- |
+| `AT PB 81 0A` then `AT SP B` | 11-bit CAN at 50 kbit/s (500 ÷ 0A), ISO 15765-4 framing |
+| `AT SH 7B0` | the request identifier |
+| `AT CRA 7C0` | accept replies on 7C0 (`X` is a wildcard digit: `7CX`) |
+| `AT CEA hh` | put extended address `hh` in front of every request |
+| `AT FC SH`, `AT FC SD`, `AT FC SM 1` | send flow control on a header and with data you choose |
+| `AT MA` | watch the bus listen-only until any key |
+| `AT CS` | the CAN controller's error counters |
+
+With a reply filter set, the flow control for a long reply goes out on the request identifier,
+which is what most such modules expect. Protocols B and C listen before driving the bus, just
+like 6 to 9, so a wrong `AT PB` rate on a bus with traffic is caught before it transmits.
+`AT D` or `AT Z` puts all of this back to the defaults.
 
 ### OpenDIAG extensions
 
@@ -391,6 +496,24 @@ Use it to sniff a bus you don't know yet, for example to find its bit rate: try 
   `S<n>` keeps the mode.
 - In the debug shell, `vif` shows `listen-only` next to the CAN bus while it is open that way.
 
+### Listening on the auxiliary CAN port
+
+Some vehicle buses never reach the OBD-II connector, for example a powertrain CAN behind the body
+computer's gateway. To record one, wire it to the
+[auxiliary CAN port](#connectors) and, in the debug shell, before the CAN channel is opened:
+
+```
+canport aux
+```
+
+The next CAN open, from any mode, then uses the auxiliary port, and **always listen-only**: the
+adapter never transmits on a bus tapped there, whatever the software asks for. `canport obd` goes
+back to the OBD-II connector, and so does a restart.
+
+- Only one CAN bus works at a time: the processor has a single CAN controller.
+- `canport` is refused while a CAN bus is open. Close it first.
+- Keep the tap short and twisted, and don't add a terminating resistor.
+
 ---
 
 ## Switching modes
@@ -452,11 +575,15 @@ for the list of commands.
 | `version` | Show the firmware version and build, why the adapter last started (`power on`, `brownout (supply sagged)` - usually cranking -, `watchdog`, ...) and how long it has been up |
 | `board` | Show board information |
 | `link` | Show which transport holds the data link |
-| `link usb` / `link ble` / `link drop` | Hand the data link to USB or Bluetooth, or let go of it |
+| `link usb` / `link ble` / `link wifi` / `link drop` | Hand the data link to USB, Bluetooth or WiFi, or let go of it |
+| `wifi`, `wifi on` / `wifi off`, `wifi pass <p>`, `wifi ssid <n>` | The WiFi access point. See [Connecting over WiFi](#connecting-over-wifi) |
+| `power`, `power auto on\|off`, `power idle <min>`, `power vrun <mV>`, `power sleep` | Sleeping while parked. See [Sleeping while the vehicle is parked](#sleeping-while-the-vehicle-is-parked) |
 | `mode` | Show the current mode, the default, and every available mode |
 | `mode <name>` | Switch mode, for example `mode slcan` |
 | `elmtrace on` / `elmtrace off` | Copy every ELM327 request (`ELMTRC: >`) and reply (`ELMTRC: <`) to this console, whether the link is on USB or Bluetooth. Closing the console turns it off |
 | `ctrl <command>` | Run a [control command](#control-commands) |
+| `canport obd` / `canport aux` | Choose where the next CAN open goes: the OBD socket (pins 6/14, default) or the AUX_CAN header J3 (pin 1 CAN-H, pin 2 CAN-L, pin 3 GND, no termination). `aux` is always listen-only, so a tapped bus is never driven. Only one CAN at a time. A reset goes back to `obd` |
+| `canguard on` / `canguard off` | Before the ELM327 front-end first transmits on a CAN protocol it listens for 150 ms without driving the bus. If it hears only errors and no valid frame, another bit rate is running on pins 6/14 (some vans carry a 50 kbit/s body bus there) and that protocol is skipped instead of flooding the bus. On by default; `off` restores the plain ELM327 behaviour |
 | `ble` | Show pairing status |
 | `ble pair` | Open the Bluetooth pairing window |
 | `ble forget` | Forget every paired phone |
@@ -544,6 +671,7 @@ Updating keeps your paired phones and the unit's voltage calibration.
 | Phone used to connect, now can't | The phone and adapter no longer share a key. Remove the adapter from the phone's Bluetooth settings, hold the button for 10 s, and pair again. |
 | Phone connects but gets no answer | USB holds the data link. Close the program using the data port, or type `link ble` in the shell. |
 | App connects but says "unable to connect to ECU" / `NO DATA` | Is the ignition on? Try setting the protocol by hand with `AT SP`. |
+| A CAN protocol says `NO DATA` straight away and the shell logs *another bit rate is running here* | Pins 6/14 carry a bus at a different speed, so the adapter won't transmit on it (see [Supported protocols](#supported-protocols)). The vehicle's OBD protocol is probably K-Line: set it with `AT SP 3`, `4` or `5`. |
 | App reports `?` after selecting a protocol | The bus is held by the debug shell. Run `ctrl BUS` or `vif` in the shell to check. |
 | **Save & Test** fails in `opendiag_config.exe` | Check you picked the **data** COM port, not the debug port, and that no other program has it open. |
 | SLCAN tool gets ELM327 replies | The link reverted when the port was last closed. Run `mode slcan` again before opening it. |

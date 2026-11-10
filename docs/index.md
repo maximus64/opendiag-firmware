@@ -40,6 +40,9 @@ drivers or tools to install.
 - [Firmware update](update/index.html): install the latest firmware from your browser.
 - [User manual](manual.md): setup, modes, the debug shell, firmware updates, and troubleshooting.
 - [ELM327 commands](at_commands.md): which AT commands are supported.
+- [Diagnostic services](diagnostics.md): reading, clearing, writing and workshop sessions, and
+  which interface carries each.
+- [Developer guide](developers.md): architecture, building, tests, and how to contribute.
 
 ## Related projects
 
