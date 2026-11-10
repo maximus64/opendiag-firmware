@@ -40,6 +40,7 @@ static struct {
     void (*lifecycle_hook)(void);
     int confirmed_send_error;
     uint32_t tx_end_lag_us; /* How long before the send returns a frame ends. */
+    bool overflow_next; /* next received frame reports BUS_RX_BUFFER_OVERFLOW */
 
     staged_t live[MAX_FRAMES]; /* Readable now */
     int live_head, live_count;
@@ -51,6 +52,10 @@ static struct {
     int sent_count;
     int sent_total; /* Includes transmits past the log's end */
 } g;
+
+void fake_can_stage_overflow(void) {
+    g.overflow_next = true;
+}
 
 void fake_can_reset(void) {
     memset(&g, 0, sizeof(g));
@@ -345,7 +350,8 @@ static int can_ops_recv(bus_msg_t *msg, TickType_t wait) {
     msg->len = f.dlc;
     msg->timestamp_us = g.rx_timestamp_us;
     msg->sequence = ++g.rx_sequence;
-    msg->status = 0;
+    msg->status = g.overflow_next ? BUS_RX_BUFFER_OVERFLOW : 0;
+    g.overflow_next = false;
 
     return (int)len;
 }

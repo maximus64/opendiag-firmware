@@ -331,6 +331,36 @@ TEST(several_frames_are_forwarded_in_one_pass) {
     TEST_ASSERT_EQUAL_STRING("t100101\rt101101\r", slcan_listen());
 }
 
+TEST(an_overrun_is_reported_by_f_until_the_channel_reopens) {
+    const uint8_t data[1] = {0x01};
+
+    slcan_open();
+    TEST_ASSERT_EQUAL_STRING("F00" SLCAN_ACK, slcan_ask("F\r"));
+
+    fake_can_stage_overflow();
+    fake_can_stage_stale(0x100, sizeof(data), data);
+    TEST_ASSERT_EQUAL_STRING("t100101\r", slcan_listen());
+    TEST_ASSERT_EQUAL_STRING("F08" SLCAN_ACK, slcan_ask("F\r"));
+
+    /* Sticky: a frame without the overflow mark does not clear it. */
+    fake_can_stage_stale(0x101, sizeof(data), data);
+    TEST_ASSERT_EQUAL_STRING("t101101\r", slcan_listen());
+    TEST_ASSERT_EQUAL_STRING("F08" SLCAN_ACK, slcan_ask("F\r"));
+
+    slcan_ask("C\r");
+    slcan_open();
+    TEST_ASSERT_EQUAL_STRING("F00" SLCAN_ACK, slcan_ask("F\r"));
+}
+
+TEST(a_crlf_line_end_does_not_break_the_next_command) {
+    /* The LF after the CR is an empty line, not the start of the next command. */
+    TEST_ASSERT_EQUAL_STRING(SLCAN_ACK "F00" SLCAN_ACK, slcan_ask("O\r\nF\r"));
+}
+
+TEST(a_bare_lf_also_ends_a_command) {
+    TEST_ASSERT_EQUAL_STRING(SLCAN_ACK "F00" SLCAN_ACK, slcan_ask("O\nF\n"));
+}
+
 TEST(a_whole_burst_costs_one_transport_write) {
     const uint8_t data[8] = {1, 2, 3, 4, 5, 6, 7, 8};
     const char *out;
