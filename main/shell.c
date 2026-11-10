@@ -1457,6 +1457,49 @@ static void ctrl_command(int argc, char **argv) {
 }
 
 /**
+ * @brief Command handler for 'canport'
+ *
+ * Picks which transceiver the next CAN open uses: the OBD socket or the
+ * AUX_CAN header. AUX is always listen-only. Back to obd after a reset.
+ */
+static void canport_command(int argc, char **argv) {
+    bool aux;
+
+    if (argc == 2 && strcmp(argv[1], "aux") == 0)
+        aux = true;
+    else if (argc == 2 && strcmp(argv[1], "obd") == 0)
+        aux = false;
+    else if (argc != 1) {
+        printf("Usage: canport [obd|aux]\n");
+        return;
+    }
+    if (argc == 2 && can_bus_use_aux(aux) != ESP_OK) {
+        printf("canport: close the CAN bus first\n");
+        return;
+    }
+    printf("canport: %s\n", can_bus_aux() ? "aux (J3, listen-only)"
+                                          : "obd (pins 6/14)");
+}
+
+/**
+ * @brief Command handler for 'canguard'
+ *
+ * Whether the ELM327 front-end listens before its first transmit on a CAN
+ * protocol and leaves alone a bus that runs at another bit rate.
+ */
+static void canguard_command(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "on") == 0)
+        elm327_can_guard_set(true);
+    else if (argc == 2 && strcmp(argv[1], "off") == 0)
+        elm327_can_guard_set(false);
+    else if (argc != 1) {
+        printf("Usage: canguard [on|off]\n");
+        return;
+    }
+    printf("canguard: %s\n", elm327_can_guard_get() ? "on" : "off");
+}
+
+/**
  * @brief Command handler for 'comm'
  *
  * Shows the registered comm_iface ports and their state.
@@ -1518,6 +1561,12 @@ const shell_command_t commands[] = {
     {"elmtrace", elmtrace_command,
      "Copy ELM327 requests/replies to this console. Usage: elmtrace [on|off]"},
     {"ctrl", ctrl_command, "Run a control command. Usage: ctrl <command>"},
+    {"canport", canport_command,
+     "CAN transceiver for the next open: OBD socket or AUX_CAN header "
+     "(listen-only). Usage: canport [obd|aux]"},
+    {"canguard", canguard_command,
+     "ELM327: listen before transmitting on CAN, skip a bus at another bit "
+     "rate. Usage: canguard [on|off]"},
     {NULL, NULL, NULL} // End of list marker
 };
 

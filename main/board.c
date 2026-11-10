@@ -78,6 +78,12 @@ void board_setup(void) {
     gpio_set_level(PIN_CAN0_SILENT, 1);
     gpio_set_direction(PIN_CAN0_SILENT, GPIO_MODE_OUTPUT);
 
+    /* CAN1 (AUX_CAN header) likewise: left floating, the TJA1051's pull-down
+     * on S would put it in normal mode. */
+    gpio_reset_pin(PIN_CAN1_SILENT);
+    gpio_set_level(PIN_CAN1_SILENT, 1);
+    gpio_set_direction(PIN_CAN1_SILENT, GPIO_MODE_OUTPUT);
+
     /* K-Line driver */
     gpio_reset_pin(PIN_KLINE_TX);
     gpio_set_level(PIN_KLINE_TX, 1);

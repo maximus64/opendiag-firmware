@@ -29,6 +29,8 @@ typedef struct {
 static struct {
     bool up;
     bool listen_only; /* most recent open asked for listen-only */
+    bool listen_first; /* most recent open asked to listen first */
+    bool foreign_rate; /* a bus at another bit rate is running */
     uint32_t rx_timestamp_us;
     uint32_t rx_sequence;
     int baud;
@@ -52,8 +54,11 @@ static struct {
     int sent_total; /* Includes transmits past the log's end */
 } g;
 
+static uint8_t fake_tec, fake_rec;
+
 void fake_can_reset(void) {
     memset(&g, 0, sizeof(g));
+    fake_tec = fake_rec = 0;
     g.baud = -1;
 }
 
@@ -110,6 +115,8 @@ int fake_can_teardown_count(void) { return g.teardown_count; }
 int fake_can_last_baud(void) { return g.baud; }
 bool fake_can_is_up(void) { return g.up; }
 bool fake_can_last_listen_only(void) { return g.listen_only; }
+bool fake_can_last_listen_first(void) { return g.listen_first; }
+void fake_can_set_foreign_rate(bool on) { g.foreign_rate = on; }
 int fake_can_sent_count(void) { return g.sent_count; }
 
 void fake_can_fail_confirmed_send(void) {
@@ -165,6 +172,18 @@ esp_err_t can_bus_teardown(void) {
 }
 
 void can_print_stat(void) {}
+
+void fake_can_set_error_counters(uint8_t tec, uint8_t rec) {
+    fake_tec = tec;
+    fake_rec = rec;
+}
+esp_err_t can_bus_error_counters(uint8_t *tec, uint8_t *rec) {
+    if (!g.up)
+        return ESP_ERR_INVALID_STATE;
+    *tec = fake_tec;
+    *rec = fake_rec;
+    return ESP_OK;
+}
 
 int can_send(const struct can_frame *frame) {
     if (!frame) {
@@ -258,6 +277,10 @@ static esp_err_t can_ops_open(const bus_cfg_t *cfg) {
     }
 
     g.listen_only = cfg->listen_only;
+    g.listen_first = cfg->listen_first;
+    /* What the driver's listen-first check concludes on such a bus. */
+    if (cfg->listen_first && !cfg->listen_only && g.foreign_rate)
+        return ESP_ERR_INVALID_STATE;
     return can_bus_setup((int)cfg->bitrate);
 }
 
