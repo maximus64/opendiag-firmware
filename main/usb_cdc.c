@@ -199,6 +199,8 @@ bool usb_cdc_get_line_status(int itf) {
     return line_status[itf];
 }
 
+bool usb_cdc_host_present(void) { return tud_mounted(); }
+
 void usb_cdc_setup(void) {
     ESP_LOGI(TAG, "USB initialization");
 

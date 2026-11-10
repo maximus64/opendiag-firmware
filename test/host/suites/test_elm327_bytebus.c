@@ -96,6 +96,40 @@ TEST(at_sh_overrides_the_header_bytes) {
     assert_sent(FAKE_BUS_J1850_PWM, "\x81\xF1\x10\x01\x00", 5);
 }
 
+TEST(ma_on_kline_prints_what_others_say_and_never_transmits) {
+    /* A tester's tester present and the ECU's answer, as framed by the gap. */
+    static const uint8_t req[] = {0x81, 0x10, 0xF1, 0x3E, 0xC0};
+    static const uint8_t rsp[] = {0x81, 0xF1, 0x10, 0x7E, 0x00};
+
+    elm_echo_off();
+    elm_ok("ATSP5\r");
+    TEST_ASSERT_EQUAL_STRING("", elm_ask("ATMA\r"));
+    fake_bus_stage_stale(FAKE_BUS_KLINE, req, sizeof(req));
+    fake_bus_stage_stale(FAKE_BUS_KLINE, rsp, sizeof(rsp));
+    fake_port_reset();
+    elm327_frontend.poll();
+    TEST_ASSERT_EQUAL_STRING("81 10 F1 3E C0 \r81 F1 10 7E 00 \r",
+                             fake_port_text(0));
+    TEST_ASSERT_EQUAL_INT(0, fake_bus_sent_count(FAKE_BUS_KLINE));
+    TEST_ASSERT_EQUAL_INT(0, fake_bus_sync_count());
+    TEST_ASSERT_EQUAL_STRING("STOPPED\r" ELM_PROMPT, elm_ask("X"));
+}
+
+TEST(mt_on_kline_keeps_only_that_source) {
+    static const uint8_t req[] = {0x81, 0x10, 0xF1, 0x3E, 0xC0};
+    static const uint8_t rsp[] = {0x81, 0xF1, 0x10, 0x7E, 0x00};
+
+    elm_echo_off();
+    elm_ok("ATSP5\r");
+    TEST_ASSERT_EQUAL_STRING("", elm_ask("ATMT10\r"));
+    fake_bus_stage_stale(FAKE_BUS_KLINE, req, sizeof(req));
+    fake_bus_stage_stale(FAKE_BUS_KLINE, rsp, sizeof(rsp));
+    fake_port_reset();
+    elm327_frontend.poll();
+    TEST_ASSERT_EQUAL_STRING("81 F1 10 7E 00 \r", fake_port_text(0));
+    elm_ask("\r");
+}
+
 TEST(selecting_iso9141_brings_the_bus_up_but_does_not_initialise_it) {
     elm_echo_off();
 
@@ -120,6 +154,37 @@ TEST(the_five_baud_init_runs_on_the_first_request) {
     TEST_ASSERT_EQUAL_STRING(ELM_BUS_INIT "41 00 BE \r" ELM_PROMPT,
                              elm_ask("0100\r"));
     TEST_ASSERT_EQUAL_INT(1, fake_bus_sync_count());
+}
+
+TEST(a_bus_that_never_goes_idle_is_bus_busy) {
+    elm_echo_off();
+    elm_kline_select("ATSP3\r");
+    fake_bus_fail_next_send_rc(FAKE_BUS_KLINE, BUS_ERR_BUS_BUSY);
+
+    TEST_ASSERT_EQUAL_STRING("BUS BUSY\r" ELM_PROMPT, elm_ask("0100\r"));
+}
+
+TEST(a_reply_with_a_bad_checksum_is_shown_and_marked) {
+    static const uint8_t reply[] = {0x48, 0x6B, 0x10, 0x41, 0x00, 0xBE, 0x23};
+
+    elm_echo_off();
+    elm_kline_select("ATSP3\r");
+    elm_ok("ATH1\r");
+    fake_bus_stage_response_status(FAKE_BUS_KLINE, reply, sizeof(reply), 5,
+                                   BUS_RX_BAD_CHECKSUM);
+    TEST_ASSERT_EQUAL_STRING("48 6B 10 41 00 BE 23 <DATA ERROR\r" ELM_PROMPT,
+                             elm_ask("0100\r"));
+}
+
+TEST(lost_data_before_a_reply_is_buffer_full) {
+    static const uint8_t reply[] = {0x48, 0x6B, 0x10, 0x41, 0x00, 0xBE, 0x22};
+
+    elm_echo_off();
+    elm_kline_select("ATSP3\r");
+    fake_bus_stage_response_status(FAKE_BUS_KLINE, reply, sizeof(reply), 5,
+                                   BUS_RX_BUFFER_OVERFLOW);
+    TEST_ASSERT_EQUAL_STRING("BUFFER FULL\r41 00 BE \r" ELM_PROMPT,
+                             elm_ask("0100\r"));
 }
 
 TEST(the_link_is_initialised_once_and_then_left_alone) {
@@ -163,7 +228,7 @@ TEST(a_failed_pwm_transmit_is_reported) {
     elm_ok("ATSP1\r");
     fake_bus_fail_next_send(FAKE_BUS_J1850_PWM);
 
-    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("0100\r"));
+    TEST_ASSERT_EQUAL_STRING("BUS ERROR\r" ELM_PROMPT, elm_ask("0100\r"));
 }
 
 TEST(a_failed_vpw_transmit_is_reported) {
@@ -171,7 +236,7 @@ TEST(a_failed_vpw_transmit_is_reported) {
     elm_ok("ATSP2\r");
     fake_bus_fail_next_send(FAKE_BUS_J1850_VPW);
 
-    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("0100\r"));
+    TEST_ASSERT_EQUAL_STRING("BUS ERROR\r" ELM_PROMPT, elm_ask("0100\r"));
 }
 
 TEST(a_failed_kline_transmit_is_reported) {
@@ -179,7 +244,7 @@ TEST(a_failed_kline_transmit_is_reported) {
     elm_kline_select("ATSP3\r");
     fake_bus_fail_next_send(FAKE_BUS_KLINE);
 
-    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("0100\r"));
+    TEST_ASSERT_EQUAL_STRING("BUS ERROR\r" ELM_PROMPT, elm_ask("0100\r"));
 }
 
 /* ------------------------------------------------------------------ *
@@ -1281,7 +1346,7 @@ TEST(disabled_responses_count_zero_and_send_failure_do_not_train) {
     elm_ok("ATR1\r");
     TEST_ASSERT_EQUAL_STRING(ELM_PROMPT, elm_ask("01000\r"));
     fake_bus_fail_next_send(FAKE_BUS_KLINE);
-    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("0100\r"));
+    TEST_ASSERT_EQUAL_STRING("BUS ERROR\r" ELM_PROMPT, elm_ask("0100\r"));
     TEST_ASSERT_EQUAL_INT(30, g_elm->timing.estimate_ms);
     TEST_ASSERT_EQUAL_INT(4, g_elm->timing.count);
     TEST_ASSERT_FALSE(g_elm->timing.watch.active);

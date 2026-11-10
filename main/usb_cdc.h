@@ -24,3 +24,5 @@ void usb_cdc_set_line_callback(usb_cdc_line_cb_t callback);
 int usb_cdc_tx_write(int itf, const void *buf, uint32_t length);
 void usb_cdc_tx_flush(int itf);
 bool usb_cdc_get_line_status(int itf);
+/** True while a USB host has enumerated the device, ports open or not. */
+bool usb_cdc_host_present(void);
