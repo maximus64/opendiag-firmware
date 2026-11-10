@@ -61,6 +61,11 @@ static bool manual_recovery;
 /* Listen-only: the controller never drives a bit and the transceiver stays
  * silent, so an unknown bus can be probed at any rate without disturbing it. */
 static bool listen_only_active;
+/* The S3 has one TWAI controller; the GPIO matrix routes it to either
+ * transceiver at open. ponytail: one bus at a time - two at once needs a
+ * second controller (an external MCP2515 or a newer chip). */
+static bool aux_requested;
+static gpio_num_t silent_pin = PIN_CAN0_SILENT; /* transceiver in use */
 static bool link_down_pending;
 static portMUX_TYPE task_notify_lock = portMUX_INITIALIZER_UNLOCKED;
 static SemaphoreHandle_t task_exit_semaphore = NULL;
@@ -222,6 +227,19 @@ static int queue_frame(const struct can_frame *frame, int position) {
 }
 
 int can_send(const struct can_frame *frame) { return queue_frame(frame, -1); }
+
+esp_err_t can_bus_error_counters(uint8_t *tec, uint8_t *rec) {
+    twai_node_status_t status = {0};
+
+    if (!can_started || can_node == NULL)
+        return ESP_ERR_INVALID_STATE;
+    esp_err_t err = twai_node_get_info(can_node, &status, NULL);
+    if (err != ESP_OK)
+        return err;
+    *tec = (uint8_t)(status.tx_error_count > 255 ? 255 : status.tx_error_count);
+    *rec = (uint8_t)(status.rx_error_count > 255 ? 255 : status.rx_error_count);
+    return ESP_OK;
+}
 
 void can_print_stat(void) {
     if (!can_started || can_node == NULL) {
@@ -484,17 +502,18 @@ static esp_err_t can_setup(int baud_rate, bool manual, bool listen_only) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    switch (baud_rate) {
-    case 1000000:
-    case 500000:
-    case 250000:
-    case 125000:
-    case 50000:
-        break;
-    default:
+    uint32_t canonical = can_bitrate_canonical((uint32_t)baud_rate);
+    if (baud_rate <= 0 || canonical == 0) {
         ESP_LOGE(TAG, "Unsupported CAN baud rate %d\n", baud_rate);
         return ESP_ERR_INVALID_ARG;
     }
+    baud_rate = (int)canonical;
+    /* AUX_CAN is for tapping a bus that is not on the OBD socket (a C-CAN
+     * with the engine and ABS on it): never drive it, whatever the client
+     * asked for. */
+    if (aux_requested)
+        listen_only = true;
+    silent_pin = aux_requested ? PIN_CAN1_SILENT : PIN_CAN0_SILENT;
     manual_recovery = manual;
     listen_only_active = listen_only;
     __atomic_store_n(&link_down_pending, false, __ATOMIC_RELAXED);
@@ -502,8 +521,8 @@ static esp_err_t can_setup(int baud_rate, bool manual, bool listen_only) {
     twai_onchip_node_config_t node_config = {
         .io_cfg =
             {
-                .tx = PIN_CAN0_TX,
-                .rx = PIN_CAN0_RX,
+                .tx = aux_requested ? PIN_CAN1_TX : PIN_CAN0_TX,
+                .rx = aux_requested ? PIN_CAN1_RX : PIN_CAN0_RX,
                 .quanta_clk_out = GPIO_NUM_NC,
                 .bus_off_indicator = GPIO_NUM_NC,
             },
@@ -600,7 +619,7 @@ static esp_err_t can_setup(int baud_rate, bool manual, bool listen_only) {
 
     /* Let the transceiver drive the bus. Active high, so low is not silent.
      * In listen-only it stays silent: a second guard besides the controller. */
-    gpio_set_level(PIN_CAN0_SILENT, listen_only ? 1 : 0);
+    gpio_set_level(silent_pin, listen_only ? 1 : 0);
     can_started = true;
 
     ESP_LOGI(TAG, "Init CAN driver - Done!\n");
@@ -619,7 +638,7 @@ fail: {
 
 esp_err_t can_bus_teardown(void) {
     can_started = false;
-    gpio_set_level(PIN_CAN0_SILENT, 1);
+    gpio_set_level(silent_pin, 1);
 
     esp_err_t err = can_bus_stop_task();
     if (err != ESP_OK)
@@ -642,12 +661,68 @@ esp_err_t can_bus_setup(int baud_rate) {
     return can_setup(baud_rate, false, false);
 }
 
+esp_err_t can_bus_use_aux(bool aux) {
+    /* The pins are taken at open; switching under an open bus would leave
+     * the wrong transceiver un-silenced at close. */
+    if (can_node)
+        return ESP_ERR_INVALID_STATE;
+    aux_requested = aux;
+    return ESP_OK;
+}
+
+bool can_bus_aux(void) { return aux_requested; }
+
+/* Dozens of frames on a running bus at either OBD bit rate. */
+#define CAN_LISTEN_FIRST_MS 150
+
+/**
+ * @brief Listen for a moment without driving the bus: is another bit rate
+ *        running here?
+ *
+ * At the wrong rate every frame on a running bus breaks a rule, so a
+ * listen-only node sees bus errors and never one valid frame. A silent bus
+ * shows neither and is not refused.
+ *
+ * @return ESP_OK to go ahead, ESP_ERR_INVALID_STATE for a bus at another
+ *         rate, or whatever kept the listen-only node from starting or
+ *         stopping.
+ */
+static esp_err_t can_listen_first(int baud_rate, bool manual) {
+    esp_err_t err = can_setup(baud_rate, manual, true);
+    if (err != ESP_OK)
+        return err;
+
+    vTaskDelay(pdMS_TO_TICKS(CAN_LISTEN_FIRST_MS));
+    /* Every valid frame takes a receive sequence number, queued or dropped. */
+    bool heard = bus_rx_sequence(&rx_epoch) != 0;
+    uint32_t errors = __atomic_load_n(&bus_errors, __ATOMIC_RELAXED);
+
+    err = can_bus_teardown();
+    if (err != ESP_OK)
+        return err;
+    if (!heard && errors) {
+        ESP_LOGW(TAG,
+                 "%d bit/s: %lu bus errors and no valid frame, another bit "
+                 "rate is running here - not transmitting",
+                 baud_rate, (unsigned long)errors);
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ESP_OK;
+}
+
 static esp_err_t can_ops_open(const bus_cfg_t *cfg) {
     /* The controller takes its rate at install time and cannot be retimed
      * while up, so a claim without one is refused here rather than later. */
     if (!cfg || cfg->bitrate == 0) {
         ESP_LOGE(TAG, "CAN needs a bit rate");
         return ESP_ERR_INVALID_ARG;
+    }
+
+    if (cfg->listen_first && !cfg->listen_only) {
+        esp_err_t err =
+            can_listen_first((int)cfg->bitrate, cfg->manual_recovery);
+        if (err != ESP_OK)
+            return err;
     }
 
     return can_setup((int)cfg->bitrate, cfg->manual_recovery,
@@ -683,7 +758,7 @@ static int wait_tx_done(bus_tx_control_t *control) {
     /* Silence queued frames now. Managed TX leaves RX storage alive until the
      * owner joins this worker and closes the node. */
     can_started = false;
-    gpio_set_level(PIN_CAN0_SILENT, 1);
+    gpio_set_level(silent_pin, 1);
     esp_err_t cleanup =
         control ? twai_node_disable(can_node) : can_bus_teardown();
     if (cleanup != ESP_OK)

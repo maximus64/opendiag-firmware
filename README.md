@@ -65,6 +65,7 @@ ports, and advertises over BLE as **OpenDIAG**.
 | USB CDC 1 | console and debug shell |
 | BLE UART characteristics | the data link — ELM327 by default, switchable to SLCAN |
 | BLE control characteristic | the same control commands, for a BLE client |
+| WiFi access point, TCP 35000 | the data link, once enabled with `wifi pass` and `wifi on` |
 
 Both data links start on **ELM327** and go back to it when their client disconnects, so any
 existing ELM327 app works without being told anything.
@@ -74,22 +75,29 @@ existing ELM327 app works without being told anything.
 
 Implemented and working:
 
-- ELM327 protocols 1 (J1850 PWM), 2 (J1850 VPW), 3 (ISO 9141-2), and 6–9 (CAN 11/29-bit at
-  250k/500k)
+- ELM327 protocols 1 (J1850 PWM), 2 (J1850 VPW), 3 (ISO 9141-2), 6–9 (CAN 11/29-bit at
+  250k/500k), and B–C (USER1/USER2 CAN at the rate set with `AT PB`)
 - ELM327 over USB CDC port 0 and BLE, independently on each
 - SLCAN (LAWICEL) on either link, for `slcand` and ECU reflashing
 - Switching a link between the two without dropping its bus or programming voltage
 - Board control: high-side/low-side drivers, boost converter, voltage sense, calibration
+- Deep sleep while the vehicle is parked and nobody uses the adapter
+- The data link over WiFi (own access point, TCP 35000), off by default
 
 Not yet implemented:
 
-- Protocols 10–12 (SAE J1939, USER1, USER2)
+- Protocol 10 (SAE J1939)
 - The second CAN transceiver
 - A persistent per-link default, so a bench unit has to be told `mode usb slcan` after each
   power cycle
 
 Much of the ELM327 command set also remains unimplemented; `docs/at_commands.md` marks what is
 supported today.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[developer guide](docs/developers.md), which also lists the open work.
 
 ## Disclaimer
 

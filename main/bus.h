@@ -18,6 +18,13 @@ typedef struct {
     uint32_t bitrate;     /* Bits per second. */
     bool manual_recovery; /* CAN bus-off recovery requires BUS_ON (J2534). */
     bool listen_only;     /* CAN: never drive the bus (no ACK, no error frames). */
+    /*
+     * CAN: listen before driving, and refuse to open when the bus is running
+     * at another bit rate - bus errors heard and not one valid frame. Writing
+     * into such a bus is not merely unanswered: every node on it signals our
+     * frames as errors. A silent bus is opened as before.
+     */
+    bool listen_first;
 } bus_cfg_t;
 
 typedef struct {
