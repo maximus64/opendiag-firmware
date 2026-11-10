@@ -522,7 +522,16 @@ TEST(at_progv_and_can_refuse_conflicting_pins_in_both_orders) {
     elm_ok("ATPROGVDFFFFFFFF\r");
     elm_ok("ATPC\r");
     elm_ok("ATPROGVE00004E20\r");
-    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATSP6\r"));
+    /* Selecting a fixed protocol may defer an open error, but must never
+     * bypass the voltage interlock or search on another bus. */
+    elm_ok("ATSP6\r");
+    TEST_ASSERT_EQUAL_STRING("CAN ERROR\r" ELM_PROMPT, elm_ask("0100\r"));
+    TEST_ASSERT_EQUAL_INT(ELM327_PROTO_CAN_11BIT_500K,
+                          g_elm->settings.current_protocol);
+    TEST_ASSERT_EQUAL_INT(0, fake_can_sent_count());
+    TEST_ASSERT_EQUAL_INT(0, fake_bus_setup_count(FAKE_BUS_KLINE));
+    TEST_ASSERT_EQUAL_INT(0, fake_bus_setup_count(FAKE_BUS_J1850_PWM));
+    TEST_ASSERT_EQUAL_INT(0, fake_bus_setup_count(FAKE_BUS_J1850_VPW));
     TEST_ASSERT_FALSE(fake_can_is_up());
     TEST_ASSERT_EQUAL_INT(1, fake_board_hs_state(14));
     elm_ok("ATPROGVEFFFFFFFF\r");
