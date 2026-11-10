@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -21,6 +22,7 @@
 #include "j1850_vpw.h"
 #include "kline.h"
 #include "link.h"
+#include "power.h"
 #include "slcan.h"
 #include "soc/rtc_cntl_reg.h"
 #include "utility.h"
@@ -1457,6 +1459,90 @@ static void ctrl_command(int argc, char **argv) {
 }
 
 /**
+ * @brief Command handler for 'canport'
+ *
+ * Picks which transceiver the next CAN open uses: the OBD socket or the
+ * AUX_CAN header. AUX is always listen-only. Back to obd after a reset.
+ */
+static void canport_command(int argc, char **argv) {
+    bool aux;
+
+    if (argc == 2 && strcmp(argv[1], "aux") == 0)
+        aux = true;
+    else if (argc == 2 && strcmp(argv[1], "obd") == 0)
+        aux = false;
+    else if (argc != 1) {
+        printf("Usage: canport [obd|aux]\n");
+        return;
+    }
+    if (argc == 2 && can_bus_use_aux(aux) != ESP_OK) {
+        printf("canport: close the CAN bus first\n");
+        return;
+    }
+    printf("canport: %s\n", can_bus_aux() ? "aux (J3, listen-only)"
+                                          : "obd (pins 6/14)");
+}
+
+/**
+ * @brief Command handler for 'canguard'
+ *
+ * Whether the ELM327 front-end listens before its first transmit on a CAN
+ * protocol and leaves alone a bus that runs at another bit rate.
+ */
+static void canguard_command(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "on") == 0)
+        elm327_can_guard_set(true);
+    else if (argc == 2 && strcmp(argv[1], "off") == 0)
+        elm327_can_guard_set(false);
+    else if (argc != 1) {
+        printf("Usage: canguard [on|off]\n");
+        return;
+    }
+    printf("canguard: %s\n", elm327_can_guard_get() ? "on" : "off");
+}
+
+/**
+ * @brief Command handler for 'power'
+ *
+ * Deep sleep while the vehicle is parked and nobody uses the adapter.
+ */
+static void power_command(int argc, char **argv) {
+    esp_err_t err = ESP_OK;
+    char *end = NULL;
+    long v = argc == 3 ? strtol(argv[2], &end, 10) : 0;
+    bool number = argc == 3 && end && *end == '\0';
+
+    if (argc == 1) {
+        power_print_status();
+        return;
+    }
+    if (argc == 2 && strcmp(argv[1], "sleep") == 0) {
+        if (power_sleep_now() != ESP_OK)
+            printf("power: release every bus and pin first\n");
+        return;
+    }
+    if (argc == 3 && strcmp(argv[1], "auto") == 0 &&
+        (strcmp(argv[2], "on") == 0 || strcmp(argv[2], "off") == 0))
+        err = power_set_enabled(strcmp(argv[2], "on") == 0);
+    else if (number && strcmp(argv[1], "idle") == 0)
+        err = power_set_idle_minutes((uint32_t)v);
+    else if (number && strcmp(argv[1], "vrun") == 0)
+        err = power_set_run_mv((int32_t)v);
+    else {
+        printf("Usage: power [auto on|off | idle <1-240 min> | vrun "
+               "<12000-15500 mV> | sleep]\n");
+        return;
+    }
+    if (err != ESP_OK) {
+        printf("power: %s\n", err == ESP_ERR_INVALID_ARG
+                                  ? "out of range"
+                                  : esp_err_to_name(err));
+        return;
+    }
+    power_print_status();
+}
+
+/**
  * @brief Command handler for 'comm'
  *
  * Shows the registered comm_iface ports and their state.
@@ -1518,6 +1604,15 @@ const shell_command_t commands[] = {
     {"elmtrace", elmtrace_command,
      "Copy ELM327 requests/replies to this console. Usage: elmtrace [on|off]"},
     {"ctrl", ctrl_command, "Run a control command. Usage: ctrl <command>"},
+    {"canport", canport_command,
+     "CAN transceiver for the next open: OBD socket or AUX_CAN header "
+     "(listen-only). Usage: canport [obd|aux]"},
+    {"canguard", canguard_command,
+     "ELM327: listen before transmitting on CAN, skip a bus at another bit "
+     "rate. Usage: canguard [on|off]"},
+    {"power", power_command,
+     "Sleep while parked and idle. Usage: power [auto on|off | idle <min> | "
+     "vrun <mV> | sleep]"},
     {NULL, NULL, NULL} // End of list marker
 };
 

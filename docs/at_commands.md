@@ -14,8 +14,8 @@ Bluetooth.
 | CMD | Description | Supported |
 | :--- | :--- | :--- |
 | `<CR>` | repeat the last command | ✅ |
-| `BRD hh` | try Baud Rate Divisor hh | N/A |
-| `BRT hh` | set Baud Rate Timeout | N/A |
+| `BRD hh` | try Baud Rate Divisor hh | ✅ handshake only, see below |
+| `BRT hh` | set Baud Rate Timeout | ✅ accepted, no effect |
 | `D` | set all to Defaults | ✅ |
 | `E0, E1` | Echo off, or on | ✅ |
 | `FE` | Forget Events | |
@@ -23,8 +23,8 @@ Bluetooth.
 | `L0, L1` | Linefeeds off, or on | ✅ |
 | `LP` | go to Low Power mode | |
 | `M0, M1` | Memory off, or on | ✅ |
-| `RD` | Read the stored Data byte | |
-| `SD hh` | Save Data byte hh | |
+| `RD` | Read the stored Data byte | ✅ |
+| `SD hh` | Save Data byte hh | ✅ RAM only |
 | `WS` | Warm Start (quick software reset) | ✅ |
 | `Z` | reset all | ✅ |
 | `@1` | display the device description | ✅ |
@@ -35,12 +35,12 @@ Bluetooth.
 
 | CMD | Description | Supported |
 | :--- | :--- | :--- |
-| `PP xx OFF` | disable Prog Parameter xx | |
-| `PP FF OFF` | all Prog Parameters disabled | |
-| `PP xx ON` | enable Prog Parameter xx | |
-| `PP FF ON` | all Prog Parameters enabled | |
-| `PP xx SV yy` | for PP xx, Set the Value to yy | |
-| `PPS` | print a PP Summary | |
+| `PP xx OFF` | disable Prog Parameter xx | ✅ 2C-2F only |
+| `PP FF OFF` | all Prog Parameters disabled | ✅ 2C-2F only |
+| `PP xx ON` | enable Prog Parameter xx | ✅ 2C-2F only |
+| `PP FF ON` | all Prog Parameters enabled | ✅ 2C-2F only |
+| `PP xx SV yy` | for PP xx, Set the Value to yy | ✅ 2C-2F only |
+| `PPS` | print a PP Summary | ✅ 2C-2F only |
 
 ### Voltage Reading Commands
 
@@ -73,9 +73,9 @@ Bluetooth.
 | `FT hh` | Filter for Transmitter = hh | ✅ |
 | `H0, H1` | Headers off, or on | ✅ |
 | `IA` | Is the protocol Active? | ✅ |
-| `MA` | Monitor All | |
-| `MR hh` | Monitor for Receiver = hh | |
-| `MT hh` | Monitor for Transmitter = hh | |
+| `MA` | Monitor All | ✅ CAN only |
+| `MR hh` | Monitor for Receiver = hh | ✅ CAN 29 bit only |
+| `MT hh` | Monitor for Transmitter = hh | ✅ CAN 29 bit only |
 | `NL` | Normal Length messages | ✅ |
 | `PC` | Protocol Close | ✅ |
 | `R0, R1` | Responses off, or on | ✅ |
@@ -126,30 +126,30 @@ Bluetooth.
 | :--- | :--- | :--- |
 | `C0, C1` | send Confirmation off, or on | |
 | `CAF0, CAF1` | Automatic Formatting off, or on |  ✅ |
-| `CEA` | CAN Extended Addressing off | |
-| `CEA hh` | use CAN Extended Address hh | |
-| `CER hh` | set CAN Extended Rx address to hh | |
-| `CF hhh` | set the ID Filter to hhh | |
-| `CF hhhhhhhh` | set the ID Filter to hhhhhhhh | |
-| `CFC0, CFC1` | Flow Controls off, or on | |
-| `CM hhh` | set the ID Mask to hhh | |
-| `CM hhhhhhhh` | set the ID Mask to hhhhhhhh | |
-| `CP hh` | set CAN Priority to hh (29 bit) | |
-| `CRA` | reset the Receive Address filters | |
-| `CRA hhh` | set CAN Receive Address to hhh | |
-| `CRA hhhhhhhh` | set the Rx Address to hhhhhhhh | |
-| `CS` | show CAN Status counts & freq | |
+| `CEA` | CAN Extended Addressing off | ✅ |
+| `CEA hh` | use CAN Extended Address hh | ✅ |
+| `CER hh` | set CAN Extended Rx address to hh | ✅ |
+| `CF hhh` | set the ID Filter to hhh | ✅ |
+| `CF hhhhhhhh` | set the ID Filter to hhhhhhhh | ✅ |
+| `CFC0, CFC1` | Flow Controls off, or on | ✅ |
+| `CM hhh` | set the ID Mask to hhh | ✅ |
+| `CM hhhhhhhh` | set the ID Mask to hhhhhhhh | ✅ |
+| `CP hh` | set CAN Priority to hh (29 bit) | ✅ |
+| `CRA` | reset the Receive Address filters | ✅ |
+| `CRA hhh` | set CAN Receive Address to hhh | ✅ |
+| `CRA hhhhhhhh` | set the Rx Address to hhhhhhhh | ✅ |
+| `CS` | show CAN Status counts & freq | ✅ error counts only |
 | `CSM0, CSM1` | Silent Monitoring off, or on | |
 | `CTM1` | set Timer Multiplier to 1 | |
 | `CTM5` | set Timer Multiplier to 5 | |
 | `D0, D1` | display of the DLC off, or on | ✅ |
-| `FC SM h` | Flow Control, Set the Mode to h | |
-| `FC SH hhh` | FC, Set the Header to hhh | |
-| `FC SH hhhhhhhh` | Set the Header to hhhhhhhh | |
-| `FC SD [1 - 5 bytes]` | FC, Set Data to [...] | |
-| `PB xx yy` | Protocol B options and baud rate | |
+| `FC SM h` | Flow Control, Set the Mode to h | ✅ |
+| `FC SH hhh` | FC, Set the Header to hhh | ✅ |
+| `FC SH hhhhhhhh` | Set the Header to hhhhhhhh | ✅ |
+| `FC SD [1 - 5 bytes]` | FC, Set Data to [...] | ✅ CTS only, see below |
+| `PB xx yy` | Protocol B options and baud rate | ✅ no J1939 format |
 | `RTR` | send an RTR message | |
-| `V0, V1` | use of Variable DLC off, or on | |
+| `V0, V1` | use of Variable DLC off, or on | ✅ |
 
 ### J1939 CAN Specific Commands (protocols A to C)
 
@@ -165,6 +165,34 @@ Bluetooth.
 | `MP hhhh n` | " and get n messages | |
 | `MP hhhhhh` | Monitor for PGN hhhhhh | |
 | `MP hhhhhh n` | " and get n messages | |
+
+### Notes on the CAN additions
+
+- **Protocols B and C** run on the CAN transceiver at 500 kbit/s divided by
+  the `PB` divisor (or PP 2D / 2F). The driver takes 1000, 500, 250, 125 and
+  50 kbit/s; any other rate is refused when the bus opens. Like protocols 6
+  to 9, they listen before driving the bus (`canguard`).
+- **`CRA` / `CF` / `CM`** replace the ISO 15765-4 reply ranges (7E8-7EF,
+  18DAF1xx). With a filter set, a flow control for a physical request goes
+  out on the request's own identifier, unless `FC SM 1` names another.
+- **`FC SD`** takes a clear-to-send flow control only: `30`, block size,
+  STmin. Bytes after the third are sent as padding.
+- **`CEA hh`** adds the extended address to every frame sent and strips it
+  from replies in the formatted (`CAF1`, `H0`) view. `CER hh` accepts only
+  replies that carry that address; without it, any address is accepted.
+- **`MA` / `MR` / `MT`** reopen the bus listen-only, like the ELM327's
+  default `CSM1`, and release it when stopped. Frames are taken from a
+  32-frame queue every 50 ms, so a busy 500 kbit/s bus drops frames: use
+  SLCAN for a full capture.
+- **`CS`** prints `T:hh R:hh`, the controller's transmit and receive error
+  counters, read while the bus is open.
+- **`BRD hh`**: USB and BLE have no baud rate, so only the handshake runs:
+  `OK`, the ID string, then a bare carriage return from the client answers
+  `OK` and a prompt.
+- **`SD` / `RD`** and the PP values survive `AT Z` and a reconnect, but not
+  a power cycle.
+- Long replies whose first consecutive frame is numbered 0 instead of 1 are
+  accepted.
 
 ### Custom Extensions (Not in ELM327 Spec)
 
