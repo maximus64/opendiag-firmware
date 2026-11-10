@@ -96,6 +96,40 @@ TEST(at_sh_overrides_the_header_bytes) {
     assert_sent(FAKE_BUS_J1850_PWM, "\x81\xF1\x10\x01\x00", 5);
 }
 
+TEST(ma_on_kline_prints_what_others_say_and_never_transmits) {
+    /* A tester's tester present and the ECU's answer, as framed by the gap. */
+    static const uint8_t req[] = {0x81, 0x10, 0xF1, 0x3E, 0xC0};
+    static const uint8_t rsp[] = {0x81, 0xF1, 0x10, 0x7E, 0x00};
+
+    elm_echo_off();
+    elm_ok("ATSP5\r");
+    TEST_ASSERT_EQUAL_STRING("", elm_ask("ATMA\r"));
+    fake_bus_stage_stale(FAKE_BUS_KLINE, req, sizeof(req));
+    fake_bus_stage_stale(FAKE_BUS_KLINE, rsp, sizeof(rsp));
+    fake_port_reset();
+    elm327_frontend.poll();
+    TEST_ASSERT_EQUAL_STRING("81 10 F1 3E C0 \r81 F1 10 7E 00 \r",
+                             fake_port_text(0));
+    TEST_ASSERT_EQUAL_INT(0, fake_bus_sent_count(FAKE_BUS_KLINE));
+    TEST_ASSERT_EQUAL_INT(0, fake_bus_sync_count());
+    TEST_ASSERT_EQUAL_STRING("STOPPED\r" ELM_PROMPT, elm_ask("X"));
+}
+
+TEST(mt_on_kline_keeps_only_that_source) {
+    static const uint8_t req[] = {0x81, 0x10, 0xF1, 0x3E, 0xC0};
+    static const uint8_t rsp[] = {0x81, 0xF1, 0x10, 0x7E, 0x00};
+
+    elm_echo_off();
+    elm_ok("ATSP5\r");
+    TEST_ASSERT_EQUAL_STRING("", elm_ask("ATMT10\r"));
+    fake_bus_stage_stale(FAKE_BUS_KLINE, req, sizeof(req));
+    fake_bus_stage_stale(FAKE_BUS_KLINE, rsp, sizeof(rsp));
+    fake_port_reset();
+    elm327_frontend.poll();
+    TEST_ASSERT_EQUAL_STRING("81 F1 10 7E 00 \r", fake_port_text(0));
+    elm_ask("\r");
+}
+
 TEST(selecting_iso9141_brings_the_bus_up_but_does_not_initialise_it) {
     elm_echo_off();
 

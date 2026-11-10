@@ -14,6 +14,7 @@ idf_component_register(SRCS main.c
                             usb_cdc.c
                             ble_uart.c
                             can_bus.c
+                            can_baud.c
                             isotp.c
                             kline.c
                             kline_codec.c
@@ -29,6 +30,9 @@ idf_component_register(SRCS main.c
                             comm_iface.c
                             vif.c
                             vif_ctrl.c
+                            power.c
+                            power_policy.c
+                            wifi_link.c
                        PRIV_REQUIRES
                             nanopb
                             esp_hal_usb
@@ -45,5 +49,10 @@ idf_component_register(SRCS main.c
                             esp_driver_rmt
                             esp_driver_gptimer
                             esp_driver_twai
+                            esp_driver_pcnt
+                            esp_wifi
+                            esp_netif
+                            esp_event
+                            lwip
                        REQUIRES driver freertos
                        INCLUDE_DIRS "")
