@@ -76,6 +76,17 @@ const uint8_t *fake_bus_kline_wakeup(size_t *out_len);
 /** Makes the next send on @p bus fail. */
 void fake_bus_fail_next_send(fake_bus_id_t bus);
 
+/**
+ * @brief K-Line sends, line settings and breaks, in order: "baud=5 tx:01 ".
+ * Cleared by fake_bus_reset_all().
+ */
+const char *fake_bus_kline_log(void);
+
+/** @brief What setting BUS_P_KLINE_RAW returns; 0 accepts it. */
+void fake_bus_kline_raw_result(int rc);
+/** The same, failing with @p rc (a BUS_ERR_* code). */
+void fake_bus_fail_next_send_rc(fake_bus_id_t bus, int rc);
+
 /* --- Inspecting transmitted traffic --- */
 
 int fake_bus_sent_count(fake_bus_id_t bus);

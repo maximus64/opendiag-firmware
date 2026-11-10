@@ -140,6 +140,44 @@ bool kline_odd_parity(uint8_t b) {
     return (ones & 1u) != 0;
 }
 
+size_t kline_char_levels(uint8_t byte, unsigned data_bits, unsigned parity,
+                         bool *levels) {
+    unsigned ones = 0;
+    size_t n = 0;
+
+    if (data_bits < 5 || data_bits > 8 || parity > KLINE_PARITY_SPACE) {
+        return 0;
+    }
+
+    levels[n++] = false;
+    for (unsigned i = 0; i < data_bits; i++) {
+        bool bit = ((byte >> i) & 1u) != 0;
+
+        ones += bit;
+        levels[n++] = bit;
+    }
+
+    switch (parity) {
+    case KLINE_PARITY_ODD:
+        levels[n++] = (ones & 1u) == 0;
+        break;
+    case KLINE_PARITY_EVEN:
+        levels[n++] = (ones & 1u) != 0;
+        break;
+    case KLINE_PARITY_MARK:
+        levels[n++] = true;
+        break;
+    case KLINE_PARITY_SPACE:
+        levels[n++] = false;
+        break;
+    default:
+        break;
+    }
+
+    levels[n++] = true;
+    return n;
+}
+
 /** @brief Every KWP key byte pair puts this in key byte 2, Table 5. */
 #define KLINE_KB_KWP 0x8F
 

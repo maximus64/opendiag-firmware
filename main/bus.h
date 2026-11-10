@@ -18,6 +18,13 @@ typedef struct {
     uint32_t bitrate;     /* Bits per second. */
     bool manual_recovery; /* CAN bus-off recovery requires BUS_ON (J2534). */
     bool listen_only;     /* CAN: never drive the bus (no ACK, no error frames). */
+    /*
+     * CAN: listen before driving, and refuse to open when the bus is running
+     * at another bit rate - bus errors heard and not one valid frame. Writing
+     * into such a bus is not merely unanswered: every node on it signals our
+     * frames as errors. A silent bus is opened as before.
+     */
+    bool listen_first;
 } bus_cfg_t;
 
 typedef struct {
@@ -193,6 +200,14 @@ typedef enum {
 
     /* K-Line: discovery (0), ISO9141 gap (1), ISO14230 length/gap (2). */
     BUS_P_KLINE_FRAME_MODE,
+
+    /*
+     * K-Line: a dumb KKL cable. Bytes go out as given and come back as they
+     * arrive - echo included, no framing, no checksum, no P3/P4 waits - and
+     * BUS_P_DATA_RATE accepts 5 to 250000, bit banging below 40. Default
+     * false. See BUS_IOCTL_KLINE_BREAK.
+     */
+    BUS_P_KLINE_RAW,
 } bus_param_t;
 
 typedef enum {
@@ -298,6 +313,15 @@ typedef enum {
      * a protocol variant.
      */
     BUS_IOCTL_ASSUME_LINK,
+
+    /**
+     * Hold K-Line low (and pin 15, unless BUS_P_K_LINE_ONLY), or let it go.
+     *
+     * A serial port's break, which is how a host drives a 5 baud address or
+     * a fast init wake-up through a KKL cable. Raw mode only.
+     * in: const bool *, true to assert.
+     */
+    BUS_IOCTL_KLINE_BREAK,
 } bus_ioctl_t;
 
 /** Longest message a periodic transmission may carry. The ELM327's AT WM

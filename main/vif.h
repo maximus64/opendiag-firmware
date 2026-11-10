@@ -7,6 +7,7 @@
 #include "esp_err.h"
 #include "bus.h"
 #include "bus_tx.h"
+#include "can_bus.h"
 #include "comm_iface.h"
 
 /** Protocol grammars the firmware carries. Registered once, never removed. */
@@ -204,6 +205,17 @@ const char *vif_link_frontend_name(void);
 /** @brief The front-end the link reverts to. Set by vif_link_start(). */
 const vif_frontend_t *vif_link_default_frontend(void);
 
+/**
+ * @brief vif_link_set_frontend(), and make @p fe what the link reverts to
+ *        when its client leaves - once it has started.
+ *
+ * For a grammar that has to outlive its client: a KKL tool opens and closes
+ * the port several times in one session, and each close would otherwise put
+ * the link back on ELM327 underneath it. A grammar that refuses to start
+ * leaves the default where it was.
+ */
+void vif_link_set_default_frontend(const vif_frontend_t *fe);
+
 /** @brief The transport the link speaks on, or COMM_INVALID_PORT_ID. */
 comm_port_id_t vif_link_port(void);
 
@@ -390,6 +402,14 @@ esp_err_t vif_pin_set(vif_owner_t owner, int obd_pin, vif_pin_mode_t m,
 
 /** @brief Release both pin claims held by @p owner. */
 esp_err_t vif_pin_release_all(vif_owner_t owner);
+
+/**
+ * @brief Pick the CAN port for the next open (can_bus_set_port()).
+ *
+ * Through vif because the MS port shares OBD pin 11 with a high side
+ * driver: refused while that pin is energised.
+ */
+esp_err_t vif_can_port_set(can_port_t port);
 
 /** @brief True while any connector pin is energised, whoever holds it. */
 bool vif_any_pin_active(void);

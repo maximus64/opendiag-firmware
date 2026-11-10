@@ -133,6 +133,24 @@ static bool cmd_mode_set(const char *name, char *out, size_t cap) {
     return true;
 }
 
+/** @brief MODE=, and also what the link returns to when its client leaves. */
+static bool cmd_default_set(const char *name, char *out, size_t cap) {
+    const vif_frontend_t *fe = vif_frontend_find(name);
+
+    if (!fe) {
+        return cmd_mode_set(name, out, cap); /* the same refusal */
+    }
+
+    /* Like MODE=, the swap lands on the link's task: a grammar that refuses
+     * to start shows in the log, and does not become the default. */
+    vif_link_set_default_frontend(fe);
+
+    ESP_LOGI(TAG, "link: default %s", fe->name);
+
+    reply(out, cap, "DEFAULT %s", fe->name);
+    return true;
+}
+
 /**
  * @brief What is live on the wire, and who holds it.
  *
@@ -229,6 +247,10 @@ bool vif_ctrl_exec(const char *cmd, size_t len, char *out, size_t cap) {
         fe = vif_link_frontend_name();
         reply(out, cap, "MODE %s", fe ? fe : "-");
         return true;
+    }
+
+    if (strncmp(buf, "DEFAULT=", 8) == 0) {
+        return cmd_default_set(&buf[8], out, cap);
     }
 
     if (strcmp(buf, "BUS") == 0) {

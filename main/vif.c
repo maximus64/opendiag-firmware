@@ -106,6 +106,8 @@ static struct {
          * shut down. */
         const vif_frontend_t *fe;
         const vif_frontend_t *fe_next;
+        /* fe_next becomes the default too, once it has started. */
+        bool fe_next_default;
         /* Set under the lock, consumed by the link task, and read outside the
          * lock on the way in - see vif_link_service(). */
         volatile bool fe_switch;
@@ -396,6 +398,7 @@ static bool link_apply_frontend(const vif_frontend_t *fe) {
 bool vif_link_service(void) {
     const vif_frontend_t *next = NULL;
     bool switching = false;
+    bool make_default = false;
     bool did;
 
     if (!on_owner_thread(VIF_OWNER_LINK)) {
@@ -414,6 +417,7 @@ bool vif_link_service(void) {
         if (g.link.fe_switch) {
             g.link.fe_switch = false;
             next = g.link.fe_next;
+            make_default = g.link.fe_next_default;
             switching = true;
         }
         UNLOCK();
@@ -429,8 +433,14 @@ bool vif_link_service(void) {
         LOCK();
         if (!g.link.fe_switch) {
             g.link.fe_next = next;
+            g.link.fe_next_default = make_default;
             g.link.fe_switch = true;
         }
+        UNLOCK();
+    } else if (make_default && next && g.link.fe == next) {
+        /* Only a grammar that actually came up is worth returning to. */
+        LOCK();
+        g.link.fe_default = next;
         UNLOCK();
     }
 
@@ -601,6 +611,7 @@ void vif_link_set_frontend(const vif_frontend_t *fe) {
      * feed() that is mid-command. */
     LOCK();
     g.link.fe_next = fe;
+    g.link.fe_next_default = false;
     g.link.fe_switch = true;
     UNLOCK();
     link_wake();
@@ -641,6 +652,18 @@ const char *vif_link_frontend_name(void) {
 
 const vif_frontend_t *vif_link_default_frontend(void) {
     return g.link.fe_default;
+}
+
+void vif_link_set_default_frontend(const vif_frontend_t *fe) {
+    if (!fe) {
+        return; /* the link must always have something to fall back to */
+    }
+
+    LOCK();
+    g.link.fe_next = fe;
+    g.link.fe_next_default = true;
+    g.link.fe_switch = true;
+    UNLOCK();
 }
 
 void vif_link_down(void) {
@@ -1162,6 +1185,19 @@ int vif_bus_reset_stats(vif_bus_t bus) {
     return 0;
 }
 
+esp_err_t vif_can_port_set(can_port_t port) {
+    esp_err_t err;
+
+    LOCK();
+    /* The other way round from vif_pin_set(): not onto pin 11 while it is
+     * energised. */
+    err = (port == CAN_PORT_MS && g.hs_pin == HS_OBD_PIN_11)
+              ? ESP_ERR_INVALID_STATE
+              : can_bus_set_port(port);
+    UNLOCK();
+    return err;
+}
+
 esp_err_t vif_pin_set(vif_owner_t owner, int obd_pin, vif_pin_mode_t m,
                       uint32_t mv) {
     bool high_side = (obd_pin == HS_OBD_PIN_6 || obd_pin == HS_OBD_PIN_9 ||
@@ -1203,6 +1239,12 @@ esp_err_t vif_pin_set(vif_owner_t owner, int obd_pin, vif_pin_mode_t m,
     case VIF_PIN_VOLTAGE:
         if ((obd_pin == HS_OBD_PIN_6 || obd_pin == HS_OBD_PIN_14) &&
             g.claim[VIF_RES_CAN].bus != VIF_BUS_NONE) {
+            UNLOCK();
+            return ESP_ERR_INVALID_STATE;
+        }
+        /* With the MS port fitted, pin 11 is CAN-L: never put voltage on a
+         * bus line. */
+        if (obd_pin == HS_OBD_PIN_11 && can_bus_port() == CAN_PORT_MS) {
             UNLOCK();
             return ESP_ERR_INVALID_STATE;
         }

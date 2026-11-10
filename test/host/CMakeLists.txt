@@ -119,11 +119,16 @@ set(SUITES
     test_j1850_pwm_codec
     test_j1850_vpw_codec
     test_kline_codec
+    test_power_policy
+    test_can_baud
+    test_kkl
 )
 
 set(test_elm327_at_FW      ${ELM327_FW})
 set(test_bus_tx_worker_FW driver_stubs/driver_rtos.c)
 set(test_j2534_scheduler_FW ${FW_DIR}/j2534_scheduler.c)
+set(test_can_baud_FW ${FW_DIR}/can_baud.c)
+set(test_power_policy_FW ${FW_DIR}/power_policy.c)
 set(test_isotp_FW          ${FW_DIR}/isotp.c)
 set(test_bus_params_FW    ${FW_DIR}/bus.c)
 set(test_elm327_can_FW     ${ELM327_FW})
@@ -165,6 +170,14 @@ set(test_slcan_FW
     ${FW_DIR}/kline_codec.c
     ${FW_DIR}/bus.c
     ${FW_DIR}/slcan.c
+    ${FW_DIR}/utility.c
+    ${FW_DIR}/vif.c
+)
+set(test_kkl_FW
+    ${FW_DIR}/comm_iface.c
+    ${FW_DIR}/kline_codec.c
+    ${FW_DIR}/bus.c
+    ${FW_DIR}/kkl.c
     ${FW_DIR}/utility.c
     ${FW_DIR}/vif.c
 )

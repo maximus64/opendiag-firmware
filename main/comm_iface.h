@@ -90,6 +90,23 @@ void comm_port_flush(comm_port_id_t port_id);
 size_t comm_port_rx_pending(comm_port_id_t port_id);
 
 /**
+ * @brief Where in the port's byte stream the transport has got to.
+ *
+ * Bytes ever accepted by comm_port_rx(), modulo 2^32. A chunk dropped for want
+ * of room is not counted. Taken alongside an out-of-band event - a serial
+ * line setting, say - it says which received byte the event came after.
+ */
+uint32_t comm_port_rx_position(comm_port_id_t port_id);
+
+/**
+ * @brief Bytes ever read from the port, or discarded with its client.
+ *
+ * Equal to comm_port_rx_position() when nothing is pending. A reader holding
+ * @p n bytes it just read owns positions [read - n, read).
+ */
+uint32_t comm_port_read_position(comm_port_id_t port_id);
+
+/**
  * @brief The port's client has gone away.
  */
 void comm_port_client_gone(comm_port_id_t port_id);
