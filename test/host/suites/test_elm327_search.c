@@ -153,6 +153,36 @@ TEST(a_search_falls_through_to_kline_when_can_is_silent) {
     TEST_ASSERT_EQUAL_INT(0, fake_bus_setup_count(FAKE_BUS_J1850_PWM));
 }
 
+TEST(a_search_does_not_transmit_into_a_bus_at_another_bit_rate) {
+    /* A van with a 50 kbit/s body bus on pins 6/14 and its engine on the
+     * K-Line: every CAN protocol is refused by the driver's listen-first
+     * check, nothing goes out on CAN, and the search still finds K-Line. */
+    elm_echo_off();
+    elm_ok("ATH1\r");
+    fake_can_set_foreign_rate(true);
+    fake_bus_stage_response(FAKE_BUS_KLINE, bus_reply, sizeof(bus_reply), 5);
+
+    TEST_ASSERT_EQUAL_STRING(SEARCHING
+                             "48 6B 10 41 00 BE 3F B8 13 C4 \r" ELM_PROMPT,
+                             elm_ask("0100\r"));
+
+    TEST_ASSERT_TRUE(fake_can_last_listen_first());
+    TEST_ASSERT_EQUAL_INT(0, fake_can_setup_count());
+    TEST_ASSERT_EQUAL_INT(0, fake_can_sent_count());
+    TEST_ASSERT_TRUE(fake_bus_is_up(FAKE_BUS_KLINE));
+}
+
+TEST(with_canguard_off_can_is_opened_without_listening_first) {
+    elm327_can_guard_set(false);
+    elm_echo_off();
+
+    elm_ask("0100\r");
+
+    TEST_ASSERT_FALSE(fake_can_last_listen_first());
+    TEST_ASSERT_EQUAL_INT(CAN_PROTOCOLS_IN_A_SEARCH, fake_can_setup_count());
+    elm327_can_guard_set(true);
+}
+
 TEST(a_search_falls_through_to_j1850_pwm) {
     elm_echo_off();
     elm_ok("ATH1\r");

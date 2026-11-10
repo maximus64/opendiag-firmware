@@ -75,6 +75,8 @@ const uint8_t *fake_bus_kline_wakeup(size_t *out_len);
 
 /** Makes the next send on @p bus fail. */
 void fake_bus_fail_next_send(fake_bus_id_t bus);
+/** The same, failing with @p rc (a BUS_ERR_* code). */
+void fake_bus_fail_next_send_rc(fake_bus_id_t bus, int rc);
 
 /* --- Inspecting transmitted traffic --- */
 
