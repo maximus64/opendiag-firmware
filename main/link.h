@@ -21,6 +21,7 @@ typedef enum {
     LINK_NONE = 0,
     LINK_USB,
     LINK_BLE,
+    LINK_WIFI,
 } link_transport_t;
 
 /** @brief Which transport holds the link, or LINK_NONE. */
