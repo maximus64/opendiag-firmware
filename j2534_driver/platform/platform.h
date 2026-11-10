@@ -33,7 +33,17 @@ bool readValue(const J2534_ULONG *source, J2534_ULONG &value);
 void appendLog(const char *path, const char *line, uint32_t maximumBytes);
 
 std::string moduleDirectory(const void *anchor);
-std::string configPath(const void *anchor);
+bool fileExists(const std::string &path);
+std::string absolutePath(const std::string &path);
+bool createDirectories(const std::string &path);
+std::string systemConfigPath();
+std::string userLogDirectory();
+// Select the explicit override or system file; the selected file must exist.
+std::string selectConfigPath(const std::string &overridePath, const std::string &systemPath);
+std::string configPath();
+std::string configWritePath();
+std::string logDirectory(const std::string &libraryDirectory);
+std::string logDirectory(const void *anchor);
 std::string readSetting(const std::string &path,
                         const char *section,
                         const char *key,
@@ -46,6 +56,47 @@ Library openLibrary(const std::string &path);
 void *findSymbol(Library library, const char *name);
 void closeLibrary(Library library);
 const char *nativeLibraryName();
+
+// A plain, non-recursive lock.
+class Mutex {
+    void *handle_;
+
+  public:
+    Mutex();
+    ~Mutex();
+    void lock();
+    void unlock();
+    Mutex(const Mutex &) = delete;
+    Mutex &operator=(const Mutex &) = delete;
+};
+
+class MutexLock {
+    Mutex &mutex_;
+
+  public:
+    explicit MutexLock(Mutex &mutex)
+        : mutex_(mutex) {
+        mutex_.lock();
+    }
+    ~MutexLock() {
+        mutex_.unlock();
+    }
+    MutexLock(const MutexLock &) = delete;
+    MutexLock &operator=(const MutexLock &) = delete;
+};
+
+// Counts posts, so one given before the wait begins is not lost.
+class Semaphore {
+    void *handle_;
+
+  public:
+    Semaphore();
+    ~Semaphore();
+    void post();
+    void wait();
+    Semaphore(const Semaphore &) = delete;
+    Semaphore &operator=(const Semaphore &) = delete;
+};
 
 class Lease {
     intptr_t handle_;

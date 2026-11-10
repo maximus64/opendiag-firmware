@@ -4,6 +4,7 @@
 #include "version.h"
 #include <algorithm>
 #include <deque>
+#include <list>
 #include <map>
 #include <stdio.h>
 #include <vector>
@@ -92,20 +93,78 @@ static J2534_ULONG nativeDeviceId;
 static bool disconnected;
 static J2534_ULONG nextId = 0x400000;
 static std::map<J2534_ULONG, Channel> channels;
-static std::atomic<bool> busy(false);
 static char lastError[80] = "No error";
 static char errorDetail[80];
 
-bool enter() {
-    if (busy.exchange(true)) {
-        return false;
+// 04.04 lets an application call from several threads, and the native API below takes
+// one call at a time, so callers take turns in arrival order. A new call that has to
+// queue cuts short the device wait the current turn may be in; see awaitReadable().
+class Turnstile {
+    struct Turn {
+        platform::Semaphore given;
+    };
+    platform::Mutex mutex_;
+    bool held_;
+    std::deque<Turn *> entering_;  // New calls, which go first.
+    std::deque<Turn *> rejoining_; // Waiters that gave way, which never cut a wait short.
+
+    void join(std::deque<Turn *> &queue, bool wake) {
+        Turn *turn;
+        {
+            platform::MutexLock lock(mutex_);
+            if (!held_) {
+                held_ = true;
+                return;
+            }
+            turn = new Turn;
+            queue.push_back(turn);
+        }
+        if (wake) {
+            backend.wake(true);
+        }
+        turn->given.wait();
+        delete turn;
     }
+
+  public:
+    Turnstile()
+        : held_(false) {
+    }
+    void enter() {
+        join(entering_, true);
+    }
+    void leave() {
+        platform::MutexLock lock(mutex_);
+        std::deque<Turn *> &queue = entering_.empty() ? rejoining_ : entering_;
+        if (queue.empty()) {
+            held_ = false;
+            return;
+        }
+        // The turn passes straight to the next caller; held_ stays set.
+        queue.front()->given.post();
+        queue.pop_front();
+    }
+    // Let every caller already queued go first, then carry on.
+    void giveWay() {
+        leave();
+        join(rejoining_, false);
+    }
+    bool newCallWaiting() {
+        platform::MutexLock lock(mutex_);
+        return !entering_.empty();
+    }
+};
+
+static Turnstile turnstile;
+
+bool enter() {
+    turnstile.enter();
     errorDetail[0] = 0;
     return true;
 }
 
 void leave() {
-    busy.store(false);
+    turnstile.leave();
 }
 
 J2534_LONG finish(J2534_LONG status, const char *detail) {
@@ -427,6 +486,97 @@ static J2534_LONG pump(Channel &channel,
     return STATUS_NOERROR;
 }
 
+// A call inside awaitReadable(), registered for its whole wait, including while it has
+// given way, so that whoever holds the turn also waits for it.
+struct Waiter {
+    J2534_ULONG channel;
+    std::vector<J2534_ULONG> endpoints;
+    uint32_t deadline;
+};
+static std::list<Waiter *> waiters;
+
+// One device wait for every waiting call: the union of their endpoints, until the
+// earliest deadline. @p mine says whether what ended it was this call's own.
+static J2534_LONG waitForAll(const Waiter &self, bool &mine) {
+    uint32_t now = platform::milliseconds();
+    uint32_t wait = self.deadline - now;
+    std::vector<J2534_ULONG> list(self.endpoints);
+    for (std::list<Waiter *>::const_iterator entry = waiters.begin(); entry != waiters.end();
+         ++entry) {
+        std::map<J2534_ULONG, Channel>::const_iterator channel = channels.find((*entry)->channel);
+        if (*entry == &self || channel == channels.end()) {
+            continue; // One whose channel went away finds out when its turn comes.
+        }
+        int32_t left = (int32_t)((*entry)->deadline - now);
+        wait = std::min(wait, (uint32_t)std::max(left, 0));
+        std::vector<J2534_ULONG> theirs = endpoints(channel->second);
+        for (size_t i = 0; i < theirs.size(); ++i) {
+            if (std::find(list.begin(), list.end(), theirs[i]) == list.end()) {
+                list.push_back(theirs[i]);
+            }
+        }
+    }
+    mine = false;
+    if (wait) {
+        native::SCHANNELSET set = {};
+        set.ChannelCount = (J2534_ULONG)list.size();
+        set.ChannelThreshold = 1;
+        set.ChannelList = &list[0];
+        J2534_LONG status = backend.select(&set, READABLE_TYPE, wait);
+        if (status && status != ERR_BUFFER_EMPTY && status != ERR_TIMEOUT) {
+            mine = true;
+            return translate(status);
+        }
+        for (J2534_ULONG i = 0; i < set.ChannelCount; ++i) {
+            if (std::find(self.endpoints.begin(), self.endpoints.end(), list[i]) !=
+                self.endpoints.end()) {
+                mine = true;
+            }
+        }
+    }
+    if ((int32_t)(self.deadline - platform::milliseconds()) <= 0) {
+        mine = true;
+    }
+    return STATUS_NOERROR;
+}
+
+// Sleep on the device until one of @p waiting has something to read or the timeout
+// measured from @p start runs out. Replies, echoes and transmit completions all
+// arrive as readable messages, so this is every wait the 04.04 API needs.
+//
+// Other threads may call meanwhile. A new call cuts the wait short and this one gives
+// way to it; so does a wait that ended for another waiting call rather than this one.
+// Either way this returns early, which every caller loops over, and once it has given
+// way, @p channel may have been disconnected: then that is the result.
+static J2534_LONG awaitReadable(J2534_ULONG channel,
+                                const std::vector<J2534_ULONG> &waiting,
+                                uint32_t start,
+                                J2534_ULONG timeout) {
+    if (platform::milliseconds() - start >= timeout) {
+        return STATUS_NOERROR;
+    }
+    Waiter self = {channel, waiting, start + timeout};
+    waiters.push_back(&self);
+    J2534_LONG status = STATUS_NOERROR;
+    bool mine = false;
+    // Disarm before looking for a queued call: one queued already is seen here, and one
+    // that queues later arms the wake again, ending the device wait below.
+    backend.wake(false);
+    if (!turnstile.newCallWaiting()) {
+        status = waitForAll(self, mine);
+    }
+    if (!mine) {
+        turnstile.giveWay();
+        if (disconnected) {
+            status = ERR_DEVICE_NOT_CONNECTED;
+        } else if (!channels.count(channel)) {
+            status = ERR_INVALID_CHANNEL_ID;
+        }
+    }
+    waiters.remove(&self);
+    return status;
+}
+
 static J2534_LONG checkTransmissionCapacity(Channel &channel) {
     if (channel.transmissions.size() < MAX_TX_MESSAGES) {
         return STATUS_NOERROR;
@@ -678,7 +828,7 @@ J2534_LONG PassThruWriteMsgs(J2534_ULONG id,
         transmission.endpoint = endpoint;
         transmission.waiting = timeout != 0;
         channel->transmissions[token] = transmission;
-        for (;;) {
+        for (bool pumped = false;;) {
             J2534_ULONG queued = 1;
             status = backend.queueMsgs(endpoint, &encoded, &queued);
             if (status != ERR_BUFFER_FULL || !timeout) {
@@ -688,12 +838,21 @@ J2534_LONG PassThruWriteMsgs(J2534_ULONG id,
                 channel->transmissions.erase(token);
                 return ERR_TIMEOUT;
             }
-            status = pump(*channel, 0, start, timeout);
+            // Pump, then try again before sleeping: the pump may have taken the very
+            // completion that freed the queue. One arriving later stays readable.
+            if (!pumped) {
+                status = pump(*channel, 0, start, timeout);
+            } else {
+                status = awaitReadable(id, std::vector<J2534_ULONG>(1, endpoint), start, timeout);
+            }
             if (status) {
-                channel->transmissions.erase(token);
+                // Another thread may have disconnected the channel while this one waited.
+                if (channels.count(id)) {
+                    channel->transmissions.erase(token);
+                }
                 return status;
             }
-            platform::sleepMs(1);
+            pumped = !pumped;
         }
         if (status) {
             channel->transmissions.erase(token);
@@ -708,7 +867,13 @@ J2534_LONG PassThruWriteMsgs(J2534_ULONG id,
         for (;;) {
             bool received = false;
             status = readNative(*channel, endpoint, received);
-            Transmission &pending = channel->transmissions[token];
+            std::map<J2534_ULONG, Transmission>::iterator found =
+                channel->transmissions.find(token);
+            if (found == channel->transmissions.end()) {
+                // Another thread cleared the transmit queue while this one waited.
+                return ERR_FAILED;
+            }
+            Transmission &pending = found->second;
             if (status) {
                 pending.waiting = false;
                 return status;
@@ -727,7 +892,18 @@ J2534_LONG PassThruWriteMsgs(J2534_ULONG id,
                 return ERR_TIMEOUT;
             }
             if (!received) {
-                platform::sleepMs(1);
+                status = awaitReadable(id, std::vector<J2534_ULONG>(1, endpoint), start, timeout);
+                if (status) {
+                    // The channel, and with it this transmission, may be gone by now.
+                    if (channels.count(id)) {
+                        std::map<J2534_ULONG, Transmission>::iterator left =
+                            channel->transmissions.find(token);
+                        if (left != channel->transmissions.end()) {
+                            left->second.waiting = false;
+                        }
+                    }
+                    return status;
+                }
             }
         }
         if (*count < requested && platform::milliseconds() - start >= timeout) {
@@ -797,7 +973,10 @@ J2534_LONG PassThruReadMsgs(J2534_ULONG id,
         }
         pumped = true;
         if (timeout && channel->received.empty() && !channel->overflow && !channel->receiveError) {
-            platform::sleepMs(1);
+            status = awaitReadable(id, endpoints(*channel), start, timeout);
+            if (status) {
+                return status;
+            }
         }
     }
 }

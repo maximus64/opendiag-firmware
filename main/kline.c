@@ -41,6 +41,9 @@
 #include "pinout.h"
 #include "utility.h"
 
+/* The claim holder's ear on this bus; see bus_listener_t. */
+static bus_listener_t listener;
+
 #define TAG "KLINE"
 
 #define KLINE_UART UART_NUM_1
@@ -930,10 +933,12 @@ static void publish(kline_frame_t *f) {
         g.stats.rx_dropped++;
         /* The next one that does fit says data was lost before it. */
         g.pending_status |= BUS_RX_BUFFER_OVERFLOW;
+        bus_notify(&listener);
         return;
     }
 
     g.stats.rx_msgs++;
+    bus_notify(&listener);
 }
 
 /**
@@ -961,6 +966,7 @@ static void publish_loopback(const uint8_t *data, size_t len) {
         bus_rx_lost(&g.rx_epoch, f.sequence);
         g.stats.rx_dropped++;
     }
+    bus_notify(&listener);
 }
 
 /**
@@ -2420,4 +2426,5 @@ const bus_ops_t kline_bus_ops = {
     .ioctl = kline_ioctl,
     .get_stats = kline_get_stats,
     .reset_stats = kline_reset_stats,
+    .listener = &listener,
 };

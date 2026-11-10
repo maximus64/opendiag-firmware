@@ -170,7 +170,9 @@ static void hsset_command(int argc, char **argv) {
     }
 
     if (err != ESP_OK) {
-        printf("ERROR: %s\n", esp_err_to_name(err));
+        printf("ERROR: %s\n", err == VIF_ERR_VOLTAGE_IN_USE
+                                  ? "programming voltage is already in use"
+                                  : esp_err_to_name(err));
         return;
     }
 

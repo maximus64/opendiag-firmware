@@ -11,13 +11,20 @@ namespace native {
 
 class Backend {
     platform::Library library_;
+    // Orders wake() against unload(): wake() is called by a thread queued for its turn.
+    platform::Mutex lifetime_;
+    typedef J2534_LONG(J2534_CALL *OpenDiagWakeWaitFn)(J2534_ULONG armed);
+    OpenDiagWakeWaitFn wakeWait_;
 
   public:
     Backend()
-        : library_(NULL) {
+        : library_(NULL),
+          wakeWait_(NULL) {
     }
     void load(const void *owner);
     void unload();
+    // Any thread: while armed, a device wait in progress, or one that begins, ends early.
+    void wake(bool armed);
     typedef J2534_LONG(J2534_CALL *PassThruScanForDevicesFn)(J2534_ULONG *pDeviceCount);
     PassThruScanForDevicesFn scanForDevices;
     typedef J2534_LONG(J2534_CALL *PassThruGetNextDeviceFn)(native::SDEVICE *psDevice);

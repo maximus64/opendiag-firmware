@@ -54,6 +54,15 @@ esp_err_t comm_port_rx(comm_port_id_t port_id, const uint8_t *data,
                        size_t length);
 
 /**
+ * @brief Be told when a port has received bytes.
+ *
+ * @p hook runs in the transport's task after the bytes are readable, or were
+ * dropped for a full buffer, outside the lock, so the session can sleep until
+ * there is input instead of polling.
+ */
+void comm_iface_set_rx_hook(void (*hook)(comm_port_id_t port_id));
+
+/**
  * @brief Read what a port received, blocking up to @p timeout.
  *
  * @return Number of bytes read; 0 on timeout.

@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 
@@ -78,6 +79,14 @@ def configure(directory, port, logging=0):
     (directory / "opendiag.ini").write_text(
         "[device]\nName=OpenDIAG\nTransport=tcp\nHost=127.0.0.1\n"
         f"Port={port}\nRpcTimeout=1000\n[logging]\nEnabled={logging}\nMaxFileKB=64\n")
+    # Keep in-process ctypes tests independent of the machine's installed settings.
+    os.environ.update(test_environment(directory))
+
+
+def test_environment(directory):
+    return {"OPENDIAG_DRIVER_CONFIG": str(directory / "opendiag.ini"),
+            "HOME": str(directory / "user"),
+            "XDG_STATE_HOME": str(directory / "state")}
 
 
 def flatten(suite):
@@ -252,11 +261,89 @@ def test_ownership(native_path, legacy_path, peer):
     print("PASS cross-API ownership and deterministic concurrent-call rejection")
 
 
+def test_config_override(native_path, legacy_path, peer):
+    """Bad configs clear discovery results while open reports the reason."""
+    class DeviceInfo(ctypes.Structure):
+        _fields_ = [("DeviceName", ctypes.c_char * 80),
+                    ("DeviceAvailable", ctypes.c_uint32),
+                    ("DeviceDLLFWStatus", ctypes.c_uint32),
+                    ("DeviceConnectMedia", ctypes.c_uint32),
+                    ("DeviceConnectSpeed", ctypes.c_uint32),
+                    ("DeviceSignalQuality", ctypes.c_uint32),
+                    ("DeviceSignalStrength", ctypes.c_uint32)]
+
+    with tempfile.TemporaryDirectory(prefix="opendiag-config-") as temporary:
+        directory = Path(temporary)
+        native_path, legacy_path = install_libraries(native_path, legacy_path, directory)
+        native = ctypes.CDLL(str(native_path))
+        legacy = ctypes.CDLL(str(legacy_path))
+        for library in (native, legacy):
+            library.PassThruOpen.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint32)]
+            library.PassThruOpen.restype = ctypes.c_int32
+            library.PassThruGetLastError.argtypes = [ctypes.c_char_p]
+            library.PassThruGetLastError.restype = ctypes.c_int32
+        native.PassThruScanForDevices.argtypes = [ctypes.POINTER(ctypes.c_uint32)]
+        native.PassThruScanForDevices.restype = ctypes.c_int32
+        native.PassThruGetNextDevice.argtypes = [ctypes.POINTER(DeviceInfo)]
+        native.PassThruGetNextDevice.restype = ctypes.c_int32
+
+        def scan(expected):
+            count = ctypes.c_uint32(0x12345678)
+            status = native.PassThruScanForDevices(ctypes.byref(count))
+            assert status == 0, f"Scan returned {status:#x}, expected STATUS_NOERROR"
+            assert count.value == expected, f"Scan found {count.value}, expected {expected}"
+
+        invalid = directory / "invalid.ini"
+        invalid.write_text("[device]\nTransport=invalid\n")
+        cases = [(directory / "missing.ini", "OPENDIAG_DRIVER_CONFIG file not found:"),
+                 (directory, "OPENDIAG_DRIVER_CONFIG file not found:"),
+                 (invalid, "invalid opendiag.ini settings")]
+        # Native open reports ERR_OPEN_FAILED, translated to
+        # ERR_DEVICE_NOT_CONNECTED by the 04.04 shim.
+        operations = [(native, native.PassThruOpen, [b"J2534-1:OpenDIAG"], 0x22),
+                      (legacy, legacy.PassThruOpen, [None], 0x08)]
+        with Server(peer.Peer) as server:
+            configure(directory, server.port, logging=1)
+            for path, reason in cases:
+                # Clear both an unread result and an already consumed result.
+                for consumed in (False, True):
+                    os.environ["OPENDIAG_DRIVER_CONFIG"] = str(directory / "opendiag.ini")
+                    scan(1)
+                    info = DeviceInfo()
+                    if consumed:
+                        assert native.PassThruGetNextDevice(ctypes.byref(info)) == 0
+                        assert info.DeviceName == b"OpenDIAG"
+                    os.environ["OPENDIAG_DRIVER_CONFIG"] = str(path)
+                    scan(0)
+                    ctypes.memset(ctypes.byref(info), 0xa5, ctypes.sizeof(info))
+                    unchanged = bytes(info)
+                    assert native.PassThruGetNextDevice(ctypes.byref(info)) == 0x10
+                    assert bytes(info) == unchanged
+
+                for library, operation, arguments, expected in operations:
+                    unchanged = ctypes.c_uint32(0x12345678)
+                    actual = operation(*arguments, ctypes.byref(unchanged))
+                    assert actual == expected, f"{operation.__name__}: got {actual:#x}, expected {expected:#x}"
+                    assert unchanged.value == 0x12345678, operation.__name__
+                    text = ctypes.create_string_buffer(80)
+                    assert library.PassThruGetLastError(text) == 0
+                    reported = text.value.decode()
+                    assert reason in reported, reported
+
+            os.environ["OPENDIAG_DRIVER_CONFIG"] = str(directory / "opendiag.ini")
+            scan(1)
+            assert native.PassThruScanForDevices(None) == 0x04
+            info = DeviceInfo()
+            assert native.PassThruGetNextDevice(ctypes.byref(info)) == 0
+            assert info.DeviceName == b"OpenDIAG"
+    print("PASS config errors clear scan results and remain available through both open APIs")
+
+
 def test_contract_mismatch(native_path, legacy_path, peer):
     """A protocol mismatch must name the offending field instead of failing blind."""
-    cases = [({"wire_version": 2}, "wire 2, driver needs 1"),
+    cases = [({"wire_version": 2}, "wire 2, driver needs 3"),
              ({"api_version": 0x404}, "API 0404, driver needs 0500"),
-             ({"fragment_bytes": 256}, "fragment 256, driver needs 192"),
+             ({"fragment_bytes": 32}, "fragment 32, driver needs 64 to 4608"),
              ({"rpc_bytes": 2048}, "RPC 2048, driver needs 4608"),
              (None, "firmware reported no capabilities")]
 
@@ -301,6 +388,153 @@ def test_contract_mismatch(native_path, legacy_path, peer):
     print(f"PASS {len(cases)} protocol-mismatch reports reach both APIs")
 
 
+def test_device_side_waits(native_path, legacy_path, peer):
+    """A timed read or select is one request the device holds, never a polling loop."""
+    class Packed(ctypes.Structure):
+        _pack_ = 1
+        _layout_ = "ms"
+
+    class Message(Packed):
+        _fields_ = [(name, ctypes.c_uint32) for name in (
+            "ProtocolID", "MsgHandle", "RxStatus", "TxFlags", "Timestamp", "DataLength",
+            "ExtraDataIndex")] + [("DataBuffer", ctypes.POINTER(ctypes.c_ubyte)),
+                                  ("DataBufferSize", ctypes.c_uint32)]
+
+    class Resource(Packed):
+        _fields_ = [("Connector", ctypes.c_uint32), ("NumOfResources", ctypes.c_uint32),
+                    ("ResourceListPtr", ctypes.POINTER(ctypes.c_uint32))]
+
+    class ChannelSet(Packed):
+        _fields_ = [("ChannelCount", ctypes.c_uint32), ("ChannelThreshold", ctypes.c_uint32),
+                    ("ChannelList", ctypes.POINTER(ctypes.c_uint32))]
+
+    waits = []
+
+    class RecordingPeer(peer.Peer):
+        def respond(self, request):
+            name = request.WhichOneof("command")
+            if name == "read":
+                waits.append(("read", request.read.timeout_ms))
+            elif name == "select":
+                waits.append(("select", request.select.threshold, request.select.timeout_ms))
+            return super().respond(request)
+
+    def messages(count):
+        storage = [(ctypes.c_ubyte * 64)() for _ in range(count)]
+        array = (Message * count)()
+        for item, buffer in zip(array, storage):
+            item.DataBuffer = buffer
+            item.DataBufferSize = 64
+        return array, storage
+
+    def timed(call):
+        start = time.monotonic()
+        status = call()
+        return status, (time.monotonic() - start) * 1000
+
+    with tempfile.TemporaryDirectory(prefix="opendiag-waits-") as temporary:
+        directory = Path(temporary)
+        native_path, _ = install_libraries(native_path, legacy_path, directory)
+        api = ctypes.CDLL(str(native_path))
+        with Server(RecordingPeer) as server:
+            configure(directory, server.port)
+            device, channel = ctypes.c_uint32(), ctypes.c_uint32()
+            assert api.PassThruOpen(b"J2534-1:OpenDIAG", ctypes.byref(device)) == 0
+            pins = (ctypes.c_uint32 * 2)(6, 14)
+            assert api.PassThruConnect(device, 5, 0, 500000, Resource(1, 2, pins),
+                                       ctypes.byref(channel)) == 0
+
+            output, keep = messages(2)
+            count = ctypes.c_uint32(1)
+            status, waited = timed(lambda: api.PassThruReadMsgs(channel, output,
+                                                                ctypes.byref(count), 60))
+            assert (status, count.value) == (0x10, 0), (status, count.value)
+            assert waited >= 55, waited
+            assert waits == [("read", 60)], waits
+
+            # One queued message is returned at once; the second read waits out the rest.
+            del waits[:]
+            data = (ctypes.c_ubyte * 5)(0, 0, 7, 0xe0, 0x3e)
+            sent = Message(ProtocolID=5, DataLength=5, ExtraDataIndex=5, DataBufferSize=5)
+            sent.DataBuffer = ctypes.cast(data, ctypes.POINTER(ctypes.c_ubyte))
+            queued = ctypes.c_uint32(1)
+            assert api.PassThruQueueMsgs(channel, ctypes.byref(sent), ctypes.byref(queued)) == 0
+            count = ctypes.c_uint32(2)
+            status, waited = timed(lambda: api.PassThruReadMsgs(channel, output,
+                                                                ctypes.byref(count), 60))
+            assert (status, count.value) == (0x09, 1), (status, count.value)
+            assert [kind for kind, _ in waits] == ["read", "read"], waits
+            assert waits[0][1] == 60 and 0 < waits[1][1] <= 60, waits
+
+            del waits[:]
+            listed = (ctypes.c_uint32 * 1)(channel.value)
+            selection = ChannelSet(1, 1, listed)
+            status, waited = timed(lambda: api.PassThruSelect(ctypes.byref(selection), 1, 60))
+            assert status == 0x10, status
+            assert waited >= 55, waited
+            assert waits == [("select", 1, 60)], waits
+            assert api.PassThruClose(device) == 0
+            del keep
+    print("PASS timed reads and selects wait on the device in one request each")
+
+
+def test_fragment_size(native_path, legacy_path, peer):
+    """The driver sends and accepts fragments as large as the firmware advertises."""
+    class Packed(ctypes.Structure):
+        _pack_ = 1
+        _layout_ = "ms"
+
+    class Message(Packed):
+        _fields_ = [(name, ctypes.c_uint32) for name in (
+            "ProtocolID", "MsgHandle", "RxStatus", "TxFlags", "Timestamp", "DataLength",
+            "ExtraDataIndex")] + [("DataBuffer", ctypes.POINTER(ctypes.c_ubyte)),
+                                  ("DataBufferSize", ctypes.c_uint32)]
+
+    class Resource(Packed):
+        _fields_ = [("Connector", ctypes.c_uint32), ("NumOfResources", ctypes.c_uint32),
+                    ("ResourceListPtr", ctypes.POINTER(ctypes.c_uint32))]
+
+    peers = []
+
+    class LargeFragmentPeer(peer.Peer):
+        def __init__(self):
+            super().__init__()
+            self.fragment_bytes = 1024
+            peers.append(self)
+
+    queue_op = peer.pb.Request.DESCRIPTOR.fields_by_name["queue"].number - 1
+    read_op = peer.pb.Request.DESCRIPTOR.fields_by_name["read"].number - 1
+    with tempfile.TemporaryDirectory(prefix="opendiag-fragment-") as temporary:
+        directory = Path(temporary)
+        native_path, _ = install_libraries(native_path, legacy_path, directory)
+        api = ctypes.CDLL(str(native_path))
+        with Server(LargeFragmentPeer) as server:
+            configure(directory, server.port)
+            device, channel = ctypes.c_uint32(), ctypes.c_uint32()
+            assert api.PassThruOpen(b"J2534-1:OpenDIAG", ctypes.byref(device)) == 0
+            pins = (ctypes.c_uint32 * 2)(6, 14)
+            assert api.PassThruConnect(device, 5, 0, 500000, Resource(1, 2, pins),
+                                       ctypes.byref(channel)) == 0
+            # A 258-byte flash block behind its CAN identifier.
+            data = (ctypes.c_ubyte * 262)(*(i & 0xff for i in range(262)))
+            sent = Message(ProtocolID=5, DataLength=262, ExtraDataIndex=262, DataBufferSize=262)
+            sent.DataBuffer = ctypes.cast(data, ctypes.POINTER(ctypes.c_ubyte))
+            count = ctypes.c_uint32(1)
+            assert api.PassThruQueueMsgs(channel, ctypes.byref(sent), ctypes.byref(count)) == 0
+            buffer = (ctypes.c_ubyte * 300)()
+            received = Message(DataBufferSize=300)
+            received.DataBuffer = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte))
+            count = ctypes.c_uint32(1)
+            assert api.PassThruReadMsgs(channel, ctypes.byref(received),
+                                        ctypes.byref(count), 0) == 0
+            assert received.DataLength == 262 and bytes(buffer[:262]) == bytes(data)
+            assert api.PassThruClose(device) == 0
+    frames = [frame for frame in peers[-1].frames if frame[0] in (queue_op, read_op)]
+    assert [(op, flags) for op, flags, _ in frames] == [(queue_op, 0), (read_op, 0)], frames
+    assert frames[0][2] > 262, frames
+    print("PASS a flash block crosses the wire as one frame each way")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build", type=Path, required=True)
@@ -340,8 +574,9 @@ def main():
                 library = native if api == "0500" else legacy
                 result = subprocess.run([str(tests / f"api{api}"), str(library), mode],
                                         cwd="/", text=True, stdout=subprocess.PIPE,
-                                        stderr=subprocess.STDOUT, timeout=180)
-                logs = list(directory.glob("*.log"))
+                                        stderr=subprocess.STDOUT, timeout=180,
+                                        env={**os.environ, **test_environment(directory)})
+                logs = list(directory.rglob("*.log"))
                 logged = bool(logs) and any("END status=" in path.read_text() for path in logs)
         return result.returncode, result.stdout, logged
 
@@ -367,7 +602,10 @@ def main():
         if not logged:
             raise RuntimeError("API logging produced no return records")
     test_ownership(args.native, args.legacy, peer)
+    test_config_override(args.native, args.legacy, peer)
     test_contract_mismatch(args.native, args.legacy, peer)
+    test_device_side_waits(args.native, args.legacy, peer)
+    test_fragment_size(args.native, args.legacy, peer)
     if legacy_result.returncode:
         print(legacy_result.stdout)
         raise SystemExit(legacy_result.returncode)

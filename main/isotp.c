@@ -216,6 +216,7 @@ int isotp_tx_start(isotp_tx_t *tx, const uint8_t *data, size_t length,
     tx->sequence = 1;
     tx->wait_count = 0;
     tx->block_count = 0;
+    tx->unconfirmed = 0;
     tx->sent_cf = false;
     tx->reserved_stmin = false;
     tx->padding_error = false;
@@ -269,14 +270,7 @@ int isotp_tx_flow_control(isotp_tx_t *tx, const struct can_frame *f,
     return fs == 2 ? ISOTP_ERR_OVERFLOW : ISOTP_ERR_FLOW_STATUS;
 }
 
-int isotp_tx_next(isotp_tx_t *tx, struct can_frame *f, uint32_t now_us) {
-    int rc = isotp_tx_check_timeout(tx, now_us);
-    if (rc < 0)
-        return rc;
-    if (tx->state != ISOTP_TX_READY && tx->state != ISOTP_TX_CF)
-        return ISOTP_IGNORED;
-    if (tx->state == ISOTP_TX_CF && !expired(now_us, tx->next_us))
-        return ISOTP_IGNORED;
+static int emit_frame(isotp_tx_t *tx, struct can_frame *f, uint32_t now_us) {
     unsigned a = prepare(&tx->config, f);
     unsigned start = a + 1;
     unsigned size;
@@ -299,9 +293,35 @@ int isotp_tx_next(isotp_tx_t *tx, struct can_frame *f, uint32_t now_us) {
     memcpy(f->data + start, tx->buffer + tx->offset, size);
     tx->offset += size;
     f->dlc = tx->config.pad ? 8 : start + size;
+    tx->unconfirmed++;
     tx->state = ISOTP_TX_CONFIRM;
     tx->deadline_us = now_us + tx->config.timeout_a_us;
     return ISOTP_FRAME;
+}
+
+int isotp_tx_next(isotp_tx_t *tx, struct can_frame *f, uint32_t now_us) {
+    int rc = isotp_tx_check_timeout(tx, now_us);
+    if (rc < 0)
+        return rc;
+    if (tx->state != ISOTP_TX_READY && tx->state != ISOTP_TX_CF)
+        return ISOTP_IGNORED;
+    if (tx->state == ISOTP_TX_CF && !expired(now_us, tx->next_us))
+        return ISOTP_IGNORED;
+    return emit_frame(tx, f, now_us);
+}
+
+int isotp_tx_more(isotp_tx_t *tx, struct can_frame *f, uint32_t now_us) {
+    int rc = isotp_tx_check_timeout(tx, now_us);
+    if (rc < 0)
+        return rc;
+    /* Zero STmin lets frames follow each other as fast as the bus allows,
+     * which a queued frame does; any other STmin is paced from completion.
+     * A first frame is never followed: the peer's flow control comes next. */
+    if (tx->state != ISOTP_TX_CONFIRM || !tx->pending_cf || tx->separation_us ||
+        tx->offset == tx->total ||
+        (tx->block_size && tx->block_count + tx->unconfirmed >= tx->block_size))
+        return ISOTP_IGNORED;
+    return emit_frame(tx, f, now_us);
 }
 
 int isotp_tx_confirm(isotp_tx_t *tx, bool success, uint32_t now_us) {
@@ -314,14 +334,18 @@ int isotp_tx_confirm(isotp_tx_t *tx, bool success, uint32_t now_us) {
         tx->state = ISOTP_TX_IDLE;
         return ISOTP_ERR_SEND;
     }
-    if (tx->offset == tx->total) {
-        tx->state = ISOTP_TX_IDLE;
-        return ISOTP_COMPLETE;
-    }
+    tx->unconfirmed--;
     if (tx->pending_cf) {
         tx->sent_cf = true;
         tx->last_cf_us = now_us;
         tx->block_count++;
+    }
+    /* Frames queued behind this one keep the transmission waiting on them. */
+    if (tx->unconfirmed)
+        return 0;
+    if (tx->offset == tx->total) {
+        tx->state = ISOTP_TX_IDLE;
+        return ISOTP_COMPLETE;
     }
     if (!tx->pending_cf ||
         (tx->block_size && tx->block_count == tx->block_size)) {

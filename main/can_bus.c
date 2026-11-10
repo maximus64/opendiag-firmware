@@ -16,6 +16,9 @@
 #include "driver/gpio.h"
 #include "pinout.h"
 
+/* The claim holder's ear on this bus; see bus_listener_t. */
+static bus_listener_t listener;
+
 #define TAG "CANBUS"
 
 #define CAN_RX_QUEUE_LEN 32
@@ -66,6 +69,15 @@ static twai_frame_t tx_pool[CAN_TX_POOL_LEN];
 static uint8_t tx_pool_data[CAN_TX_POOL_LEN][8];
 static unsigned tx_pool_next;
 
+/* The train position each pool slot carries, or -1. The TX-done interrupt
+ * records each position's outcome, since a slot is reused within a train.
+ * The pool's spare slots make that safe here too: a slot is retagged only
+ * after the frame it last held has been completed in an earlier interrupt. */
+static int8_t tx_pool_train[CAN_TX_POOL_LEN];
+static uint32_t train_ended_us[BUS_TX_TRAIN_MAX];
+static bool train_done[BUS_TX_TRAIN_MAX];
+static bool train_ok[BUS_TX_TRAIN_MAX];
+
 /** Frames received with nowhere to put them. Nothing else counts these. */
 static volatile uint32_t rx_dropped;
 static uint32_t tx_failed;
@@ -104,10 +116,17 @@ static bool can_error(twai_node_handle_t node,
 
 static bool can_tx_done(twai_node_handle_t node,
                         const twai_tx_done_event_data_t *event, void *ctx) {
-    __atomic_store_n(&tx_completed_us, (uint32_t)esp_timer_get_time(),
-                     __ATOMIC_RELEASE);
+    uint32_t now = (uint32_t)esp_timer_get_time();
+    __atomic_store_n(&tx_completed_us, now, __ATOMIC_RELEASE);
     if (!event->is_tx_success)
         __atomic_fetch_add(&tx_failed, 1, __ATOMIC_RELAXED);
+    ptrdiff_t slot = event->done_tx_frame ? event->done_tx_frame - tx_pool : -1;
+    if (slot >= 0 && slot < CAN_TX_POOL_LEN && tx_pool_train[slot] >= 0) {
+        int position = tx_pool_train[slot];
+        train_ended_us[position] = now;
+        train_ok[position] = event->is_tx_success;
+        __atomic_store_n(&train_done[position], true, __ATOMIC_RELEASE);
+    }
     return false;
 }
 
@@ -148,7 +167,9 @@ int can_receive(struct can_frame *frame, TickType_t ticks_to_wait) {
     return 0;
 }
 
-int can_send(const struct can_frame *frame) {
+/* Queue @p frame behind any already queued; @p position is its place in a
+ * train, or -1. Blocks while the driver's queue is full. */
+static int queue_frame(const struct can_frame *frame, int position) {
     if (!can_started || frame == NULL || can_node == NULL) {
         return -1;
     }
@@ -186,9 +207,12 @@ int can_send(const struct can_frame *frame) {
         msg->buffer_len = copy_len; /* the driver derives the length code */
     }
 
+    /* Set before the driver can complete it and the interrupt read it. */
+    tx_pool_train[tx_pool_next] = (int8_t)position;
     // TODO: do something smarter with the timeout.
     esp_err_t err = twai_node_transmit(can_node, msg, CAN_TX_TIMEOUT_MS);
     if (err != ESP_OK) {
+        tx_pool_train[tx_pool_next] = -1;
         printf("Failed to transmit err=%d\n", err);
         return -1;
     }
@@ -196,6 +220,8 @@ int can_send(const struct can_frame *frame) {
     tx_pool_next = (tx_pool_next + 1) % CAN_TX_POOL_LEN;
     return 0;
 }
+
+int can_send(const struct can_frame *frame) { return queue_frame(frame, -1); }
 
 void can_print_stat(void) {
     if (!can_started || can_node == NULL) {
@@ -277,6 +303,7 @@ static bool can_rx_done(twai_node_handle_t node,
     } else {
         rx_overflow_pending = false;
     }
+    bus_notify_from_isr(&listener, &task_woken);
 
     return task_woken == pdTRUE;
 }
@@ -300,8 +327,11 @@ static bool can_state_change(twai_node_handle_t node,
     BaseType_t task_woken = pdFALSE;
     bool crossed = (edata->new_sta == TWAI_ERROR_BUS_OFF) ||
                    (edata->old_sta == TWAI_ERROR_BUS_OFF);
-    if (manual_recovery && edata->new_sta == TWAI_ERROR_BUS_OFF)
+    if (manual_recovery && edata->new_sta == TWAI_ERROR_BUS_OFF) {
         __atomic_store_n(&link_down_pending, true, __ATOMIC_RELEASE);
+        /* A bus that is off delivers nothing else that would tell anyone. */
+        bus_notify_from_isr(&listener, &task_woken);
+    }
 
     portENTER_CRITICAL_ISR(&task_notify_lock);
     if (crossed && !__atomic_load_n(&task_should_exit, __ATOMIC_ACQUIRE) &&
@@ -513,6 +543,7 @@ static esp_err_t can_setup(int baud_rate, bool manual, bool listen_only) {
     // Reset task exit flag
     __atomic_store_n(&task_should_exit, false, __ATOMIC_RELEASE);
     tx_pool_next = 0;
+    memset(tx_pool_train, -1, sizeof(tx_pool_train));
     rx_dropped = 0;
     __atomic_store_n(&tx_failed, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&bus_errors, 0, __ATOMIC_RELAXED);
@@ -625,12 +656,8 @@ static esp_err_t can_ops_open(const bus_cfg_t *cfg) {
 
 static esp_err_t can_ops_close(void) { return can_bus_teardown(); }
 
-static int can_ops_send_controlled(const bus_msg_t *msg, uint32_t flags,
-                                   bus_tx_control_t *control) {
+static struct can_frame frame_of(const bus_msg_t *msg) {
     struct can_frame f = {0};
-
-    if (listen_only_active)
-        return BUS_ERR_TX_FAILED;
 
     f.id = msg->id;
     f.dlc = (uint8_t)msg->len;
@@ -641,7 +668,34 @@ static int can_ops_send_controlled(const bus_msg_t *msg, uint32_t flags,
     if (!(f.id & CAN_RTR_FLAG)) {
         memcpy(f.data, msg->data, msg->len > 8 ? 8 : msg->len);
     }
+    return f;
+}
 
+/* Wait for everything queued to leave. An unresolved transmission aborts. */
+static int wait_tx_done(bus_tx_control_t *control) {
+    esp_err_t err =
+        twai_node_transmit_wait_all_done(can_node, CAN_TX_TIMEOUT_MS);
+    /* Completion may race the end of the blocking wait. */
+    if (err != ESP_OK)
+        err = twai_node_transmit_wait_all_done(can_node, 0);
+    if (err == ESP_OK)
+        return 0;
+    /* Silence queued frames now. Managed TX leaves RX storage alive until the
+     * owner joins this worker and closes the node. */
+    can_started = false;
+    gpio_set_level(PIN_CAN0_SILENT, 1);
+    esp_err_t cleanup =
+        control ? twai_node_disable(can_node) : can_bus_teardown();
+    if (cleanup != ESP_OK)
+        ESP_LOGE(TAG, "TX abort cleanup failed: %s", esp_err_to_name(cleanup));
+    return BUS_ERR_TX_ABORTED;
+}
+
+static int can_ops_send_controlled(const bus_msg_t *msg, uint32_t flags,
+                                   bus_tx_control_t *control) {
+    if (listen_only_active)
+        return BUS_ERR_TX_FAILED;
+    struct can_frame f = frame_of(msg);
     int admission = bus_tx_admit(control, bus_rx_sequence(&rx_epoch),
                                  (uint32_t)esp_timer_get_time());
     if (admission)
@@ -650,28 +704,62 @@ static int can_ops_send_controlled(const bus_msg_t *msg, uint32_t flags,
     if (can_send(&f) != 0)
         return BUS_ERR_TX_FAILED;
     if (control || (flags & BUS_TX_WAIT_DONE)) {
-        esp_err_t err =
-            twai_node_transmit_wait_all_done(can_node, CAN_TX_TIMEOUT_MS);
-        /* Completion may race the end of the blocking wait. */
-        if (err != ESP_OK)
-            err = twai_node_transmit_wait_all_done(can_node, 0);
-        if (err != ESP_OK) {
-            /* Silence queued frames now. Managed TX leaves RX storage alive
-             * until the owner joins this worker and closes the node. */
-            can_started = false;
-            gpio_set_level(PIN_CAN0_SILENT, 1);
-            esp_err_t cleanup =
-                control ? twai_node_disable(can_node) : can_bus_teardown();
-            if (cleanup != ESP_OK)
-                ESP_LOGE(TAG, "TX abort cleanup failed: %s",
-                         esp_err_to_name(cleanup));
-            return BUS_ERR_TX_ABORTED;
-        }
+        int rc = wait_tx_done(control);
+        if (rc)
+            return rc;
         if (__atomic_load_n(&tx_failed, __ATOMIC_RELAXED) != failures)
             return BUS_ERR_TX_FAILED;
         bus_tx_end(control,
                    __atomic_load_n(&tx_completed_us, __ATOMIC_ACQUIRE));
     }
+    return 0;
+}
+
+/*
+ * Keep the controller's queue full so the frames leave back to back, with
+ * none of the per-frame hand-offs between tasks. The driver keeps them in
+ * order, so the frames that went out are a prefix of the train.
+ */
+static int can_ops_send_train(const bus_msg_t *msgs, unsigned count,
+                              bus_tx_control_t *control,
+                              bus_tx_train_t *train) {
+    train->sent = 0;
+    if (listen_only_active)
+        return BUS_ERR_TX_FAILED;
+    if (!count || count > BUS_TX_TRAIN_MAX)
+        return BUS_ERR_BAD_ARG;
+    int admission = bus_tx_admit(control, bus_rx_sequence(&rx_epoch),
+                                 (uint32_t)esp_timer_get_time());
+    if (admission)
+        return admission;
+
+    unsigned queued = 0;
+    for (unsigned i = 0; i < count; i++)
+        __atomic_store_n(&train_done[i], false, __ATOMIC_RELAXED);
+    while (queued < count && !bus_tx_stopped(control)) {
+        struct can_frame f = frame_of(&msgs[queued]);
+        if (queue_frame(&f, (int)queued) != 0)
+            break;
+        queued++;
+    }
+    int rc = queued ? wait_tx_done(control) : 0;
+    for (unsigned i = 0; i < CAN_TX_POOL_LEN; i++)
+        tx_pool_train[i] = -1;
+
+    while (train->sent < queued &&
+           __atomic_load_n(&train_done[train->sent], __ATOMIC_ACQUIRE) &&
+           train_ok[train->sent]) {
+        train->ended_us[train->sent] = train_ended_us[train->sent];
+        train->sent++;
+    }
+    if (train->sent)
+        bus_tx_end(control, train->ended_us[train->sent - 1]);
+    if (rc)
+        return rc;
+    if (train->sent < queued)
+        return BUS_ERR_TX_FAILED;
+    if (queued < count)
+        return bus_tx_stopped(control) ? BUS_ERR_CANCELLED : BUS_ERR_TX_FAILED;
     return 0;
 }
 
@@ -748,6 +836,8 @@ const bus_ops_t can_bus_ops = {
     .close = can_ops_close,
     .send = can_ops_send,
     .send_controlled = can_ops_send_controlled,
+    .send_train = can_ops_send_train,
     .recv = can_ops_recv,
     .ioctl = can_ops_ioctl,
+    .listener = &listener,
 };

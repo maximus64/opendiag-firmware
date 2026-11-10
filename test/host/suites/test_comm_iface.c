@@ -27,6 +27,7 @@
 #include "td_test.h"
 
 #include "freertos/semphr.h"
+#include "fake_clock.h"
 #include "fake_port.h"
 
 #include "comm_iface.c"
@@ -140,6 +141,25 @@ TEST(a_short_write_is_completed_through_a_flush) {
     TEST_ASSERT_EQUAL_STRING("ABCDEFGH", fake_port_text(0));
     TEST_ASSERT_MSG(fake_port_flush_count(0) > 0,
                     "the remainder went out without draining the FIFO first");
+}
+
+TEST(a_write_larger_than_the_fifo_goes_out_whole) {
+    /* A wire frame is larger than the USB FIFO: it drains several times. */
+    fake_port_set_write_limit(0, 4);
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+                          comm_port_write(P0, "0123456789ABCDEFGHIJ", 20));
+
+    TEST_ASSERT_EQUAL_STRING("0123456789ABCDEFGHIJ", fake_port_text(0));
+}
+
+TEST(a_host_that_stops_reading_fails_the_write_promptly) {
+    fake_port_set_stalled(0, true);
+    uint32_t started = fake_clock_ms();
+
+    TEST_ASSERT_EQUAL_INT(ESP_FAIL, comm_port_write(P0, "ABCDEFGH", 8));
+
+    TEST_ASSERT_TRUE(fake_clock_ms() - started <= PORT_WRITE_STALL_TICKS);
 }
 
 TEST(a_disconnected_port_is_not_written_to) {

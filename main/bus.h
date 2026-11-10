@@ -416,6 +416,17 @@ typedef struct {
  * with no initialisation sequence does not carry an empty ioctl().
  */
 typedef struct bus_tx_control bus_tx_control_t;
+typedef struct bus_listener bus_listener_t;
+
+/* Most frames one train carries; see bus_ops_t.send_train. */
+#define BUS_TX_TRAIN_MAX 32u
+
+/* What became of a train: the frames that went out, in order, before the
+ * first that failed or the point it was stopped, and when each one ended. */
+typedef struct {
+    unsigned sent;
+    uint32_t ended_us[BUS_TX_TRAIN_MAX];
+} bus_tx_train_t;
 
 typedef struct bus_ops {
     const char *name;
@@ -439,6 +450,13 @@ typedef struct bus_ops {
     /* Same send, with cancellable admission and observed TX boundaries. */
     int (*send_controlled)(const bus_msg_t *msg, uint32_t flags,
                            bus_tx_control_t *control);
+    /*
+     * CAN: up to BUS_TX_TRAIN_MAX frames back to back as one transmission,
+     * admitted once. Feeding stops at the first failure or when @p control is
+     * cancelled; @p train says how far it got. Optional.
+     */
+    int (*send_train)(const bus_msg_t *msgs, unsigned count,
+                      bus_tx_control_t *control, bus_tx_train_t *train);
 
     /**
      * Take the next message off the receive queue.
@@ -455,6 +473,10 @@ typedef struct bus_ops {
 
     void (*get_stats)(bus_stats_t *out);
     void (*reset_stats)(void);
+
+    /* Told of news from this bus: data received, a transmission finished,
+     * the link went down. vif points it at whoever holds the claim. */
+    bus_listener_t *listener;
 } bus_ops_t;
 
 /** @brief Fill @p msg in for a receive into @p buf. */

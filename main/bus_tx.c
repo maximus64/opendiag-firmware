@@ -13,6 +13,7 @@ void bus_tx_prepare(bus_tx_control_t *control, uint32_t rx_sequence) {
 bool bus_tx_cancel(bus_tx_control_t *control) {
     uint32_t queued = BUS_TX_QUEUED;
 
+    __atomic_store_n(&control->stop, true, __ATOMIC_RELEASE);
     return __atomic_compare_exchange_n(&control->state, &queued,
                                        BUS_TX_CANCELLED, false,
                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
@@ -21,6 +22,10 @@ bool bus_tx_cancel(bus_tx_control_t *control) {
 bool bus_tx_cancelled(const bus_tx_control_t *control) {
     return control && __atomic_load_n(&control->state, __ATOMIC_ACQUIRE) ==
                           BUS_TX_CANCELLED;
+}
+
+bool bus_tx_stopped(const bus_tx_control_t *control) {
+    return control && __atomic_load_n(&control->stop, __ATOMIC_ACQUIRE);
 }
 
 int bus_tx_admit(bus_tx_control_t *control, uint32_t rx_sequence,
@@ -48,6 +53,26 @@ void bus_tx_end(bus_tx_control_t *control, uint32_t timestamp_us) {
         __atomic_store_n(&control->ended_us, timestamp_us, __ATOMIC_RELAXED);
         __atomic_store_n(&control->ended, true, __ATOMIC_RELEASE);
     }
+}
+
+void bus_listen(bus_listener_t *listener, TaskHandle_t task) {
+    if (listener)
+        __atomic_store_n(&listener->task, task, __ATOMIC_RELEASE);
+}
+
+void bus_notify(bus_listener_t *listener) {
+    TaskHandle_t task =
+        listener ? __atomic_load_n(&listener->task, __ATOMIC_ACQUIRE) : NULL;
+    if (task)
+        xTaskNotifyGive(task);
+}
+
+void IRAM_ATTR bus_notify_from_isr(bus_listener_t *listener,
+                                   BaseType_t *woken) {
+    TaskHandle_t task =
+        listener ? __atomic_load_n(&listener->task, __ATOMIC_ACQUIRE) : NULL;
+    if (task)
+        vTaskNotifyGiveFromISR(task, woken);
 }
 
 uint32_t IRAM_ATTR bus_rx_next(bus_rx_epoch_t *epoch) {

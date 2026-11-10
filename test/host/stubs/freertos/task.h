@@ -45,6 +45,12 @@ void vPortYield(void);
 /* Task notifications: a single pending flag, since nothing here needs a
  * counting one. fake_gpio.c posts to it on a simulated edge. */
 void vTaskNotifyGiveFromISR(TaskHandle_t task, BaseType_t *woken);
+BaseType_t xTaskNotifyGive(TaskHandle_t task);
 uint32_t ulTaskNotifyTake(BaseType_t clear_on_exit, TickType_t ticks_to_wait);
+/** Whether a notification is pending, without taking it. */
+bool idf_stub_notify_pending(void);
+/** The task the last notification went to, until the next reset. */
+TaskHandle_t idf_stub_notified_task(void);
+void idf_stub_notify_reset(void);
 
 #define portYIELD_FROM_ISR() ((void)0)

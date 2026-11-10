@@ -51,6 +51,9 @@ PB_BIND(opendiag_Ioctl, opendiag_Ioctl, 2)
 PB_BIND(opendiag_FastInit, opendiag_FastInit, 2)
 
 
+PB_BIND(opendiag_Read, opendiag_Read, AUTO)
+
+
 PB_BIND(opendiag_Select, opendiag_Select, AUTO)
 
 

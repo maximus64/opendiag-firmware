@@ -10,24 +10,23 @@ const void *moduleAnchor = &moduleAnchor;
 
 static const unsigned WIRE_HEADER_BYTES = 16;
 static const unsigned WIRE_CRC_BYTES = 4;
-static const unsigned WIRE_FRAGMENT_BYTES = 192;
+// Every firmware takes fragments this large; its capabilities may allow more.
+static const unsigned WIRE_FRAGMENT_DEFAULT = 192;
 static const unsigned WIRE_RPC_BYTES = 4608;
-static const unsigned WIRE_FRAME_BYTES = WIRE_HEADER_BYTES + WIRE_FRAGMENT_BYTES + WIRE_CRC_BYTES;
+// No fragment is larger than a whole RPC.
+static const unsigned WIRE_FRAME_BYTES = WIRE_HEADER_BYTES + WIRE_RPC_BYTES + WIRE_CRC_BYTES;
 static const unsigned WIRE_MORE = 0x01;
 static const unsigned WIRE_FETCH = 0x02;
 static const unsigned WIRE_ACK = 0x04;
+static const unsigned WIRE_WAKE = 0x08;
 static const unsigned WIRE_RESPONSE = 0x80;
-
-std::string configPath() {
-    return platform::configPath(moduleAnchor);
-}
 
 static std::string setting(const char *key, const char *fallback, const std::string &path) {
     return platform::readSetting(path, "device", key, fallback);
 }
 
 Settings loadSettings() {
-    const std::string path = configPath();
+    const std::string path = platform::configPath();
     Settings settings;
     settings.name = setting("Name", "OpenDIAG", path);
     settings.transport = setting("Transport", "com", path);
@@ -84,8 +83,65 @@ static J2534_ULONG crc32(const unsigned char *p, unsigned size) {
     return ~crc;
 }
 
+// The held wait in flight, if any, and whether another caller wants it ended. One lock
+// orders a wait beginning against a wake being armed, so neither can miss the other,
+// and keeps the link alive while a wake is written to it.
+static platform::Mutex waitLock;
+static Link *waitingLink = NULL;
+static unsigned waitingOp = 0;
+static bool wakeArmed = false;
+
+class HeldWait {
+    bool active_;
+
+  public:
+    HeldWait()
+        : active_(false) {
+    }
+    void begin(Link *link, unsigned op) {
+        platform::MutexLock lock(waitLock);
+        waitingLink = link;
+        waitingOp = op;
+        active_ = true;
+        if (wakeArmed) {
+            link->sendWake(op);
+        }
+    }
+    void end() {
+        if (active_) {
+            platform::MutexLock lock(waitLock);
+            waitingLink = NULL;
+            active_ = false;
+        }
+    }
+    ~HeldWait() {
+        end();
+    }
+};
+
+void Link::wakeWaits(bool armed) {
+    platform::MutexLock lock(waitLock);
+    wakeArmed = armed;
+    if (armed && waitingLink) {
+        waitingLink->sendWake(waitingOp);
+    }
+}
+
+// The waiting thread is blocked reading; this only writes, and failures surface there.
+void Link::sendWake(unsigned op) {
+    try {
+        send(op, WIRE_WAKE, 0, NULL, 0, platform::milliseconds() + settings_.rpcTimeout);
+    } catch (const std::exception &) {
+    }
+}
+
 Link::Link()
-    : sequence_(0) {
+    : sequence_(0),
+      fragment_(WIRE_FRAGMENT_DEFAULT) {
+}
+
+void Link::setFragment(unsigned bytes) {
+    fragment_ = std::min(bytes, WIRE_RPC_BYTES);
 }
 
 void Link::close() {
@@ -98,6 +154,7 @@ bool Link::alive() {
 
 void Link::open(const Settings &settings) {
     settings_ = settings;
+    fragment_ = WIRE_FRAGMENT_DEFAULT;
     if (settings.transport == "tcp") {
         stream_.openTcp(settings.host, settings.port, settings.rpcTimeout);
     } else {
@@ -148,7 +205,7 @@ unsigned Link::receive(unsigned op,
     stream_.read(frame, WIRE_HEADER_BYTES, deadline);
     unsigned size = get16(frame + 14);
     if (memcmp(frame, "J253", 4) || frame[4] != 1 || frame[5] != op ||
-        get32(frame + 8) != sequence_ || size > WIRE_FRAGMENT_BYTES) {
+        get32(frame + 8) != sequence_ || size > fragment_) {
         throw std::runtime_error("invalid J2534 wire header");
     }
 
@@ -163,10 +220,10 @@ unsigned Link::receive(unsigned op,
     return size;
 }
 
-void Link::rpc(const opendiag_Request &request, opendiag_Response &response) {
+void Link::rpc(const opendiag_Request &request, opendiag_Response &response, uint32_t waitMs) {
     unsigned char encoded[WIRE_RPC_BYTES];
     unsigned char decoded[WIRE_RPC_BYTES];
-    unsigned char fragment[WIRE_FRAGMENT_BYTES];
+    unsigned char fragment[WIRE_RPC_BYTES];
     pb_ostream_t output = pb_ostream_from_buffer(encoded, sizeof(encoded));
     if (!request.which_command || !pb_encode(&output, opendiag_Request_fields, &request)) {
         throw std::runtime_error("protobuf request encoding failed");
@@ -176,15 +233,21 @@ void Link::rpc(const opendiag_Request &request, opendiag_Response &response) {
     unsigned flags = 0;
     unsigned gotOffset = 0;
     unsigned gotSize = 0;
-    uint32_t deadline = platform::milliseconds() + settings_.rpcTimeout;
+    uint32_t deadline = platform::milliseconds() + settings_.rpcTimeout + waitMs;
 
-    // Intermediate request fragments receive ACKs; the last fragment starts the response.
+    // Intermediate request fragments receive ACKs; the last fragment starts the response,
+    // which for a held request is the wait another caller may cut short.
+    HeldWait held;
     for (unsigned offset = 0; offset < output.bytes_written;) {
         unsigned size =
-            (unsigned)std::min((size_t)WIRE_FRAGMENT_BYTES, output.bytes_written - offset);
+            (unsigned)std::min((size_t)fragment_, output.bytes_written - offset);
         bool more = offset + size < output.bytes_written;
         send(op, more ? WIRE_MORE : 0, offset, encoded + offset, size, deadline);
+        if (!more && waitMs) {
+            held.begin(this, op);
+        }
         gotSize = receive(op, flags, gotOffset, fragment, deadline);
+        held.end();
         offset += size;
         if (more && (flags != (WIRE_RESPONSE | WIRE_ACK) || gotOffset != offset || gotSize)) {
             throw std::runtime_error("invalid fragment acknowledgement");

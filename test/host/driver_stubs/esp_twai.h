@@ -36,6 +36,7 @@ typedef struct {
 } twai_state_change_event_data_t;
 typedef struct {
     bool is_tx_success;
+    const twai_frame_t *done_tx_frame;
 } twai_tx_done_event_data_t;
 typedef union {
     struct {

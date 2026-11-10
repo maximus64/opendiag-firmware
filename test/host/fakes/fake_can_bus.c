@@ -35,8 +35,11 @@ static struct {
     int setup_count;
     int teardown_count;
     bool fail_next_send;
+    int fail_countdown; /* Fail this many sends from now; 0 for none. */
     bool fail_setup;
+    void (*lifecycle_hook)(void);
     int confirmed_send_error;
+    uint32_t tx_end_lag_us; /* How long before the send returns a frame ends. */
 
     staged_t live[MAX_FRAMES]; /* Readable now */
     int live_head, live_count;
@@ -119,6 +122,10 @@ void fake_can_abort_confirmed_send(void) {
 
 void fake_can_fail_next_send(void) { g.fail_next_send = true; }
 
+void fake_can_fail_send_after(int sends) { g.fail_countdown = sends + 1; }
+
+void fake_can_tx_end_lag_us(uint32_t lag_us) { g.tx_end_lag_us = lag_us; }
+
 const struct can_frame *fake_can_sent(int idx) {
     if (idx < 0 || idx >= g.sent_count) {
         return NULL;
@@ -132,6 +139,8 @@ const struct can_frame *fake_can_sent(int idx) {
 
 esp_err_t can_bus_setup(int baud_rate) {
     g.setup_count++;
+    if (g.lifecycle_hook)
+        g.lifecycle_hook();
 
     if (g.fail_setup) {
         return ESP_FAIL;
@@ -145,7 +154,11 @@ esp_err_t can_bus_setup(int baud_rate) {
 
 void fake_can_fail_setup(bool fail) { g.fail_setup = fail; }
 
+void fake_can_on_lifecycle(void (*hook)(void)) { g.lifecycle_hook = hook; }
+
 esp_err_t can_bus_teardown(void) {
+    if (g.lifecycle_hook)
+        g.lifecycle_hook();
     g.up = false;
     g.teardown_count++;
     return ESP_OK;
@@ -162,6 +175,8 @@ int can_send(const struct can_frame *frame) {
         g.fail_next_send = false;
         return -1;
     }
+    if (g.fail_countdown && --g.fail_countdown == 0)
+        return -1;
 
     if (g.sent_count < MAX_FRAMES) {
         g.sent[g.sent_count++] = *frame;
@@ -281,7 +296,31 @@ static int can_ops_controlled(const bus_msg_t *msg, uint32_t flags,
     if (rc)
         return rc;
     rc = can_ops_send(msg, flags);
-    bus_tx_end(control, (uint32_t)esp_timer_get_time());
+    bus_tx_end(control, (uint32_t)esp_timer_get_time() - g.tx_end_lag_us);
+    return rc;
+}
+
+/* One frame after another through the same send, stopping where a frame
+ * fails or the train is cancelled, as the driver's does. */
+static int can_ops_train(const bus_msg_t *msgs, unsigned count,
+                         bus_tx_control_t *control, bus_tx_train_t *train) {
+    train->sent = 0;
+    int rc =
+        bus_tx_admit(control, g.rx_sequence, (uint32_t)esp_timer_get_time());
+    if (rc)
+        return rc;
+    for (unsigned i = 0; i < count; i++) {
+        if (bus_tx_stopped(control)) {
+            rc = BUS_ERR_CANCELLED;
+            break;
+        }
+        rc = can_ops_send(&msgs[i], BUS_TX_WAIT_DONE);
+        if (rc)
+            break;
+        train->ended_us[train->sent++] = (uint32_t)esp_timer_get_time();
+    }
+    if (train->sent)
+        bus_tx_end(control, train->ended_us[train->sent - 1]);
     return rc;
 }
 
@@ -311,11 +350,15 @@ static int can_ops_recv(bus_msg_t *msg, TickType_t wait) {
     return (int)len;
 }
 
+static bus_listener_t listener;
+
 const bus_ops_t can_bus_ops = {
     .name = "CAN",
     .open = can_ops_open,
     .close = can_ops_close,
     .send = can_ops_send,
     .send_controlled = can_ops_controlled,
+    .send_train = can_ops_train,
     .recv = can_ops_recv,
+    .listener = &listener,
 };

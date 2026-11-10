@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
-#include "platform.h"
 #include "posix.h"
+#include "platform.h"
 #include <arpa/inet.h>
 #include <cerrno>
 #include <climits>
@@ -12,6 +12,8 @@
 #include <fstream>
 #include <netinet/tcp.h>
 #include <poll.h>
+#include <pthread.h>
+#include <pwd.h>
 #include <stdexcept>
 #include <strings.h>
 #include <sys/file.h>
@@ -19,6 +21,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <vector>
 
 namespace platform {
 uint32_t milliseconds() {
@@ -75,6 +78,84 @@ std::string moduleDirectory(const void *anchor) {
     char *separator = strrchr(path, '/');
     separator[1] = 0;
     return path;
+}
+
+bool fileExists(const std::string &path) {
+    struct stat info;
+    return stat(path.c_str(), &info) == 0 && S_ISREG(info.st_mode);
+}
+
+std::string absolutePath(const std::string &path) {
+    if (path.empty() || path[0] == '/') {
+        return path;
+    }
+    char directory[PATH_MAX];
+    if (!getcwd(directory, sizeof(directory))) {
+        throw std::runtime_error("Cannot resolve the configuration path");
+    }
+    return std::string(directory) + "/" + path;
+}
+
+bool createDirectories(const std::string &path) {
+    if (path.empty() || path[0] != '/') {
+        return false;
+    }
+    for (size_t end = 1; end <= path.size(); ++end) {
+        if (end < path.size() && path[end] != '/') {
+            continue;
+        }
+        std::string directory = path.substr(0, end);
+        struct stat info;
+        if (mkdir(directory.c_str(), 0700) != 0 && errno != EEXIST) {
+            return false;
+        }
+        if (stat(directory.c_str(), &info) != 0 || !S_ISDIR(info.st_mode)) {
+            return false;
+        }
+    }
+    return access(path.c_str(), W_OK) == 0;
+}
+
+std::string systemConfigPath() {
+#ifdef __APPLE__
+    return "/Library/Application Support/OpenDIAG/opendiag.ini";
+#else
+    return "/etc/opendiag/opendiag.ini";
+#endif
+}
+
+static std::string homeDirectory() {
+    const char *home = std::getenv("HOME");
+    if (home && home[0] == '/') {
+        return home;
+    }
+    long size = sysconf(_SC_GETPW_R_SIZE_MAX);
+    std::vector<char> buffer(size > 0 ? static_cast<size_t>(size) : 16384);
+    passwd entry;
+    passwd *result = nullptr;
+    if (!getpwuid_r(getuid(), &entry, buffer.data(), buffer.size(), &result) && result &&
+        entry.pw_dir && entry.pw_dir[0] == '/') {
+        return entry.pw_dir;
+    }
+    return "";
+}
+
+std::string userLogDirectory() {
+#ifndef __APPLE__
+    const char *state = std::getenv("XDG_STATE_HOME");
+    if (state && state[0] == '/') {
+        return std::string(state) + "/opendiag/";
+    }
+#endif
+    std::string home = homeDirectory();
+    if (home.empty()) {
+        return "";
+    }
+#ifdef __APPLE__
+    return home + "/Library/Logs/OpenDIAG/";
+#else
+    return home + "/.local/state/opendiag/";
+#endif
 }
 
 static std::string trim(const std::string &text) {
@@ -183,6 +264,64 @@ void appendLog(const char *path, const char *line, uint32_t maximumBytes) {
         line += count;
     }
     ::close(file);
+}
+
+Mutex::Mutex()
+    : handle_(new pthread_mutex_t) {
+    pthread_mutex_init(static_cast<pthread_mutex_t *>(handle_), NULL);
+}
+
+Mutex::~Mutex() {
+    pthread_mutex_destroy(static_cast<pthread_mutex_t *>(handle_));
+    delete static_cast<pthread_mutex_t *>(handle_);
+}
+
+void Mutex::lock() {
+    pthread_mutex_lock(static_cast<pthread_mutex_t *>(handle_));
+}
+
+void Mutex::unlock() {
+    pthread_mutex_unlock(static_cast<pthread_mutex_t *>(handle_));
+}
+
+// macOS has no unnamed POSIX semaphores, so count under a condition variable.
+struct SemaphoreState {
+    pthread_mutex_t mutex;
+    pthread_cond_t posted;
+    unsigned count;
+};
+
+Semaphore::Semaphore()
+    : handle_(new SemaphoreState) {
+    SemaphoreState *state = static_cast<SemaphoreState *>(handle_);
+    pthread_mutex_init(&state->mutex, NULL);
+    pthread_cond_init(&state->posted, NULL);
+    state->count = 0;
+}
+
+Semaphore::~Semaphore() {
+    SemaphoreState *state = static_cast<SemaphoreState *>(handle_);
+    pthread_cond_destroy(&state->posted);
+    pthread_mutex_destroy(&state->mutex);
+    delete state;
+}
+
+void Semaphore::post() {
+    SemaphoreState *state = static_cast<SemaphoreState *>(handle_);
+    pthread_mutex_lock(&state->mutex);
+    state->count++;
+    pthread_cond_signal(&state->posted);
+    pthread_mutex_unlock(&state->mutex);
+}
+
+void Semaphore::wait() {
+    SemaphoreState *state = static_cast<SemaphoreState *>(handle_);
+    pthread_mutex_lock(&state->mutex);
+    while (!state->count) {
+        pthread_cond_wait(&state->posted, &state->mutex);
+    }
+    state->count--;
+    pthread_mutex_unlock(&state->mutex);
 }
 
 Lease::Lease()

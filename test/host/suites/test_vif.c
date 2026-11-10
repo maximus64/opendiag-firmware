@@ -35,7 +35,7 @@
 #include "can_frame.h"
 #include "vif.h"
 
-#define OBD_PIN_HS 6
+#define OBD_PIN_HS 13
 #define OBD_PIN_HS_OTHER 9
 #define OBD_PIN_LS 15
 
@@ -736,10 +736,10 @@ TEST(one_high_side_pin_at_a_time_whoever_asks) {
     /* SAE J2534 allows one high side driver, so both the holder's second pin
      * and the other owner's are refused. */
     TEST_ASSERT_EQUAL_INT(
-        ESP_ERR_INVALID_STATE,
+        VIF_ERR_VOLTAGE_IN_USE,
         vif_pin_set(VIF_OWNER_LINK, OBD_PIN_HS_OTHER, VIF_PIN_VOLTAGE, 12000));
     TEST_ASSERT_EQUAL_INT(
-        ESP_ERR_INVALID_STATE,
+        VIF_ERR_VOLTAGE_IN_USE,
         vif_pin_set(VIF_OWNER_SHELL, OBD_PIN_HS_OTHER, VIF_PIN_VOLTAGE, 12000));
     TEST_ASSERT_EQUAL_INT(-1, fake_board_hs_state(OBD_PIN_HS_OTHER));
 }
@@ -769,6 +769,65 @@ TEST(releasing_a_pin_nobody_drives_is_accepted) {
     TEST_ASSERT_EQUAL_INT(
         ESP_OK, vif_pin_set(VIF_OWNER_LINK, OBD_PIN_HS, VIF_PIN_OFF, 0));
     TEST_ASSERT_EQUAL_INT(-1, fake_board_hs_state(OBD_PIN_HS));
+}
+
+TEST(can_and_programming_voltage_exclude_each_other_in_both_orders) {
+    const int pins[] = {6, 14};
+    for (unsigned bus_owner = 0; bus_owner < VIF_OWNER_COUNT; bus_owner++) {
+        for (unsigned pin_owner = 0; pin_owner < VIF_OWNER_COUNT; pin_owner++) {
+            for (unsigned i = 0; i < 2; i++) {
+                TEST_ASSERT_EQUAL_INT(
+                    ESP_OK,
+                    vif_pin_set(pin_owner, pins[i], VIF_PIN_VOLTAGE, 12000));
+                TEST_ASSERT_EQUAL_INT(
+                    ESP_ERR_INVALID_STATE,
+                    vif_bus_open(bus_owner, VIF_BUS_CAN, &can500));
+                TEST_ASSERT_EQUAL_INT(0, fake_can_setup_count());
+                TEST_ASSERT_EQUAL_INT(1, fake_board_hs_state(pins[i]));
+                TEST_ASSERT_EQUAL_INT(ESP_OK, vif_pin_release_all(pin_owner));
+            }
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+                          vif_bus_open(VIF_OWNER_LINK, VIF_BUS_CAN, &can500));
+    for (unsigned owner = 0; owner < VIF_OWNER_COUNT; owner++) {
+        for (unsigned i = 0; i < 2; i++) {
+            TEST_ASSERT_EQUAL_INT(
+                ESP_ERR_INVALID_STATE,
+                vif_pin_set(owner, pins[i], VIF_PIN_VOLTAGE, 12000));
+            TEST_ASSERT_EQUAL_INT(ESP_OK,
+                                  vif_pin_set(owner, pins[i], VIF_PIN_OFF, 0));
+        }
+    }
+    TEST_ASSERT_TRUE(vif_bus_is_open(VIF_OWNER_LINK, VIF_BUS_CAN));
+    TEST_ASSERT_EQUAL_INT(
+        ESP_OK, vif_pin_set(VIF_OWNER_SHELL, 13, VIF_PIN_VOLTAGE, 12000));
+}
+
+static void probe_can_pin_reservation(void) {
+    TEST_ASSERT_EQUAL_INT(0, idf_stub_lock_balance());
+    TEST_ASSERT_FALSE(vif_bus_is_open(VIF_OWNER_LINK, VIF_BUS_CAN));
+    for (unsigned owner = 0; owner < VIF_OWNER_COUNT; owner++) {
+        TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_STATE,
+                              vif_pin_set(owner, 6, VIF_PIN_VOLTAGE, 12000));
+        TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_STATE,
+                              vif_pin_set(owner, 14, VIF_PIN_VOLTAGE, 12000));
+    }
+}
+
+TEST(can_pin_reservation_covers_start_restart_and_teardown) {
+    fake_can_on_lifecycle(probe_can_pin_reservation);
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+                          vif_bus_open(VIF_OWNER_LINK, VIF_BUS_CAN, &can500));
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+                          vif_bus_open(VIF_OWNER_LINK, VIF_BUS_CAN, &can500));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, vif_bus_close(VIF_OWNER_LINK, VIF_BUS_CAN));
+    fake_can_fail_setup(true);
+    TEST_ASSERT_EQUAL_INT(ESP_FAIL,
+                          vif_bus_open(VIF_OWNER_LINK, VIF_BUS_CAN, &can500));
+    TEST_ASSERT_EQUAL_INT(
+        ESP_OK, vif_pin_set(VIF_OWNER_SHELL, 6, VIF_PIN_VOLTAGE, 12000));
+    fake_can_on_lifecycle(NULL);
 }
 
 TEST(the_low_side_pin_grounds_and_releases_independently) {

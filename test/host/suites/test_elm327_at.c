@@ -513,6 +513,22 @@ TEST(at_progv_drives_a_high_side_pin) {
     TEST_ASSERT_EQUAL_INT(1, fake_board_hs_state(6));
 }
 
+TEST(at_progv_and_can_refuse_conflicting_pins_in_both_orders) {
+    elm_echo_off();
+    elm_ok("ATSP6\r");
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATPROGV600004E20\r"));
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATPROGVE00004E20\r"));
+    elm_ok("ATPROGVD00004E20\r");
+    elm_ok("ATPROGVDFFFFFFFF\r");
+    elm_ok("ATPC\r");
+    elm_ok("ATPROGVE00004E20\r");
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATSP6\r"));
+    TEST_ASSERT_FALSE(fake_can_is_up());
+    TEST_ASSERT_EQUAL_INT(1, fake_board_hs_state(14));
+    elm_ok("ATPROGVEFFFFFFFF\r");
+    elm_ok("ATSP6\r");
+}
+
 TEST(at_progv_switches_a_high_side_pin_back_off) {
     elm_echo_off();
     elm_ok("ATPROGV6000003E8\r");

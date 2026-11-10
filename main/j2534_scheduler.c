@@ -37,6 +37,20 @@ j2534_schedule_job_t *j2534_schedule_next(j2534_scheduler_t *scheduler,
     return next;
 }
 
+bool j2534_schedule_next_due(const j2534_scheduler_t *scheduler,
+                             uint32_t *due_us) {
+    bool found = false;
+    for (unsigned i = 0; i < 2 * J2534_SCHEDULE_SLOTS; i++) {
+        const j2534_schedule_job_t *job = &scheduler->jobs[i];
+        if (!job->active || job->pending)
+            continue;
+        if (!found || (int32_t)(job->due_us - *due_us) < 0)
+            *due_us = job->due_us;
+        found = true;
+    }
+    return found;
+}
+
 static bool matches(const j2534_schedule_job_t *job, const uint8_t *data,
                     size_t len, uint32_t flags) {
     if (len < job->match_len || flags != job->match_flags)
@@ -67,14 +81,18 @@ void j2534_schedule_receive(j2534_scheduler_t *scheduler, const uint8_t *data,
     }
 }
 
-void j2534_schedule_expire(j2534_scheduler_t *scheduler, uint32_t now_us) {
+unsigned j2534_schedule_expire(j2534_scheduler_t *scheduler, uint32_t now_us) {
+    unsigned expired = 0;
     for (unsigned i = J2534_SCHEDULE_SLOTS; i < 2 * J2534_SCHEDULE_SLOTS; i++) {
         j2534_schedule_job_t *job = &scheduler->jobs[i];
         if (job->active && job->kind == J2534_SCHEDULE_WHILE && job->sent &&
             (!job->pending || job->transmission_ended) && !job->matched &&
-            at_or_after(now_us, job->due_us))
+            at_or_after(now_us, job->due_us)) {
             job->active = false;
+            expired++;
+        }
     }
+    return expired;
 }
 
 void j2534_schedule_transmitted(j2534_schedule_job_t *job, uint32_t started_us,

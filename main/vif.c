@@ -6,6 +6,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "board.h"
 #include "bus_tx.h"
 #include "can_bus.h"
@@ -27,6 +28,9 @@
  *  CONFIG_FREERTOS_HZ is 1000, so this really is 2 ms and not a rounding
  *  error - see wait_ticks() for what happens if that ever changes. */
 #define VIF_POLL_WAIT_MS 2
+/* How often a front-end that reports its deadlines is looked at anyway, in
+ * case one went unreported. vif counts the times that found work. */
+#define VIF_BACKSTOP_MS 100
 
 /** ms → ticks, floor at 1 to prevent zero-tick busy loops. */
 static inline TickType_t wait_ticks(uint32_t ms) {
@@ -60,6 +64,10 @@ static struct {
     /* The one thread allowed inside each owner's drivers. NULL until the link
      * task starts and until the shell says which task it is. */
     TaskHandle_t task[VIF_OWNER_COUNT];
+
+    /* Where each owner wants news from the buses it holds, or NULL for one
+     * that blocks in receive instead. Bound into the driver with the claim. */
+    TaskHandle_t listener[VIF_OWNER_COUNT];
 
     /* Both consumed by the owning thread: recover_req from the front panel
      * button, release_req from anybody who asked for the claims to go while
@@ -104,11 +112,20 @@ static struct {
 
         /* What the link goes back to when its client detaches. */
         const vif_frontend_t *fe_default;
+
+        /* Link task only. Polls of a next_wake front-end that only the
+         * backstop prompted, and how many of those found work to do. */
+        uint32_t backstop_polls;
+        uint32_t backstop_work;
     } link;
 } g;
 
 #define LOCK() xSemaphoreTake(g.lock, portMAX_DELAY)
 #define UNLOCK() xSemaphoreGive(g.lock)
+
+/* Wakes the link task for a front-end deadline that falls between ticks.
+ * Created once and kept across vif_init(). */
+static esp_timer_handle_t link_timer;
 
 static bool vif_owner_service(vif_owner_t owner);
 
@@ -199,12 +216,16 @@ const char *vif_bus_name(vif_bus_t bus) {
     }
 }
 
-static esp_err_t bus_driver_up(vif_bus_t bus, const vif_bus_cfg_t *cfg) {
+static esp_err_t bus_driver_up(vif_owner_t owner, vif_bus_t bus,
+                               const vif_bus_cfg_t *cfg) {
     const bus_ops_t *ops = bus_for(bus);
 
     if (!ops) {
         return ESP_ERR_INVALID_ARG;
     }
+
+    /* Before open: the driver may have news the moment it is up. */
+    bus_listen(ops->listener, g.listener[owner]);
 
     /* A bus is brought up here but not initialised. Selecting a protocol
      * and establishing a session are two different things on K-Line - the
@@ -225,7 +246,11 @@ static esp_err_t bus_driver_down(vif_bus_t bus) {
     if (rc != ESP_OK)
         return rc;
     g.claim[group].tx_worker = NULL;
-    return ops->close();
+    rc = ops->close();
+    /* A driver that failed to close is still claimed, and still heard. */
+    if (rc == ESP_OK)
+        bus_listen(ops->listener, NULL);
+    return rc;
 }
 
 /* ------------------------------------------------------------------ *
@@ -418,6 +443,55 @@ static bool link_retry_pending(void) {
            g.recover_req[VIF_OWNER_LINK];
 }
 
+/** @brief Cut the link task's current sleep short. Any task may call it. */
+static void link_wake(void) {
+    TaskHandle_t task = g.task[VIF_OWNER_LINK];
+    if (task)
+        xTaskNotifyGive(task);
+}
+
+static void link_rx_hook(comm_port_id_t port) {
+    if (port == g.link.port)
+        link_wake();
+}
+
+static void link_timer_fired(void *arg) {
+    (void)arg;
+    link_wake();
+}
+
+/**
+ * @brief Sleep until input, a bus event, a control request, the front-end's
+ * next deadline or @p ticks, whichever comes first.
+ *
+ * Every source notifies the task, and a notification given while it was
+ * awake is still pending here, so nothing that arrived during the last pass
+ * can be slept through.
+ *
+ * @return Whether only @p ticks running out ended the sleep.
+ */
+static bool link_sleep(const vif_frontend_t *fe, TickType_t ticks) {
+    uint32_t due_us;
+    bool due = false;
+    bool timed = false;
+
+    if (fe && fe->next_wake && fe->next_wake(&due_us)) {
+        int32_t left = (int32_t)(due_us - (uint32_t)esp_timer_get_time());
+        if (left <= 0)
+            return false;
+        due = true;
+        /* A later deadline is looked at again when this wait ends. */
+        if ((uint64_t)left < (uint64_t)ticks * portTICK_PERIOD_MS * 1000u)
+            timed = esp_timer_start_once(link_timer, (uint64_t)left) == ESP_OK;
+    }
+    bool notified = ulTaskNotifyTake(pdTRUE, ticks) != 0;
+    if (timed)
+        esp_timer_stop(link_timer);
+    /* A deadline that came due with the timeout is a reason of its own. */
+    return !notified &&
+           !(due && (int32_t)(due_us - (uint32_t)esp_timer_get_time()) <= 0);
+}
+
 static void link_task(void *param) {
     uint8_t buf[64];
 
@@ -426,7 +500,6 @@ static void link_task(void *param) {
     for (;;) {
         const vif_frontend_t *fe;
         comm_port_id_t port;
-        TickType_t wait;
         size_t n;
 
         vif_link_service();
@@ -434,24 +507,31 @@ static void link_task(void *param) {
         fe = g.link.fe;
         port = g.link.port;
 
-        /* Nothing to read and nobody to answer: a link between clients. The
-         * read below would not block on a port that does not exist, so the
-         * wait has to happen here instead. */
+        /* Nothing to read and nobody to answer: a link between clients, woken
+         * by the next port or front-end change. */
         if (!fe || port == COMM_INVALID_PORT_ID) {
-            vTaskDelay(wait_ticks(VIF_IDLE_WAIT_MS));
+            link_sleep(NULL, wait_ticks(VIF_IDLE_WAIT_MS));
             continue;
         }
 
         /* A front-end with unsolicited output has to come round often enough
-         * to drain the bus; one without can sleep until a byte shows up, bar
-         * the wakeup that lets a front-end switch land. */
+         * to drain the bus, unless it reports its own deadlines; one without
+         * can sleep until a byte shows up, bar the wakeup that lets a
+         * front-end switch land. Input, bus events and the front-end's own
+         * deadline end the wait early. */
         uint32_t interval = VIF_IDLE_WAIT_MS;
-        if (fe->poll)
+        if (fe->poll && fe->next_wake)
+            interval = VIF_BACKSTOP_MS;
+        else if (fe->poll)
             interval =
                 fe->poll_interval_ms ? fe->poll_interval_ms : VIF_POLL_WAIT_MS;
-        wait = wait_ticks(interval);
 
-        n = comm_port_read(port, buf, sizeof(buf), wait);
+        bool backstop = false;
+        n = comm_port_read(port, buf, sizeof(buf), 0);
+        if (!n) {
+            backstop = link_sleep(fe, wait_ticks(interval)) && fe->next_wake;
+            n = comm_port_read(port, buf, sizeof(buf), 0);
+        }
         if (n && fe->feed) {
             fe->feed(buf, n);
         }
@@ -460,7 +540,13 @@ static void link_task(void *param) {
             continue;
         }
         if (fe->poll) {
+            uint32_t before = fe->progress ? fe->progress() : 0;
             fe->poll();
+            if (backstop && !n) {
+                g.link.backstop_polls++;
+                if (fe->progress && fe->progress() != before)
+                    g.link.backstop_work++;
+            }
         }
     }
 }
@@ -478,6 +564,16 @@ esp_err_t vif_link_start(const vif_frontend_t *default_fe) {
     if (g.task[VIF_OWNER_LINK]) {
         return ESP_OK;
     }
+    if (!link_timer) {
+        const esp_timer_create_args_t args = {
+            .callback = link_timer_fired,
+            .name = "vif_link",
+        };
+        if (esp_timer_create(&args, &link_timer) != ESP_OK) {
+            ESP_LOGE(TAG, "failed to create the link timer");
+            return ESP_FAIL;
+        }
+    }
 
     /* Ahead of the task, so the default stands even if it fails to start and
      * the shell is left asking what the link would fall back to. */
@@ -491,6 +587,8 @@ esp_err_t vif_link_start(const vif_frontend_t *default_fe) {
     }
 
     g.task[VIF_OWNER_LINK] = task;
+    g.listener[VIF_OWNER_LINK] = task;
+    comm_iface_set_rx_hook(link_rx_hook);
     return ESP_OK;
 }
 
@@ -505,6 +603,7 @@ void vif_link_set_frontend(const vif_frontend_t *fe) {
     g.link.fe_next = fe;
     g.link.fe_switch = true;
     UNLOCK();
+    link_wake();
 }
 
 comm_port_id_t vif_link_port(void) { return g.link.port; }
@@ -513,6 +612,7 @@ void vif_link_set_port(comm_port_id_t port) {
     LOCK();
     g.link.port = port;
     UNLOCK();
+    link_wake();
 
     if (port == COMM_INVALID_PORT_ID) {
         ESP_LOGI(TAG, "link: transport detached");
@@ -594,6 +694,7 @@ void vif_recover_all(void) {
         g.recover_req[i] = true;
     }
     UNLOCK();
+    link_wake();
 }
 
 /**
@@ -678,6 +779,13 @@ esp_err_t vif_bus_open(vif_owner_t owner, vif_bus_t bus,
 
     LOCK();
 
+    /* Check and reserve together: pin control also takes this lock. */
+    if (bus == VIF_BUS_CAN &&
+        (g.hs_pin == HS_OBD_PIN_6 || g.hs_pin == HS_OBD_PIN_14)) {
+        UNLOCK();
+        return ESP_ERR_INVALID_STATE;
+    }
+
     if (g.claim[grp].bus != VIF_BUS_NONE && g.claim[grp].owner != owner) {
         vif_bus_t held = g.claim[grp].bus;
         vif_owner_t by = g.claim[grp].owner;
@@ -710,7 +818,7 @@ esp_err_t vif_bus_open(vif_owner_t owner, vif_bus_t bus,
     g.claim[grp].owner = owner;
     UNLOCK();
 
-    err = bus_driver_up(bus, cfg);
+    err = bus_driver_up(owner, bus, cfg);
     esp_err_t cleanup = err == ESP_OK ? ESP_OK : bus_driver_down(bus);
 
     LOCK();
@@ -779,11 +887,14 @@ esp_err_t vif_bus_release_all(vif_owner_t owner) {
     }
 
     if (!on_owner_thread(owner)) {
-        /* Prompt rather than instant: the owner acts when its receive times
-         * out. That is the price of never freeing a driver underneath it. */
+        /* Prompt rather than instant: the owner acts on its next pass, which
+         * the link is woken for. That is the price of never freeing a driver
+         * underneath it. */
         LOCK();
         g.release_req[owner] = true;
         UNLOCK();
+        if (owner == VIF_OWNER_LINK)
+            link_wake();
         return ESP_OK;
     }
 
@@ -895,6 +1006,24 @@ int vif_bus_submit(vif_owner_t owner, vif_bus_t bus, const bus_msg_t *msg,
     }
     return bus_tx_worker_submit(g.claim[group].tx_worker, msg, flags,
                                 rx_sequence);
+}
+
+int vif_bus_submit_train(vif_owner_t owner, vif_bus_t bus,
+                         const bus_msg_t *msgs, unsigned count, uint32_t flags,
+                         uint32_t rx_sequence) {
+    const bus_ops_t *ops = bus_for(bus);
+    if (!ops || !bus_owned_by(owner, bus))
+        return VIF_ERR_NO_CLAIM;
+    if (!ops->send_train)
+        return BUS_ERR_UNSUPPORTED;
+    int group = bus_group(bus);
+    if (!g.claim[group].tx_worker) {
+        g.claim[group].tx_worker = bus_tx_worker_create(ops);
+        if (!g.claim[group].tx_worker)
+            return BUS_ERR_NO_SPACE;
+    }
+    return bus_tx_worker_submit_train(g.claim[group].tx_worker, msgs, count,
+                                      flags, rx_sequence);
 }
 
 bool vif_bus_tx_poll(vif_owner_t owner, vif_bus_t bus,
@@ -1072,12 +1201,20 @@ esp_err_t vif_pin_set(vif_owner_t owner, int obd_pin, vif_pin_mode_t m,
         break;
 
     case VIF_PIN_VOLTAGE:
+        if ((obd_pin == HS_OBD_PIN_6 || obd_pin == HS_OBD_PIN_14) &&
+            g.claim[VIF_RES_CAN].bus != VIF_BUS_NONE) {
+            UNLOCK();
+            return ESP_ERR_INVALID_STATE;
+        }
         if (g.ls_pin == obd_pin) {
             UNLOCK();
             return ESP_ERR_INVALID_STATE; /* already pulled to ground */
         }
-        if (g.hs_pin != -1 && (g.hs_pin != obd_pin || g.hs_owner != owner)) {
-            /* SAE J2534 allows one high side driver at a time. */
+        if (g.hs_pin != -1 && g.hs_pin != obd_pin) {
+            UNLOCK();
+            return VIF_ERR_VOLTAGE_IN_USE;
+        }
+        if (g.hs_pin == obd_pin && g.hs_owner != owner) {
             UNLOCK();
             return ESP_ERR_INVALID_STATE;
         }
@@ -1255,6 +1392,7 @@ esp_err_t vif_init(void) {
 
     LOCK();
     memset(g.task, 0, sizeof(g.task));
+    memset(g.listener, 0, sizeof(g.listener));
     memset((void *)g.recover_req, 0, sizeof(g.recover_req));
     memset((void *)g.release_req, 0, sizeof(g.release_req));
     memset(g.claim, 0, sizeof(g.claim));
@@ -1328,6 +1466,8 @@ void vif_print_debug_info(void) {
     }
     fe = g.link.fe ? g.link.fe->name : "-";
     port = g.link.port;
+    uint32_t backstop_polls = g.link.backstop_polls;
+    uint32_t backstop_work = g.link.backstop_work;
     UNLOCK();
 
     if (port == COMM_INVALID_PORT_ID) {
@@ -1338,6 +1478,9 @@ void vif_print_debug_info(void) {
 
     printf("Vehicle interface\n");
     printf("  link front-end %s on port %s\n", fe, port_txt);
+    /* Work found by a backstop poll is an event or deadline gone unreported. */
+    printf("  backstop polls %u, found work %u\n", (unsigned)backstop_polls,
+           (unsigned)backstop_work);
 
     for (int i = 0; i < VIF_BUS_GROUPS; i++) {
         if (claim[i].bus == VIF_BUS_NONE) {

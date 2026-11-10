@@ -222,6 +222,81 @@ TEST(transmit_stmin_is_measured_from_completion_and_across_blocks) {
     TEST_ASSERT_EQUAL_INT(ISOTP_FRAME, isotp_tx_next(&tx, &frame, 1800));
 }
 
+TEST(zero_stmin_queues_consecutive_frames_behind_unconfirmed_ones) {
+    start_tx(40, 0);
+    TEST_ASSERT_EQUAL_INT(ISOTP_FRAME, flow(0, 0, 0, 100));
+    TEST_ASSERT_EQUAL_INT(ISOTP_FRAME, isotp_tx_next(&tx, &frame, 100));
+    TEST_ASSERT_EQUAL_INT(0x21, frame.data[0]);
+    for (unsigned sequence = 2; sequence <= 5; sequence++) {
+        TEST_ASSERT_EQUAL_INT(ISOTP_FRAME, isotp_tx_more(&tx, &frame, 101));
+        TEST_ASSERT_EQUAL_INT(0x20 | sequence, frame.data[0]);
+    }
+    TEST_ASSERT_EQUAL_INT(39, frame.data[6]);
+    TEST_ASSERT_EQUAL_INT(ISOTP_IGNORED, isotp_tx_more(&tx, &frame, 102));
+    TEST_ASSERT_EQUAL_INT(ISOTP_IGNORED, isotp_tx_next(&tx, &frame, 102));
+    for (unsigned i = 0; i < 4; i++)
+        TEST_ASSERT_EQUAL_INT(0, isotp_tx_confirm(&tx, true, 200 + i));
+    TEST_ASSERT_EQUAL_INT(ISOTP_COMPLETE, isotp_tx_confirm(&tx, true, 204));
+    TEST_ASSERT_EQUAL_INT(ISOTP_ERR_ARGUMENT, isotp_tx_confirm(&tx, true, 205));
+}
+
+TEST(queued_frames_stop_at_the_block_size) {
+    start_tx(40, 0);
+    TEST_ASSERT_EQUAL_INT(ISOTP_FRAME, flow(0, 2, 0, 100));
+    TEST_ASSERT_EQUAL_INT(ISOTP_FRAME, isotp_tx_next(&tx, &frame, 100));
+    TEST_ASSERT_EQUAL_INT(ISOTP_FRAME, isotp_tx_more(&tx, &frame, 100));
+    TEST_ASSERT_EQUAL_INT(ISOTP_IGNORED, isotp_tx_more(&tx, &frame, 100));
+    TEST_ASSERT_EQUAL_INT(0, isotp_tx_confirm(&tx, true, 200));
+    TEST_ASSERT_EQUAL_INT(ISOTP_IGNORED, isotp_tx_more(&tx, &frame, 200));
+    TEST_ASSERT_EQUAL_INT(0, isotp_tx_confirm(&tx, true, 300));
+    TEST_ASSERT_EQUAL_INT(ISOTP_IGNORED, isotp_tx_next(&tx, &frame, 300));
+    TEST_ASSERT_EQUAL_INT(ISOTP_FRAME, flow(0, 2, 0, 400));
+    TEST_ASSERT_EQUAL_INT(ISOTP_FRAME, isotp_tx_next(&tx, &frame, 400));
+    TEST_ASSERT_EQUAL_INT(0x23, frame.data[0]);
+    TEST_ASSERT_EQUAL_INT(ISOTP_FRAME, isotp_tx_more(&tx, &frame, 400));
+    TEST_ASSERT_EQUAL_INT(0x24, frame.data[0]);
+}
+
+TEST(a_first_frame_or_nonzero_stmin_is_never_queued_behind) {
+    TEST_ASSERT_EQUAL_INT(0, isotp_tx_start(&tx, payload, 40, 0));
+    TEST_ASSERT_EQUAL_INT(ISOTP_FRAME, isotp_tx_next(&tx, &frame, 0));
+    TEST_ASSERT_EQUAL_INT(ISOTP_IGNORED, isotp_tx_more(&tx, &frame, 0));
+    TEST_ASSERT_EQUAL_INT(0, isotp_tx_confirm(&tx, true, 0));
+    for (unsigned i = 0; i < 3; i++) {
+        static const uint8_t stmin[] = {0x01, 0xf1, 0x80};
+        TEST_ASSERT_EQUAL_INT(0, isotp_tx_init(&tx, &config));
+        start_tx(40, 1000 * i);
+        TEST_ASSERT_EQUAL_INT(ISOTP_FRAME, flow(0, 0, stmin[i], 1000 * i));
+        TEST_ASSERT_EQUAL_INT(ISOTP_FRAME,
+                              isotp_tx_next(&tx, &frame, 1000 * i));
+        TEST_ASSERT_EQUAL_INT(ISOTP_IGNORED,
+                              isotp_tx_more(&tx, &frame, 1000 * i));
+        TEST_ASSERT_EQUAL_INT(0, isotp_tx_confirm(&tx, true, 1000 * i));
+    }
+}
+
+TEST(a_failed_queued_frame_ends_the_transmission) {
+    start_tx(40, 0);
+    TEST_ASSERT_EQUAL_INT(ISOTP_FRAME, flow(0, 0, 0, 100));
+    TEST_ASSERT_EQUAL_INT(ISOTP_FRAME, isotp_tx_next(&tx, &frame, 100));
+    TEST_ASSERT_EQUAL_INT(ISOTP_FRAME, isotp_tx_more(&tx, &frame, 100));
+    TEST_ASSERT_EQUAL_INT(ISOTP_FRAME, isotp_tx_more(&tx, &frame, 100));
+    TEST_ASSERT_EQUAL_INT(0, isotp_tx_confirm(&tx, true, 200));
+    TEST_ASSERT_EQUAL_INT(ISOTP_ERR_SEND, isotp_tx_confirm(&tx, false, 300));
+    TEST_ASSERT_EQUAL_INT(ISOTP_ERR_ARGUMENT, isotp_tx_confirm(&tx, true, 400));
+    TEST_ASSERT_EQUAL_INT(ISOTP_IGNORED, isotp_tx_more(&tx, &frame, 400));
+}
+
+TEST(queued_frames_still_time_out) {
+    start_tx(40, 0);
+    TEST_ASSERT_EQUAL_INT(ISOTP_FRAME, flow(0, 0, 0, 100));
+    TEST_ASSERT_EQUAL_INT(ISOTP_FRAME, isotp_tx_next(&tx, &frame, 100));
+    TEST_ASSERT_EQUAL_INT(ISOTP_FRAME, isotp_tx_more(&tx, &frame, 100));
+    TEST_ASSERT_EQUAL_INT(0, isotp_tx_confirm(&tx, true, 200));
+    TEST_ASSERT_EQUAL_INT(ISOTP_ERR_TIMEOUT_A,
+                          isotp_tx_check_timeout(&tx, 1000101));
+}
+
 TEST(all_stmin_encodings_use_specified_units_or_reserved_fallback) {
     for (unsigned i = 0; i <= 255; i++) {
         unsigned expected = i <= 0x7f                  ? i * 1000

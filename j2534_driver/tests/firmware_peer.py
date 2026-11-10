@@ -5,6 +5,9 @@ import threading
 
 import mock_peer
 
+# j2534_core_request() result for a request answered later (J2534_CORE_HELD).
+HELD = c.c_size_t(-1).value
+
 
 class Firmware:
     def __init__(self, path):
@@ -18,6 +21,9 @@ class Firmware:
             "contract_sent_count": (c.c_int, [c.c_uint]),
             "contract_sent": (c.c_int, [c.c_uint, c.c_uint, c.c_void_p, c.c_size_t]),
             "j2534_core_request": (c.c_size_t, [c.c_uint8, c.c_void_p, c.c_size_t, c.c_void_p]),
+            "j2534_core_take_held": (c.c_bool, [c.c_void_p, c.POINTER(c.c_size_t)]),
+            "j2534_core_next_wake": (c.c_bool, [c.POINTER(c.c_uint32)]),
+            "esp_timer_get_time": (c.c_int64, []),
             "j2534_core_poll": (None, []),
             "fake_clock_advance_ms": (None, [c.c_uint32]),
             "fake_bus_send_duration": (None, [c.c_int, c.c_uint32]),
@@ -42,9 +48,28 @@ class Firmware:
             if self.auto_poll:
                 self.core.j2534_core_poll()
             size = self.core.j2534_core_request(field.number - 1, data, len(data), output)
-            if self.auto_poll:
+            if size == HELD:
+                size = self._answer_held(output)
+            elif self.auto_poll:
                 self.core.j2534_core_poll()
         return mock_peer.pb.Response.FromString(output.raw[:size])
+
+    def _answer_held(self, output):
+        """Run the link task's loop for a request the core is holding.
+
+        The caller is blocked in the driver, so nothing can arrive: time moves
+        to each deadline the core reports until the request is answered."""
+        size = c.c_size_t()
+        due = c.c_uint32()
+        while True:
+            self.core.j2534_core_poll()
+            if self.core.j2534_core_take_held(output, c.byref(size)):
+                return size.value
+            if not self.core.j2534_core_next_wake(c.byref(due)):
+                raise RuntimeError("held request with no deadline")
+            now = self.core.esp_timer_get_time() & 0xffffffff
+            left_us = (due.value - now) & 0xffffffff
+            self.core.fake_clock_advance_ms(max(1, -(-left_us // 1000)))
 
     def poll(self):
         with self.lock:

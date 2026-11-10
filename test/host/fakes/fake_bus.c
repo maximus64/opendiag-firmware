@@ -603,6 +603,8 @@ static void fake_reset_stats(fake_bus_id_t id) {
     static void prefix##_stats(bus_stats_t *o) { fake_get_stats(id, o); }      \
     static void prefix##_clear(void) { fake_reset_stats(id); }
 
+static bus_listener_t fk_kline_listener, fk_pwm_listener, fk_vpw_listener;
+
 FAKE_BUS_VTABLE(fk_kline, FAKE_BUS_KLINE, "K-Line")
 FAKE_BUS_VTABLE(fk_pwm, FAKE_BUS_J1850_PWM, "J1850 PWM")
 FAKE_BUS_VTABLE(fk_vpw, FAKE_BUS_J1850_VPW, "J1850 VPW")
@@ -619,6 +621,7 @@ const bus_ops_t kline_bus_ops = {
     .ioctl = fake_kline_ioctl,
     .get_stats = fk_kline_stats,
     .reset_stats = fk_kline_clear,
+    .listener = &fk_kline_listener,
 };
 
 const bus_ops_t j1850_pwm_bus_ops = {
@@ -633,6 +636,7 @@ const bus_ops_t j1850_pwm_bus_ops = {
     .ioctl = NULL,
     .get_stats = fk_pwm_stats,
     .reset_stats = fk_pwm_clear,
+    .listener = &fk_pwm_listener,
 };
 
 const bus_ops_t j1850_vpw_bus_ops = {
@@ -647,6 +651,7 @@ const bus_ops_t j1850_vpw_bus_ops = {
     .ioctl = NULL,
     .get_stats = fk_vpw_stats,
     .reset_stats = fk_vpw_clear,
+    .listener = &fk_vpw_listener,
 };
 
 const bus_init_t *fake_bus_kline_last_init(void) { return &g_init_request; }

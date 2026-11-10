@@ -2,6 +2,8 @@
 #include "version.h"
 #include "resource.h"
 
+1 RT_MANIFEST "config/config.manifest"
+
 IDD_CONFIG DIALOGEX 0, 0, 380, 317
 STYLE DS_SETFONT | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX
 CAPTION "OpenDIAG Adapter Configuration"

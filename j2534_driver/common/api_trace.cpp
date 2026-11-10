@@ -21,14 +21,14 @@ ApiTrace::ApiTrace(const void *anchor,
       outputCount_(0) {
     platform::ErrorPreserver preserve;
     try {
-        std::string ini = platform::configPath(anchor);
+        std::string ini = platform::configPath();
         if (platform::readNumber(ini, "logging", "Enabled", 0)) {
             unsigned maximumKB = platform::readNumber(ini, "logging", "MaxFileKB", 4096);
             maximumBytes_ = std::max(64U, std::min(65536U, maximumKB)) * 1024;
             int count = platform::format(path_,
                                          sizeof(path_),
                                          "%sopendiag-%s-%u.log",
-                                         platform::moduleDirectory(anchor).c_str(),
+                                         platform::logDirectory(anchor).c_str(),
                                          api,
                                          static_cast<unsigned>(platform::processId()));
             if (count >= 0 && static_cast<size_t>(count) + 2 < sizeof(path_)) {

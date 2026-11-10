@@ -198,6 +198,29 @@ static void selfTest(Api &api, const char *name) {
                 STATUS_NOERROR,
                 "Programming voltage off");
     check(millivolts == 0, "Inactive programming voltage must report zero");
+    pin = 13;
+    api.require(api.voltage(session.id, resource, 12000), STATUS_NOERROR, "Set programming voltage");
+    pin = 6;
+    api.require(api.voltage(session.id, resource, PIN_OFF), STATUS_NOERROR, "Release an unused pin");
+    api.require(api.ioctl(session.id, READ_PROG_VOLTAGE, NULL, &millivolts),
+                STATUS_NOERROR,
+                "Read voltage after releasing another pin");
+    check(millivolts != 0, "Releasing another pin must preserve programming voltage state");
+    pin = 13;
+    api.require(api.voltage(session.id, resource, PIN_OFF), STATUS_NOERROR, "Release voltage pin");
+    api.require(api.ioctl(session.id, READ_PROG_VOLTAGE, NULL, &millivolts),
+                STATUS_NOERROR,
+                "Read voltage after releasing the active pin");
+    check(millivolts == 0, "Releasing the active pin clears programming voltage state");
+    J2534_ULONG pins[] = {6, 14, 13};
+    J2534_ULONG untouched = 0x12345678;
+    for (J2534_ULONG resources : {0U, 3U}) {
+        RESOURCE_STRUCT invalid = {J1962_CONNECTOR, resources, pins};
+        api.require(api.connect(session.id, CAN, 0, 500000, invalid, &untouched),
+                    ERR_RESOURCE_CONFLICT,
+                    "Reject invalid resource count");
+        check(untouched == 0x12345678, "Failed connect preserves the caller's channel output");
+    }
     J2534_ULONG physical = connectCan(api, session.id);
     // Empty reads and Select must honor the caller timeout.
     Message received;

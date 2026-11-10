@@ -22,9 +22,8 @@ static bool registryText(const char *key, const char *name, std::string &result)
     return !result.empty();
 }
 
-// The installed DLL always reads opendiag.ini from its own folder, so the registered
-// FunctionLibrary is the only authority on which file the driver actually uses. Anchoring
-// here keeps this utility correct wherever it is started from.
+// The registered FunctionLibrary locates the driver for connection tests,
+// regardless of where this utility is started.
 std::string installDirectory() {
     static const char *const keys[] = {
         "SOFTWARE\\PassThruSupport.05.00\\OpenDIAG - OpenDIAG",
@@ -187,14 +186,19 @@ void saveSettings(const std::string &path, const AdapterSettings &settings) {
     if (slash == std::string::npos) {
         throw std::runtime_error("Configuration path must be absolute.");
     }
+    std::string directory = path.substr(0, slash + 1);
+    if (!platform::createDirectories(directory)) {
+        throw std::runtime_error("Cannot create the configuration folder. Check its permissions.");
+    }
     DWORD attributes = GetFileAttributesA(path.c_str());
     if (attributes != INVALID_FILE_ATTRIBUTES &&
         (attributes & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_DIRECTORY))) {
         throw std::runtime_error("The configuration file is read-only or is a directory.");
     }
     char temporary[MAX_PATH];
-    if (!GetTempFileNameA(path.substr(0, slash + 1).c_str(), "odg", 0, temporary)) {
-        throw std::runtime_error("Cannot write to the installation folder. Check its permissions.");
+    if (!GetTempFileNameA(directory.c_str(), "odg", 0, temporary)) {
+        throw std::runtime_error(
+            "Cannot write to the configuration folder. Check its permissions.");
     }
     try {
         if (attributes != INVALID_FILE_ATTRIBUTES && !CopyFileA(path.c_str(), temporary, FALSE)) {

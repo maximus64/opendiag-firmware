@@ -93,9 +93,12 @@ uint32_t fake_clock_ms(void) { return g_now_ms; }
 
 void fake_clock_advance_ms(uint32_t ms) { g_now_ms += ms; }
 
+static void timers_disarm(void);
+
 void fake_clock_reset(void) {
     g_now_ms = 0;
     g_now_sub_us = 0;
+    timers_disarm();
 }
 
 int64_t esp_timer_get_time(void) {
@@ -104,6 +107,85 @@ int64_t esp_timer_get_time(void) {
      * keeps the microsecond clock consistent with the millisecond one. */
     g_now_sub_us++;
     return (int64_t)g_now_ms * 1000 + g_now_sub_us;
+}
+
+/** Move the clock forward to @p target_us, carrying whole milliseconds. */
+static void clock_advance_to_us(uint64_t target_us) {
+    uint64_t now = (uint64_t)g_now_ms * 1000 + g_now_sub_us;
+
+    if (target_us <= now)
+        return;
+    g_now_sub_us += (uint32_t)(target_us - now);
+    g_now_ms += g_now_sub_us / 1000;
+    g_now_sub_us %= 1000;
+}
+
+/* ------------------------------------------------------------------ *
+ * One-shot timers
+ * ------------------------------------------------------------------ */
+
+struct esp_timer {
+    esp_timer_create_args_t args;
+    bool armed;
+    uint64_t due_us;
+};
+
+static struct esp_timer g_timers[4];
+static unsigned g_timer_count;
+
+esp_err_t esp_timer_create(const esp_timer_create_args_t *args,
+                           esp_timer_handle_t *out) {
+    if (!args || !args->callback || !out)
+        return ESP_ERR_INVALID_ARG;
+    if (g_timer_count == sizeof(g_timers) / sizeof(g_timers[0]))
+        return ESP_ERR_NO_MEM;
+    struct esp_timer *timer = &g_timers[g_timer_count++];
+    timer->args = *args;
+    timer->armed = false;
+    *out = timer;
+    return ESP_OK;
+}
+
+esp_err_t esp_timer_start_once(esp_timer_handle_t timer, uint64_t timeout_us) {
+    if (!timer)
+        return ESP_ERR_INVALID_ARG;
+    if (timer->armed)
+        return ESP_ERR_INVALID_STATE;
+    timer->armed = true;
+    timer->due_us = (uint64_t)esp_timer_get_time() + timeout_us;
+    return ESP_OK;
+}
+
+esp_err_t esp_timer_stop(esp_timer_handle_t timer) {
+    if (!timer)
+        return ESP_ERR_INVALID_ARG;
+    if (!timer->armed)
+        return ESP_ERR_INVALID_STATE;
+    timer->armed = false;
+    return ESP_OK;
+}
+
+bool fake_esp_timer_armed(esp_timer_handle_t timer, uint64_t *due_us) {
+    if (!timer || !timer->armed)
+        return false;
+    if (due_us)
+        *due_us = timer->due_us;
+    return true;
+}
+
+/* Expiries are on the old clock, which a reset has taken away. */
+static void timers_disarm(void) {
+    for (unsigned i = 0; i < g_timer_count; i++)
+        g_timers[i].armed = false;
+}
+
+/** The armed timer that expires first, or NULL. */
+static struct esp_timer *earliest_timer(void) {
+    struct esp_timer *first = NULL;
+    for (unsigned i = 0; i < g_timer_count; i++)
+        if (g_timers[i].armed && (!first || g_timers[i].due_us < first->due_us))
+            first = &g_timers[i];
+    return first;
 }
 
 /* ------------------------------------------------------------------ *
@@ -163,32 +245,56 @@ void vPortYield(void) {}
  * ------------------------------------------------------------------ */
 
 static bool g_notify_pending;
+static TaskHandle_t g_notified_task;
 
 void vTaskNotifyGiveFromISR(TaskHandle_t task, BaseType_t *woken) {
-    (void)task;
-
+    g_notified_task = task;
     g_notify_pending = true;
     if (woken) {
         *woken = pdFALSE;
     }
 }
 
-uint32_t ulTaskNotifyTake(BaseType_t clear_on_exit, TickType_t ticks_to_wait) {
-    if (g_notify_pending) {
-        if (clear_on_exit) {
-            g_notify_pending = false;
-        }
-        return 1;
-    }
+BaseType_t xTaskNotifyGive(TaskHandle_t task) {
+    g_notified_task = task;
+    g_notify_pending = true;
+    return pdPASS;
+}
 
-    /* Nothing pending: this is where a real task would have blocked. */
-    if (ticks_to_wait == portMAX_DELAY) {
-        idf_stub_abort(__FILE__, __LINE__,
-                       "blocking wait with portMAX_DELAY and no notification "
-                       "pending would never return under test");
+bool idf_stub_notify_pending(void) { return g_notify_pending; }
+
+TaskHandle_t idf_stub_notified_task(void) { return g_notified_task; }
+
+void idf_stub_notify_reset(void) {
+    g_notify_pending = false;
+    g_notified_task = NULL;
+}
+
+uint32_t ulTaskNotifyTake(BaseType_t clear_on_exit, TickType_t ticks_to_wait) {
+    if (!g_notify_pending) {
+        /* Nothing pending: this is where a real task would have blocked,
+         * until the first armed timer fired or the wait ran out. */
+        struct esp_timer *timer = earliest_timer();
+        uint64_t now = (uint64_t)g_now_ms * 1000 + g_now_sub_us;
+        if (timer && (ticks_to_wait == portMAX_DELAY ||
+                      timer->due_us <= now + (uint64_t)ticks_to_wait * 1000)) {
+            clock_advance_to_us(timer->due_us);
+            timer->armed = false;
+            timer->args.callback(timer->args.arg);
+        } else if (ticks_to_wait == portMAX_DELAY) {
+            idf_stub_abort(__FILE__, __LINE__,
+                           "blocking wait with portMAX_DELAY and no "
+                           "notification pending would never return under "
+                           "test");
+        } else {
+            fake_clock_advance_ms((uint32_t)ticks_to_wait);
+        }
     }
-    fake_clock_advance_ms((uint32_t)ticks_to_wait);
-    return 0;
+    if (!g_notify_pending)
+        return 0;
+    if (clear_on_exit)
+        g_notify_pending = false;
+    return 1;
 }
 
 /* ------------------------------------------------------------------ *

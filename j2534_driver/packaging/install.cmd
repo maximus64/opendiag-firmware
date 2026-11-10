@@ -7,7 +7,7 @@ set "REGEXE=%SystemRoot%\System32\reg.exe"
 
 if exist "%SystemRoot%\SysWOW64\reg.exe" set "REGEXE=%SystemRoot%\SysWOW64\reg.exe"
 
-for %%F in (%PACKAGE_FILES% opendiag.ini) do (
+for %%F in (%PACKAGE_FILES%) do (
     if exist "%~dp0%%F\" (
         echo Expected a package file, found a directory: "%~dp0%%F"
         exit /b 1
@@ -34,10 +34,6 @@ if /I not "%SOURCE_DIR%"=="%INSTALL_DIR%" (
         copy /b /y "%~dp0%%F" "%INSTALL_DIR%\%%F" >nul
         if errorlevel 1 goto failed
     )
-    if not exist "%INSTALL_DIR%\opendiag.ini" (
-        copy /b /y "%~dp0opendiag.ini" "%INSTALL_DIR%\opendiag.ini" >nul
-        if errorlevel 1 goto failed
-    )
 )
 
 call :register 05.00 opendiag32.dll
@@ -57,7 +53,7 @@ for %%P in (SCI_A_ENGINE SCI_A_TRANS SCI_B_ENGINE SCI_B_TRANS) do (
 )
 
 echo OpenDIAG installed in %INSTALL_DIR% and registered for 32-bit applications.
-echo Existing opendiag.ini settings were preserved.
+echo Existing settings were preserved.
 echo Configure the adapter with %INSTALL_DIR%\opendiag_config.exe.
 echo Restart diagnostic applications to refresh their adapter list.
 

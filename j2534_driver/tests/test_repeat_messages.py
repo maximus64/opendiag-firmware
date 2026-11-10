@@ -30,6 +30,7 @@ INVALID_INTERVAL = 11
 EXCEEDED_LIMIT = 12
 INVALID_MESSAGE_ID = 13
 EMPTY = 16
+TX_SUCCESS = 8
 REQUEST = bytes.fromhex("68 6a f1 01 00")
 RESPONSE = bytes.fromhex("48 6b 10 41 00")
 
@@ -217,9 +218,10 @@ class Session:
         if count.value != 1:
             raise AssertionError("Successful write did not accept one message")
 
-    def read(self):
+    def read(self, timeout=0):
         message, count = self.message(bytes(4128)), U32(1)
-        status = self.api.PassThruReadMsgs(self.channel, c.byref(message), c.byref(count), 0)
+        status = self.api.PassThruReadMsgs(self.channel, c.byref(message), c.byref(count),
+                                           timeout)
         if self.version == "0404":
             data = bytes(message.Data[:message.DataSize])
         else:
@@ -269,6 +271,21 @@ class HarnessTests(ContractTests):
                 self.assertEqual(session.api.PassThruStopPeriodicMsg(session.channel, identifier), 0)
                 firmware.advance(101)
                 self.assertEqual(len(firmware.sent()), 2)
+
+    def test_a_held_read_is_answered_by_bus_activity_not_its_deadline(self):
+        # 05.00 reports the periodic's transmit completion the moment it happens.
+        with self.session(version="0500") as (session, firmware):
+            session.periodic(interval=20)
+            self.assertEqual(session.read()[:2], (0, 1))
+            status, count, data, flags = session.read(timeout=1000)
+            self.assertEqual((status, count, flags), (0, 1, TX_SUCCESS))
+            self.assertEqual(firmware.sent(), [REQUEST, REQUEST])
+        # 04.04 consumes those completions itself, so its read keeps waiting on the
+        # device while the firmware goes on servicing the bus.
+        with self.session(version="0404") as (session, firmware):
+            session.periodic(interval=20)
+            self.assertEqual(session.read(timeout=100)[:2], (EMPTY, 0))
+            self.assertGreater(len(firmware.sent()), 1)
 
     def test_existing_rx_filter_and_checksum_removal(self):
         with self.session() as (session, firmware):

@@ -6,7 +6,11 @@
     "https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getcommmodemstatus",
     "https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getcommproperties",
     "https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getcommtimeouts",
+    "https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfullpathnamea",
+    "https://learn.microsoft.com/en-us/windows/win32/api/shlobj_core/nf-shlobj_core-shgetfolderpatha",
+    "https://learn.microsoft.com/en-us/windows/win32/api/shlobj_core/nf-shlobj_core-shcreatedirectoryexa",
     "https://learn.microsoft.com/en-us/cpp/c-runtime-library/internal-crt-globals-and-functions",
+    "https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/getenv-wgetenv",
     "https://sources.debian.org/src/mingw-w64/10.0.0-3/mingw-w64-crt/lib32/"
   ],
   "libraries": {
@@ -31,6 +35,7 @@
       "GetCurrentThreadId",
       "GetFileAttributesA",
       "GetFileSizeEx",
+      "GetFullPathNameA",
       "GetLastError",
       "GetModuleFileNameA",
       "GetModuleHandleA",
@@ -102,6 +107,7 @@
       "fputs",
       "free",
       "fwrite",
+      "getenv",
       "localeconv",
       "malloc",
       "memchr",
@@ -146,6 +152,8 @@
       "RegQueryValueExA"
     ],
     "shell32.dll": [
+      "SHCreateDirectoryExA",
+      "SHGetFolderPathA",
       "ShellExecuteA"
     ],
     "user32.dll": [

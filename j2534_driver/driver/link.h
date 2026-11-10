@@ -14,13 +14,13 @@ struct Settings {
 };
 
 extern const void *moduleAnchor;
-std::string configPath();
 Settings loadSettings();
 
 class Link {
     platform::Stream stream_;
     J2534_ULONG sequence_;
     Settings settings_;
+    unsigned fragment_;
     void send(unsigned op,
               unsigned flags,
               unsigned offset,
@@ -32,6 +32,8 @@ class Link {
                      unsigned &offset,
                      unsigned char *data,
                      uint32_t deadline);
+    friend class HeldWait;
+    void sendWake(unsigned op);
 
   public:
     Link();
@@ -39,5 +41,11 @@ class Link {
     void selectFrontend(bool recovering);
     void close();
     bool alive();
-    void rpc(const opendiag_Request &request, opendiag_Response &response);
+    // The firmware's fragment size from its capabilities, used both ways from then on.
+    void setFragment(unsigned bytes);
+    // waitMs extends the deadline for a request the device holds until it can answer.
+    void rpc(const opendiag_Request &request, opendiag_Response &response, uint32_t waitMs = 0);
+    // Any thread, at any time: while armed, a held wait in flight in this process, or
+    // one that begins, is answered early, as though its timeout had run out.
+    static void wakeWaits(bool armed);
 };

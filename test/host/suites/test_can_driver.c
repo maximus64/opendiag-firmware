@@ -27,6 +27,8 @@ static int calls[OP_COUNT];
 static bool node_live, node_enabled;
 static bool bus_off_on_disable;
 static bool tx_unsuccessful;
+/* The transmission attempt (from 1) that fails; 0 for none. */
+static unsigned fail_wire_frame;
 static bool complete_on_poll;
 static int silent;
 static twai_onchip_node_config_t last_cfg;
@@ -35,7 +37,7 @@ static int node_token;
 static bool forced_bus_off;
 static unsigned recover_calls;
 static const twai_frame_t *pending_tx[8];
-static unsigned pending_count, wire_count;
+static unsigned pending_count, wire_count, tx_attempts;
 static uint32_t last_wire_id;
 #define NODE ((twai_node_handle_t) & node_token)
 #define CALL(op)                                                               \
@@ -95,10 +97,28 @@ esp_err_t twai_node_recover(twai_node_handle_t node) {
     forced_bus_off = false;
     return ESP_OK;
 }
+static void complete_oldest_tx(void) {
+    const twai_frame_t *frame = pending_tx[0];
+    bool failed = tx_unsuccessful || fail_wire_frame == ++tx_attempts;
+    if (!failed) {
+        wire_count++;
+        last_wire_id = frame->header.id;
+    }
+    memmove(pending_tx, pending_tx + 1,
+            --pending_count * sizeof(pending_tx[0]));
+    twai_tx_done_event_data_t event = {.is_tx_success = !failed,
+                                       .done_tx_frame = frame};
+    callbacks.on_tx_done(NODE, &event, NULL);
+}
+/* The frame in the controller and four queued behind it, as configured. */
+#define DRIVER_TX_CAPACITY 5
 esp_err_t twai_node_transmit(twai_node_handle_t node, const twai_frame_t *frame,
                              int ms) {
     CALL(TRANSMIT);
     TEST_ASSERT_TRUE(node_live && node_enabled);
+    /* A full queue waits for the controller to finish the oldest frame. */
+    if (pending_count == DRIVER_TX_CAPACITY && !silent)
+        complete_oldest_tx();
     TEST_ASSERT_TRUE(pending_count < 8);
     pending_tx[pending_count++] = frame;
     return ESP_OK;
@@ -106,15 +126,8 @@ esp_err_t twai_node_transmit(twai_node_handle_t node, const twai_frame_t *frame,
 static void complete_pending_tx(void) {
     if (!node_live || !node_enabled || silent)
         return;
-    for (unsigned i = 0; i < pending_count; i++) {
-        if (!tx_unsuccessful) {
-            wire_count++;
-            last_wire_id = pending_tx[i]->header.id;
-        }
-        twai_tx_done_event_data_t event = {.is_tx_success = !tx_unsuccessful};
-        callbacks.on_tx_done(NODE, &event, NULL);
-    }
-    pending_count = 0;
+    while (pending_count)
+        complete_oldest_tx();
 }
 esp_err_t twai_node_transmit_wait_all_done(twai_node_handle_t node, int ms) {
     calls[WAIT_TX]++;
@@ -158,6 +171,8 @@ void td_setup(void) {
     complete_on_poll = false;
     TEST_ASSERT_EQUAL_INT(0, pending_count);
     wire_count = 0;
+    tx_attempts = 0;
+    fail_wire_frame = 0;
     driver_exit_on_wait = true;
 }
 void td_teardown(void) {
@@ -541,6 +556,19 @@ TEST(j2534_bus_off_is_reported_and_bus_on_recovers) {
     TEST_ASSERT_EQUAL_INT(1, recover_calls);
 }
 
+TEST(bus_off_wakes_the_claim_holder) {
+    static int holder;
+    bus_cfg_t cfg = {.bitrate = 500000, .manual_recovery = true};
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_ops.open(&cfg));
+    bus_listen(can_bus_ops.listener, (TaskHandle_t)&holder);
+    idf_stub_notify_reset();
+    twai_state_change_event_data_t event = {.old_sta = TWAI_ERROR_ACTIVE,
+                                            .new_sta = TWAI_ERROR_BUS_OFF};
+    callbacks.on_state_change(NODE, &event, NULL);
+    TEST_ASSERT_TRUE(idf_stub_notified_task() == (TaskHandle_t)&holder);
+    bus_listen(can_bus_ops.listener, NULL);
+}
+
 TEST(controlled_can_timeout_silences_tx_but_retains_rx_resources_until_close) {
     TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
     uint8_t data[] = {1};
@@ -577,4 +605,82 @@ TEST(
     bus_msg_init(&message, data, sizeof(data));
     TEST_ASSERT_EQUAL_INT(1, can_bus_ops.recv(&message, 0));
     TEST_ASSERT_EQUAL_INT(1, message.sequence);
+}
+
+/* ------------------------------------------------------------------ *
+ * Frame trains
+ * ------------------------------------------------------------------ */
+
+static bus_msg_t train_msgs[BUS_TX_TRAIN_MAX];
+static uint8_t train_data[BUS_TX_TRAIN_MAX][8];
+
+static void make_train(unsigned count) {
+    for (unsigned i = 0; i < count; i++) {
+        memset(train_data[i], 0x55, 8);
+        train_data[i][0] = (uint8_t)(0x20 | (i & 0x0f));
+        bus_msg_tx(&train_msgs[i], train_data[i], 8, 0x18da11f1 | CAN_EFF_FLAG);
+    }
+}
+
+TEST(a_train_keeps_the_controller_queue_full_and_reports_each_frame) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    bus_tx_control_t control;
+    bus_tx_train_t train;
+    bus_tx_prepare(&control, 0);
+    make_train(12);
+    TEST_ASSERT_EQUAL_INT(
+        0, can_bus_ops.send_train(train_msgs, 12, &control, &train));
+    TEST_ASSERT_EQUAL_INT(12, train.sent);
+    TEST_ASSERT_EQUAL_INT(12, wire_count);
+    TEST_ASSERT_EQUAL_INT(12, calls[TRANSMIT]);
+    TEST_ASSERT_EQUAL_INT(1, calls[WAIT_TX]);
+    for (unsigned i = 1; i < 12; i++)
+        TEST_ASSERT_TRUE((int32_t)(train.ended_us[i] - train.ended_us[i - 1]) >=
+                         0);
+    TEST_ASSERT_TRUE(control.ended);
+    TEST_ASSERT_EQUAL_INT(train.ended_us[11], control.ended_us);
+}
+
+TEST(a_train_stops_at_the_frame_that_fails_and_keeps_can_open) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    bus_tx_control_t control;
+    bus_tx_train_t train;
+    bus_tx_prepare(&control, 0);
+    make_train(8);
+    fail_wire_frame = 4;
+    TEST_ASSERT_EQUAL_INT(
+        BUS_ERR_TX_FAILED,
+        can_bus_ops.send_train(train_msgs, 8, &control, &train));
+    TEST_ASSERT_EQUAL_INT(3, train.sent);
+    TEST_ASSERT_TRUE(node_live && node_enabled);
+    TEST_ASSERT_EQUAL_INT(0, silent);
+}
+
+TEST(a_train_cancelled_after_admission_queues_no_more_frames) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    bus_tx_control_t control;
+    bus_tx_train_t train;
+    bus_tx_prepare(&control, 0);
+    TEST_ASSERT_EQUAL_INT(0, bus_tx_admit(&control, 0, 0));
+    TEST_ASSERT_FALSE(bus_tx_cancel(&control));
+    make_train(4);
+    TEST_ASSERT_EQUAL_INT(
+        BUS_ERR_CANCELLED,
+        can_bus_ops.send_train(train_msgs, 4, &control, &train));
+    TEST_ASSERT_EQUAL_INT(0, train.sent);
+    TEST_ASSERT_EQUAL_INT(0, calls[TRANSMIT]);
+}
+
+TEST(an_aborted_train_reports_the_frames_that_went_out) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    bus_tx_control_t control;
+    bus_tx_train_t train;
+    bus_tx_prepare(&control, 0);
+    make_train(8);
+    result[WAIT_TX] = ESP_ERR_TIMEOUT;
+    TEST_ASSERT_EQUAL_INT(
+        BUS_ERR_TX_ABORTED,
+        can_bus_ops.send_train(train_msgs, 8, &control, &train));
+    TEST_ASSERT_EQUAL_INT(3, train.sent);
+    TEST_ASSERT_EQUAL_INT(1, silent);
 }

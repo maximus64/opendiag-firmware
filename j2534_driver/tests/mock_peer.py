@@ -6,6 +6,7 @@ from collections import deque
 import json
 import os
 from pathlib import Path
+import select
 import socket
 import struct
 import sys
@@ -17,6 +18,11 @@ sys.path.insert(0, os.environ.get("OPENDIAG_TEST_PROTO_DIR", str(REPO / "protoco
 import j2534_pb2 as pb
 
 HEADER = struct.Struct("<4sBBHIHH")
+
+
+def wait_out(milliseconds):
+    """Nothing arrives later on this peer, so a device-side wait just runs out."""
+    time.sleep(milliseconds / 1000)
 
 
 def exact(connection, size):
@@ -41,6 +47,32 @@ class Peer:
         self.requests = 0
         self.fault = 0
         self.select_fault = 0
+        self.fragment_bytes = 192
+        # (op, flags, size) of every frame received, oldest first.
+        self.frames = []
+        self.connection = None
+        self.sequence = None
+        self.wakes = 0
+
+    def hold(self, milliseconds):
+        """Wait out a held request's timeout, unless the driver wakes it first."""
+        if self.connection is None:
+            wait_out(milliseconds)
+            return
+        deadline = time.monotonic() + milliseconds / 1000
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0 or not select.select([self.connection], [], [], left)[0]:
+                return
+            header = exact(self.connection, 16)
+            magic, version, op, flags, sequence, offset, size = HEADER.unpack(header)
+            exact(self.connection, size + 4)
+            self.frames.append((op, flags, size))
+            # The driver sends nothing else while a request of its own is outstanding.
+            assert flags == 8 and size == 0, (flags, size)
+            if sequence == self.sequence:
+                self.wakes += 1
+                return
 
     def respond(self, request):
         self.requests += 1
@@ -48,7 +80,8 @@ class Peer:
         response = pb.Response()
         if name == "capabilities":
             response.capabilities.CopyFrom(pb.Capabilities(
-                wire_version=1, api_version=0x500, fragment_bytes=192, rpc_bytes=4608))
+                wire_version=3, api_version=0x500, fragment_bytes=self.fragment_bytes,
+                rpc_bytes=4608))
         elif name == "open":
             self.queue.clear()
             response.id = 1
@@ -84,6 +117,7 @@ class Peer:
                 response.message.CopyFrom(self.queue.popleft())
                 response.count = 1
             else:
+                self.hold(request.read.timeout_ms)
                 response.status = 16
         elif name == "select":
             channels = request.select.channels
@@ -97,6 +131,8 @@ class Peer:
                 response.channels.extend(reversed(channels))
             elif self.queue:
                 response.channels.extend(request.select.channels[:1])
+            if len(response.channels) < request.select.threshold:
+                self.hold(request.select.timeout_ms)
         elif name == "version":
             response.text = "OpenDIAG deterministic test peer"
         elif name == "voltage" and request.voltage.pin == 16:
@@ -136,7 +172,10 @@ class Peer:
             magic, version, op, flags, sequence, offset, size = HEADER.unpack(header)
             data = exact(connection, size)
             checksum = struct.unpack("<I", exact(connection, 4))[0]
-            assert magic == b"J253" and version == 1 and size <= 192
+            assert magic == b"J253" and version == 1 and size <= self.fragment_bytes
+            self.frames.append((op, flags, size))
+            if flags == 8:
+                continue  # A wake that arrived after its request was answered.
             assert checksum == zlib.crc32(header[4:] + data)
             drop_startup = getattr(self, "startup_mode", "elm") == "drop-first"
             if drop_startup and not getattr(self, "startup_dropped", False):
@@ -156,12 +195,13 @@ class Peer:
                 request = pb.Request.FromString(assembled)
                 field = request.DESCRIPTOR.fields_by_name[request.WhichOneof("command")]
                 assert field.number == op + 1
+                self.connection, self.sequence = connection, sequence
                 response = self.respond(request)
                 if self.fault == 0xff07:
                     response.status = 27
                 outgoing = response.SerializeToString()
                 response_offset = 0
-            fragment = outgoing[response_offset:response_offset + 192]
+            fragment = outgoing[response_offset:response_offset + self.fragment_bytes]
             more = response_offset + len(fragment) < len(outgoing)
             frame = packet(op, sequence, 129 if more else 128, response_offset, fragment)
             response_offset += len(fragment)
@@ -228,6 +268,8 @@ class LegacyPeer(Peer):
             response = pb.Response()
             response.channels.extend(channel for channel in request.select.channels
                                      if self.channels.get(channel))
+            if len(response.channels) < request.select.threshold:
+                self.hold(request.select.timeout_ms)
             return response
         if name == "read":
             response = pb.Response()
@@ -236,6 +278,7 @@ class LegacyPeer(Peer):
                 response.message.CopyFrom(queue.popleft())
                 response.count = 1
             else:
+                self.hold(request.read.timeout_ms)
                 response.status = 16
             return response
         if name == "ioctl" and request.ioctl.id == 8:

@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <fstream>
 #include <iterator>
+#include <limits.h>
 #include <stdexcept>
 #include <sys/wait.h>
 #include <termios.h>
@@ -118,7 +119,7 @@ static void testLogging() {
         check(trace.result(0) == 0, "Logging preserves result");
     }
     check(errno == E2BIG, "Logging preserves errno");
-    std::string path = platform::moduleDirectory(&moduleAnchor) + "opendiag-05.00-" +
+    std::string path = platform::logDirectory(&moduleAnchor) + "opendiag-05.00-" +
                        std::to_string(getpid()) + ".log";
     std::ifstream input(path.c_str());
     std::string text((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
@@ -137,12 +138,132 @@ static void testLogging() {
     unlink((path + ".1").c_str());
 }
 
+static void testPaths() {
+    const std::string directory = platform::moduleDirectory(&moduleAnchor);
+    const std::string temporary = directory + "path-test-" + std::to_string(getpid()) + "/";
+    check(platform::createDirectories(temporary), "Create configuration test folder");
+    const std::string system = temporary + "system.ini";
+    const std::string overridePath = temporary + "override.ini";
+    auto rejectsOverride = [&](const std::string &path) {
+        bool rejected = false;
+        try {
+            platform::selectConfigPath(path, system);
+        } catch (const std::runtime_error &error) {
+            const std::string message = error.what();
+            check(message.find("OPENDIAG_DRIVER_CONFIG file not found:") != std::string::npos &&
+                      message.find(platform::absolutePath(path)) != std::string::npos,
+                  "Override error identifies the environment variable and resolved path");
+            rejected = true;
+        }
+        check(rejected, "Invalid explicit configuration fails instead of falling back");
+    };
+    auto rejectsSystem = [&](const std::string &path, const std::string &expected) {
+        bool rejected = false;
+        try {
+            platform::selectConfigPath("", path);
+        } catch (const std::runtime_error &error) {
+            check(error.what() == expected, "System configuration error identifies the problem");
+            rejected = true;
+        }
+        check(rejected, "Invalid system configuration fails without legacy or default settings");
+    };
+    rejectsSystem(system, "OpenDIAG config file not found: " + system);
+    rejectsSystem(temporary, "OpenDIAG config file not found: " + temporary);
+    rejectsSystem("", "Cannot locate the system configuration folder");
+    rejectsOverride(overridePath);
+    std::ofstream(system.c_str()) << "[device]\nName=System\n[logging]\nEnabled=1\n";
+    check(platform::selectConfigPath("", system) == system,
+          "Absent override selects the existing system configuration");
+    rejectsOverride(overridePath);
+    std::ofstream(overridePath.c_str()) << "[device]\nName=Override\n";
+    check(platform::selectConfigPath(overridePath, system) == overridePath,
+          "Existing explicit configuration precedes system configuration");
+    rejectsOverride(temporary);
+    const char *original = getenv("OPENDIAG_DRIVER_CONFIG");
+    const bool hadOverride = original != nullptr;
+    const std::string saved = original ? original : "";
+    setenv("OPENDIAG_DRIVER_CONFIG", overridePath.c_str(), 1);
+    check(platform::configPath() == overridePath,
+          "Configuration resolver honors the environment override");
+    check(platform::readSetting(platform::configPath(), "device", "Name", "") == "Override",
+          "Settings come from the selected file");
+    check(platform::readNumber(platform::configPath(), "logging", "Enabled", 0) == 0,
+          "Selected settings are not merged with the system file");
+    char originalDirectory[PATH_MAX];
+    check(getcwd(originalDirectory, sizeof(originalDirectory)) && !chdir(temporary.c_str()),
+          "Enter configuration folder for relative-path check");
+    rejectsOverride("missing.ini");
+    setenv("OPENDIAG_DRIVER_CONFIG", "override.ini", 1);
+    check(platform::configPath() == overridePath,
+          "Relative override is resolved before reading the INI file");
+    check(!chdir(originalDirectory), "Restore working directory");
+    setenv("OPENDIAG_DRIVER_CONFIG", overridePath.c_str(), 1);
+    unlink(overridePath.c_str());
+    check(platform::configWritePath() == overridePath,
+          "Explicit write path can create a new configuration");
+    bool rejected = false;
+    try {
+        platform::configPath();
+    } catch (const std::runtime_error &) {
+        rejected = true;
+    }
+    check(rejected, "Configuration resolver rejects a missing environment override");
+    setenv("OPENDIAG_DRIVER_CONFIG", "", 1);
+    check(platform::configWritePath() == platform::systemConfigPath(),
+          "Empty override uses the default write path");
+    unsetenv("OPENDIAG_DRIVER_CONFIG");
+    check(platform::configWritePath() == platform::systemConfigPath(),
+          "Default writes target the system configuration");
+    if (hadOverride) {
+        setenv("OPENDIAG_DRIVER_CONFIG", saved.c_str(), 1);
+    }
+    const std::string logs = platform::logDirectory(directory);
+#ifdef __APPLE__
+    check(platform::systemConfigPath() == "/Library/Application Support/OpenDIAG/opendiag.ini",
+          "macOS system configuration location");
+    const std::string expectedLogs = std::string(getenv("HOME")) + "/Library/Logs/OpenDIAG/";
+#else
+    check(platform::systemConfigPath() == "/etc/opendiag/opendiag.ini",
+          "Linux system configuration location");
+    const char *state = getenv("XDG_STATE_HOME");
+    const std::string expectedLogs = state && state[0] == '/'
+                                         ? std::string(state) + "/opendiag/"
+                                         : std::string(getenv("HOME")) + "/.local/state/opendiag/";
+#endif
+    check(logs == expectedLogs && logs != directory, "Logs use a writable per-user folder");
+    // A regular file in the directory chain prevents creation of the log folder.
+    const char *variable;
+    std::string blocked;
+#ifdef __APPLE__
+    variable = "HOME";
+    blocked = system;
+#else
+    variable = "XDG_STATE_HOME";
+    blocked = system;
+#endif
+    original = getenv(variable);
+    const bool hadLogPath = original != nullptr;
+    const std::string savedLogPath = original ? original : "";
+    setenv(variable, blocked.c_str(), 1);
+    check(platform::logDirectory(directory) == directory,
+          "Unusable user log folder falls back to the library folder");
+    if (hadLogPath) {
+        setenv(variable, savedLogPath.c_str(), 1);
+    } else {
+        unsetenv(variable);
+    }
+    unlink(system.c_str());
+    rmdir(temporary.c_str());
+}
+
 int main() {
     try {
         testSerial();
         testLease();
+        testPaths();
         testLogging();
-        printf("PASS %u platform checks: serial, deadlines, ownership and logging\n", checks);
+        printf("PASS %u platform checks: serial, deadlines, ownership, paths and logging\n",
+               checks);
         return 0;
     } catch (const std::exception &error) {
         fprintf(stderr, "FAIL: %s\n", error.what());

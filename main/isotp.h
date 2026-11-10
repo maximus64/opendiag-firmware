@@ -117,6 +117,7 @@ typedef struct {
     uint8_t sequence;
     uint8_t block_size;
     uint8_t block_count;
+    uint8_t unconfirmed; /* Frames handed out and not yet confirmed. */
     bool sent_cf;
     bool pending_cf;
     bool reserved_stmin;
@@ -132,5 +133,8 @@ int isotp_tx_flow_control(isotp_tx_t *tx, const struct can_frame *frame,
 /* Returns FRAME only when due. Confirm each returned frame before taking more.
  */
 int isotp_tx_next(isotp_tx_t *tx, struct can_frame *frame, uint32_t now_us);
+/* Another consecutive frame to queue behind unconfirmed ones. FRAME only while
+ * the peer's STmin is zero and its block has room; confirm in order. */
+int isotp_tx_more(isotp_tx_t *tx, struct can_frame *frame, uint32_t now_us);
 int isotp_tx_confirm(isotp_tx_t *tx, bool success, uint32_t now_us);
 int isotp_tx_check_timeout(isotp_tx_t *tx, uint32_t now_us);

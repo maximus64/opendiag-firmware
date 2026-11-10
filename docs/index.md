@@ -47,7 +47,7 @@ drivers or tools to install.
   Releases, including the J2534 driver, are on its
   [releases page](https://github.com/maximus64/opendiag-firmware/releases).
 - [opendiag-hardware](https://github.com/maximus64/opendiag-hardware): hardware design files.
-- [opendiag-cli](https://github.com/maximus64/opendiag-cli): the companion command-line tool.
+- [opendiag-cli](https://github.com/maximus64/opendiag-cli): the command-line diagnostic tool for OpenDIAG.
 
 OpenDIAG firmware is free software under the GNU General Public License, version 3, and comes
 with no warranty.

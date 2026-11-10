@@ -45,3 +45,6 @@ void fake_port_set_connected(int idx, bool connected);
 
 /** Caps how much one write() accepts, to exercise the short write retry. */
 void fake_port_set_write_limit(int idx, size_t limit);
+
+/** A host that stopped reading: every write is refused whole. */
+void fake_port_set_stalled(int idx, bool stalled);

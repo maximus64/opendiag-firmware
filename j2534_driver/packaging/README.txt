@@ -10,11 +10,32 @@ Install
 3. Run install.cmd from an administrator command prompt. It copies the DLLs,
    configuration utility, CDC INF, scripts and license files into C:\OpenDIAG, then
    registers that folder in the 32-bit J2534 registry view, including on x64
-   Windows. An existing C:\OpenDIAG\opendiag.ini is preserved on upgrades.
+   Windows.
 4. For USB on Windows XP, complete the CDC setup below to create the COM ports.
    TCP connections do not require the CDC driver.
 5. Run C:\OpenDIAG\opendiag_config.exe. Select the USB data COM port or
    TCP endpoint, save, and use Save & Test before opening diagnostic software.
+
+Configuration and logs
+Default locations:
+
+Windows Vista and later:
+  Configuration: %ProgramData%\OpenDIAG\opendiag.ini
+  Logs:          %LOCALAPPDATA%\OpenDIAG\logs\
+
+Windows XP SP3:
+  Configuration: %ALLUSERSPROFILE%\Application Data\OpenDIAG\opendiag.ini
+  Logs:          %USERPROFILE%\Local Settings\Application Data\OpenDIAG\logs\
+
+The configuration utility saves the shared file or a custom override. For a new
+file, re-enter settings from older installs. On XP, run the utility as administrator.
+
+For a custom file, set OPENDIAG_DRIVER_CONFIG to its full path for both the utility
+and diagnostic application. The selected custom or shared file must exist before
+connecting; missing files or invalid paths cause an error.
+
+Logging is off by default. Enable it in the utility and use Open log folder
+to view logs.
 
 Windows XP SP3 USB CDC setup (32-bit x86 only)
 opendiag-cdc-xp.inf uses the Microsoft usbser.sys driver supplied with Windows.
@@ -56,6 +77,6 @@ Close diagnostic applications and the configuration utility, then run
 C:\OpenDIAG\uninstall.cmd from an administrator command prompt. The copy in
 the extracted ZIP also works. It removes both registry entries and the installed
 DLLs, configuration utility, scripts and support files from C:\OpenDIAG.
-Your opendiag.ini, logs and unrelated files are preserved; the folder is removed
+Settings, logs and unrelated files are preserved; the installation folder is removed
 only if empty. Delete retained settings and logs manually for a complete reset.
 Other vendors' registry entries and files are not modified.

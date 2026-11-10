@@ -59,6 +59,8 @@ add_library(td_framework STATIC
 )
 
 add_library(bus_tx_control STATIC ${FW_DIR}/bus_tx.c)
+# Bus events notify a task through the RTOS stubs.
+target_link_libraries(bus_tx_control PUBLIC td_framework)
 
 add_library(td_fakes STATIC
     fakes/fake_ble_uart.c

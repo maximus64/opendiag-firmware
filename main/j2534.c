@@ -73,7 +73,8 @@ typedef struct {
     bool discard;
     bool confirmed;
     uint32_t rx_generation;
-    struct can_frame frame;
+    /* CAN frames in the physical channel's train[]; one unless pipelined. */
+    unsigned frames;
 } pending_tx_t;
 
 typedef struct {
@@ -98,6 +99,8 @@ typedef struct {
     filter_t filters[J2534_FILTER_MAX];
     j2534_scheduler_t scheduler;
     pending_tx_t pending;
+    /* The CAN frames pending carries, kept for their loopback echoes. */
+    struct can_frame train[BUS_TX_TRAIN_MAX];
     uint32_t rx_sequence;
     unsigned tx_cursor;
     bool rx_drained;
@@ -120,9 +123,17 @@ static channel_t channels[CHANNELS];
 static uint32_t device;
 static uint32_t next_id = 1;
 static uint32_t last_error;
-static int voltage_pin = -1;
 static opendiag_Request request;
 static opendiag_Response response;
+
+/* A Read or Select the host asked to wait for. It stays decoded in request
+ * and is answered from a later poll; the host sends nothing else meanwhile. */
+static struct {
+    bool active;
+    uint32_t deadline_us;
+} held;
+/* Rises with everything a poll does; see vif_frontend_t.progress. */
+static uint32_t progress;
 /* Scratch is shared only by the link task, never placed on its 4 KiB stack. */
 static uint8_t scratch[TX_BYTES];
 _Static_assert(opendiag_Request_size <= J2534_RPC_MAX,
@@ -406,6 +417,7 @@ static void cancel_channel_tx(channel_t *channel) {
 static void tx_done(channel_t *channel, bool ok) {
     uint32_t handle = j2534_u32(channel->tx + 4);
 
+    progress++;
     if (handle)
         enqueue_rx(channel, handle, ok ? J2534_TX_SUCCESS : J2534_TX_FAILED,
                    now_us(), NULL, 0, true);
@@ -437,12 +449,31 @@ static void confirm_protocol_tx(channel_t *channel, const pending_tx_t *pending,
     }
 }
 
+/* Confirm a train's frames in order, each when it ended, up to the first one
+ * that did not go out. */
+static void confirm_train(channel_t *channel, const pending_tx_t *pending,
+                          const bus_tx_train_t *train) {
+    for (unsigned i = 0; i < pending->frames && channel->tx_active; i++) {
+        bool sent = i < train->sent;
+        confirm_protocol_tx(channel, pending, sent,
+                            sent ? train->ended_us[i] : now_us());
+        if (!sent)
+            break;
+    }
+}
+
 static void finish_bus_tx(channel_t *physical, const bus_tx_result_t *result) {
     pending_tx_t pending = physical->pending;
     memset(&physical->pending, 0, sizeof(physical->pending));
     channel_t *channel = find_channel(pending.channel);
-    if (result->status == 0 && physical->bus == VIF_BUS_CAN)
-        echo_can(physical, &pending.frame, result->ended_us);
+    if (physical->bus == VIF_BUS_CAN) {
+        unsigned sent = result->train ? result->train->sent
+                                      : (result->status == 0 ? 1u : 0u);
+        for (unsigned i = 0; i < sent && i < pending.frames; i++)
+            echo_can(physical, &physical->train[i],
+                     result->train ? result->train->ended_us[i]
+                                   : result->ended_us);
+    }
     if (!channel)
         return;
     bool success = result->status == 0;
@@ -469,7 +500,12 @@ static void finish_bus_tx(channel_t *physical, const bus_tx_result_t *result) {
     }
     if (pending.discard || pending.confirmed)
         return;
-    confirm_protocol_tx(channel, &pending, success, now_us());
+    /* STmin runs from when the frame left, not from when this task heard. */
+    if (result->train)
+        confirm_train(channel, &pending, result->train);
+    else
+        confirm_protocol_tx(channel, &pending, success,
+                            result->ended ? result->ended_us : now_us());
 }
 
 static void collect_bus_tx(channel_t *physical) {
@@ -477,11 +513,13 @@ static void collect_bus_tx(channel_t *physical) {
     if (physical->pending.kind == TX_NONE ||
         !vif_bus_tx_poll(VIF_OWNER_LINK, physical->bus, &result))
         return;
+    progress++;
     if (result.complete) {
         finish_bus_tx(physical, &result);
-    } else if (!physical->pending.discard &&
+    } else if (!physical->pending.discard && physical->pending.frames <= 1 &&
                (physical->pending.kind == TX_ISOTP ||
                 physical->pending.kind == TX_FLOW_CONTROL)) {
+        /* A train's frames are confirmed one by one once it completes. */
         channel_t *channel = find_channel(physical->pending.channel);
         if (channel && !physical->pending.confirmed) {
             confirm_protocol_tx(channel, &physical->pending, true,
@@ -503,6 +541,7 @@ static void submit_bus_tx(channel_t *channel, tx_kind_t kind, uint32_t job,
                           uint32_t handle, const bus_msg_t *msg,
                           uint32_t bus_flags) {
     channel_t *physical = physical_channel(channel);
+    progress++;
     physical->pending = (pending_tx_t){
         .kind = kind,
         .channel = channel->id,
@@ -511,9 +550,10 @@ static void submit_bus_tx(channel_t *channel, tx_kind_t kind, uint32_t job,
         .rx_generation = channel->rx_generation,
     };
     if (physical->bus == VIF_BUS_CAN) {
-        physical->pending.frame.id = msg->id;
-        physical->pending.frame.dlc = msg->len;
-        memcpy(physical->pending.frame.data, msg->data, msg->len);
+        physical->train[0].id = msg->id;
+        physical->train[0].dlc = msg->len;
+        memcpy(physical->train[0].data, msg->data, msg->len);
+        physical->pending.frames = 1;
         bus_flags |= BUS_TX_WAIT_DONE;
     }
     int rc = vif_bus_submit(VIF_OWNER_LINK, physical->bus, msg, bus_flags,
@@ -532,6 +572,62 @@ static void submit_can(channel_t *channel, tx_kind_t kind,
     bus_msg_t msg;
     bus_msg_tx(&msg, frame->data, frame->dlc, frame->id);
     submit_bus_tx(channel, kind, 0, 0, &msg, 0);
+}
+
+/* Link task only, like scratch: too large for its stack. */
+static bus_msg_t train_msgs[BUS_TX_TRAIN_MAX];
+
+/* Nothing else this adapter sends on the bus, such as another channel's flow
+ * control or a periodic message, goes out until a train ends. Capping trains
+ * by time on the wire rather than by count bounds that wait at every rate. */
+#define TRAIN_BUDGET_US 4000u
+
+/* The longest a classic frame can take: stuffing at worst adds a bit per four
+ * from SOF through the CRC, then come the delimiters, ACK, EOF and IFS. */
+static uint32_t can_frame_max_us(uint32_t id, unsigned dlc, uint32_t rate) {
+    unsigned stuffed = (id & CAN_EFF_FLAG ? 54u : 34u) + 8u * dlc;
+    unsigned bits = stuffed + (stuffed - 1) / 4 + 13;
+    return (bits * 1000000u + rate - 1) / rate;
+}
+
+/* Send @p first and every consecutive frame ISO-TP lets follow it at once
+ * as one train, so they leave back to back instead of one per pass. */
+static void submit_isotp(channel_t *channel, const struct can_frame *first) {
+    channel_t *physical = physical_channel(channel);
+    unsigned count = 1;
+    unsigned limit =
+        TRAIN_BUDGET_US / can_frame_max_us(first->id, 8, physical->rate);
+
+    if (limit > BUS_TX_TRAIN_MAX)
+        limit = BUS_TX_TRAIN_MAX;
+    physical->train[0] = *first;
+    while (count < limit &&
+           isotp_tx_more(&channel->iso_tx, &physical->train[count], now_us()) ==
+               ISOTP_FRAME)
+        count++;
+    if (count == 1) {
+        submit_can(channel, TX_ISOTP, first);
+        return;
+    }
+    progress++;
+    physical->pending = (pending_tx_t){
+        .kind = TX_ISOTP,
+        .channel = channel->id,
+        .rx_generation = channel->rx_generation,
+        .frames = count,
+    };
+    for (unsigned i = 0; i < count; i++)
+        bus_msg_tx(&train_msgs[i], physical->train[i].data,
+                   physical->train[i].dlc, physical->train[i].id);
+    int rc = vif_bus_submit_train(VIF_OWNER_LINK, physical->bus, train_msgs,
+                                  count, 0, physical->rx_sequence);
+    if (rc) {
+        bus_tx_result_t result = {.status = rc,
+                                  .complete = true,
+                                  .started_us = now_us(),
+                                  .ended_us = now_us()};
+        finish_bus_tx(physical, &result);
+    }
 }
 
 static void poll_tx(channel_t *channel) {
@@ -564,7 +660,7 @@ static void poll_tx(channel_t *channel) {
         struct can_frame frame;
         int rc = isotp_tx_next(&channel->iso_tx, &frame, now_us());
         if (rc == ISOTP_FRAME)
-            submit_can(channel, TX_ISOTP, &frame);
+            submit_isotp(channel, &frame);
         else if (rc < 0)
             tx_done(channel, false);
         return;
@@ -678,6 +774,7 @@ static void poll_rx(channel_t *channel) {
             channel->rx_drained = true;
             break;
         }
+        progress++;
         collect_bus_tx(channel);
         if ((int32_t)(msg.sequence - channel->rx_sequence) > 0)
             channel->rx_sequence = msg.sequence;
@@ -777,10 +874,10 @@ static void service_bus(channel_t *physical) {
         channel_t *channel = &channels[i];
         if (!channel->id || physical_channel(channel) != physical)
             continue;
-        if (channel->parent)
-            isotp_rx_check_timeout(&channel->iso_rx, now);
+        if (channel->parent && isotp_rx_check_timeout(&channel->iso_rx, now))
+            progress++;
         if (physical->rx_drained)
-            j2534_schedule_expire(&channel->scheduler, now);
+            progress += j2534_schedule_expire(&channel->scheduler, now);
         j2534_schedule_job_t *job =
             j2534_schedule_next(&channel->scheduler, now, physical->rx_drained);
         if (job && (!next || (int32_t)(job->due_us - next->due_us) < 0 ||
@@ -848,6 +945,50 @@ void j2534_core_poll(void) {
             service_bus(&channels[i]);
 }
 
+/* Keep the earliest of the deadlines still ahead. One already due is waiting
+ * on a transmission or on received frames, and those wake the link anyway. */
+static void wake_candidate(uint32_t now, uint32_t due, bool *found,
+                           uint32_t *best) {
+    if ((int32_t)(due - now) <= 0)
+        return;
+    if (!*found || (int32_t)(due - *best) < 0)
+        *best = due;
+    *found = true;
+}
+
+bool j2534_core_next_wake(uint32_t *due_us) {
+    if (!device)
+        return false;
+    uint32_t now = now_us();
+    bool found = false;
+    for (unsigned i = 0; i < CHANNELS; i++) {
+        channel_t *channel = &channels[i];
+        uint32_t due;
+        if (!channel->id || !channel_is_live(channel))
+            continue;
+        /* Frames the receive budget left behind were announced already, so
+         * nothing will announce them again: the next pass takes them. */
+        if (!channel->parent && !channel->rx_drained) {
+            *due_us = now;
+            return true;
+        }
+        if (channel->parent && channel->tx_active) {
+            const isotp_tx_t *tx = &channel->iso_tx;
+            if (tx->state == ISOTP_TX_CF)
+                wake_candidate(now, tx->next_us, &found, due_us);
+            else if (tx->state != ISOTP_TX_IDLE)
+                wake_candidate(now, tx->deadline_us, &found, due_us);
+        }
+        if (channel->parent && channel->iso_rx.state != ISOTP_RX_IDLE)
+            wake_candidate(now, channel->iso_rx.deadline_us, &found, due_us);
+        if (j2534_schedule_next_due(&channel->scheduler, &due))
+            wake_candidate(now, due, &found, due_us);
+    }
+    if (held.active)
+        wake_candidate(now, held.deadline_us, &found, due_us);
+    return found;
+}
+
 static uint32_t connect_channel(const opendiag_Connect *req) {
     if (req->device != device)
         return J2534_DEVICE;
@@ -906,12 +1047,13 @@ static uint32_t connect_channel(const opendiag_Connect *req) {
     if (flags & ~allowed)
         return J2534_FLAGS;
 
-    if (count != (pin2 ? 2u : 1u) || req->pins[0] != pin1 ||
-        (pin2 && req->pins[1] != pin2))
+    if (count != (pin2 ? 2u : 1u))
+        return J2534_CONFLICT;
+
+    if (req->pins[0] != pin1 || (pin2 && req->pins[1] != pin2))
         return J2534_PIN;
 
-    if (vif_any_pin_active() ||
-        vif_bus_current(VIF_OWNER_LINK, bus) != VIF_BUS_NONE ||
+    if (vif_bus_current(VIF_OWNER_LINK, bus) != VIF_BUS_NONE ||
         vif_bus_current(VIF_OWNER_SHELL, bus) != VIF_BUS_NONE)
         return J2534_CONFLICT;
 
@@ -924,6 +1066,8 @@ static uint32_t connect_channel(const opendiag_Connect *req) {
     channel->protocol = proto;
     channel->flags = flags;
     channel->rate = rate;
+    /* Nothing received yet, so nothing left behind; what comes will wake. */
+    channel->rx_drained = true;
     vif_bus_cfg_t cfg = {.bitrate = rate, .manual_recovery = true};
 
     if (vif_bus_open(VIF_OWNER_LINK, bus, &cfg) != ESP_OK) {
@@ -961,7 +1105,7 @@ static uint32_t connect_channel(const opendiag_Connect *req) {
         vif_bus_param_set(VIF_OWNER_LINK, bus, BUS_P_DUPLICATE_MS, 0);
     if (rc) {
         disconnect_channel(channel);
-        return J2534_VALUE;
+        return rc == BUS_ERR_BUS_BUSY ? J2534_CONFLICT : J2534_VALUE;
     }
     response.id = channel->id;
     return J2534_OK;
@@ -1333,41 +1477,28 @@ static uint32_t set_programming_voltage(const opendiag_Voltage *req) {
         if (vif_pin_set(VIF_OWNER_LINK, pin, VIF_PIN_OFF, 0) != ESP_OK)
             return J2534_PIN_IN_USE;
 
-        if ((int)pin == voltage_pin)
-            voltage_pin = -1;
         return J2534_OK;
     }
-    vif_bus_claim_t claims[VIF_BUS_GROUPS];
-    vif_bus_info(claims);
-    for (unsigned i = 0; i < VIF_BUS_GROUPS; i++)
-        if ((claims[i].bus == VIF_BUS_CAN && (pin == 6 || pin == 14)) ||
-            (claims[i].bus == VIF_BUS_KLINE && pin == 15))
-            return J2534_PIN_IN_USE;
 
     if (mv == UINT32_MAX - 1) {
-        bool groundable = (pin == 15);
-#if OPENDIAG_HW_LS_OBD_9
-        groundable = groundable || (pin == 9);
-#endif
-        if (!groundable)
-            return J2534_VALUE;
+        if (pin != 15)
+            return J2534_PIN;
 
         mode = VIF_PIN_GROUND;
         mv = 0;
     } else {
-        if (pin == 15 || mv < 5000 || mv > 20000)
-            return J2534_VALUE;
-
-        if (voltage_pin >= 0 && voltage_pin != (int)pin)
-            return J2534_VOLTAGE_IN_USE;
+        if (pin == 15)
+            return J2534_PIN;
+        if (mv < 5000 || mv > 20000)
+            return J2534_LIMIT;
 
         mode = VIF_PIN_VOLTAGE;
     }
-    if (vif_pin_set(VIF_OWNER_LINK, pin, mode, mv) != ESP_OK)
+    esp_err_t err = vif_pin_set(VIF_OWNER_LINK, pin, mode, mv);
+    if (err == VIF_ERR_VOLTAGE_IN_USE)
+        return J2534_VOLTAGE_IN_USE;
+    if (err != ESP_OK)
         return J2534_PIN_IN_USE;
-
-    if (mode == VIF_PIN_VOLTAGE)
-        voltage_pin = pin;
 
     return J2534_OK;
 }
@@ -1433,7 +1564,7 @@ static uint32_t fast_init(channel_t *channel, const opendiag_FastInit *req) {
 static uint32_t read_capabilities(void) {
     response.has_capabilities = true;
     response.capabilities = (opendiag_Capabilities){
-        .wire_version = 1,
+        .wire_version = J2534_PROTOCOL_REVISION,
         .api_version = 0x0500,
         .physical_channels = J2534_PHYSICAL_MAX,
         .logical_channels = J2534_LOGICAL_MAX,
@@ -1887,7 +2018,6 @@ static uint32_t dispatch_request(void) {
         if (vif_pin_release_all(VIF_OWNER_LINK) != ESP_OK)
             return J2534_FAILED;
 
-        voltage_pin = -1;
         if (vif_bus_release_all(VIF_OWNER_LINK) != ESP_OK)
             return J2534_FAILED;
 
@@ -1904,8 +2034,8 @@ static uint32_t dispatch_request(void) {
             return J2534_DEVICE;
 
         snprintf(response.text, sizeof(response.text),
-                 "OpenDIAG %s; protobuf wire 1; J2534 05.00 subset",
-                 esp_app_get_description()->version);
+                 "OpenDIAG %s; protobuf wire %u; J2534 05.00 subset",
+                 esp_app_get_description()->version, J2534_PROTOCOL_REVISION);
         return J2534_OK;
     case opendiag_Request_select_tag:
         return select_channels(&req->command.select);
@@ -1921,17 +2051,26 @@ static uint32_t dispatch_request(void) {
     return dispatch_channel_request(req);
 }
 
-size_t j2534_core_request(uint8_t op, const uint8_t *in, size_t len,
-                          uint8_t out[J2534_RPC_MAX]) {
-    memset(&request, 0, sizeof(request));
-    memset(&response, 0, sizeof(response));
-    pb_istream_t input = pb_istream_from_buffer(in, len);
+/* Whether the answer just computed for request is one the host asked to
+ * wait past: nothing to read yet, or fewer readable channels than wanted. */
+static bool still_waiting(void) {
+    if (request.which_command == opendiag_Request_read_tag)
+        return response.status == J2534_EMPTY;
+    if (request.which_command == opendiag_Request_select_tag)
+        return response.status == J2534_OK &&
+               response.channels_count < request.command.select.threshold;
+    return false;
+}
 
-    if (!pb_decode(&input, opendiag_Request_fields, &request) ||
-        request.which_command != (unsigned)op + 1)
-        response.status = J2534_MSG;
-    else
-        response.status = dispatch_request();
+static uint32_t wait_ms(void) {
+    if (request.which_command == opendiag_Request_read_tag)
+        return request.command.read.timeout_ms;
+    if (request.which_command == opendiag_Request_select_tag)
+        return request.command.select.timeout_ms;
+    return 0;
+}
+
+static size_t encode_response(uint8_t out[J2534_RPC_MAX]) {
     if (response.status)
         last_error = response.status;
     pb_ostream_t output = pb_ostream_from_buffer(out, J2534_RPC_MAX);
@@ -1945,6 +2084,54 @@ size_t j2534_core_request(uint8_t op, const uint8_t *in, size_t len,
     return output.bytes_written;
 }
 
+size_t j2534_core_request(uint8_t op, const uint8_t *in, size_t len,
+                          uint8_t out[J2534_RPC_MAX]) {
+    held.active = false;
+    memset(&request, 0, sizeof(request));
+    memset(&response, 0, sizeof(response));
+    pb_istream_t input = pb_istream_from_buffer(in, len);
+
+    if (!pb_decode(&input, opendiag_Request_fields, &request) ||
+        request.which_command != (unsigned)op + 1) {
+        response.status = J2534_MSG;
+    } else {
+        response.status = dispatch_request();
+        uint32_t timeout_ms = wait_ms();
+        if (timeout_ms && still_waiting()) {
+            if (timeout_ms > J2534_WAIT_MAX_MS)
+                timeout_ms = J2534_WAIT_MAX_MS;
+            held.active = true;
+            held.deadline_us = now_us() + timeout_ms * 1000u;
+            return J2534_CORE_HELD;
+        }
+    }
+    return encode_response(out);
+}
+
+bool j2534_core_take_held(uint8_t out[J2534_RPC_MAX], size_t *len) {
+    if (!held.active)
+        return false;
+    /* The same call again: it consumes the message it finds, and reports a
+     * channel that went away meanwhile exactly as a fresh request would. */
+    memset(&response, 0, sizeof(response));
+    response.status = dispatch_request();
+    if (still_waiting() && (int32_t)(now_us() - held.deadline_us) < 0)
+        return false;
+    held.active = false;
+    progress++;
+    *len = encode_response(out);
+    return true;
+}
+
+uint32_t j2534_core_progress(void) { return progress; }
+
+void j2534_core_cancel_held(void) { held.active = false; }
+
+void j2534_core_wake_held(void) {
+    if (held.active)
+        held.deadline_us = now_us();
+}
+
 bool j2534_core_start(void) {
     j2534_core_stop();
     last_error = 0;
@@ -1952,6 +2139,7 @@ bool j2534_core_start(void) {
 }
 
 void j2534_core_stop(void) {
+    held.active = false;
     /* VIF joins workers after stop(); cancel queued copies before dropping IDs.
      */
     for (unsigned i = 0; i < J2534_PHYSICAL_MAX; i++)
@@ -1960,5 +2148,4 @@ void j2534_core_stop(void) {
     for (unsigned i = 0; i < CHANNELS; i++)
         release_channel(&channels[i]);
     device = 0;
-    voltage_pin = -1;
 }

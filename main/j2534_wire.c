@@ -10,6 +10,7 @@
 #define WIRE_HEADER_SIZE 16u
 #define WIRE_CRC_SIZE 4u
 #define WIRE_FRAME_MAX (WIRE_HEADER_SIZE + J2534_FRAGMENT_MAX + WIRE_CRC_SIZE)
+_Static_assert(WIRE_FRAME_MAX == J2534_WIRE_FRAME_MAX, "wire frame size");
 #define WIRE_TIMEOUT_US 2000000u
 
 /* Header fields after the four-byte magic; multibyte fields are little-endian.
@@ -27,6 +28,8 @@ enum {
     WIRE_MORE = 1,
     WIRE_FETCH = 2,
     WIRE_ACK = 4,
+    /* Host to device, unanswered: end the held request with this sequence. */
+    WIRE_WAKE = 8,
     WIRE_RESPONSE = 128,
 };
 
@@ -42,6 +45,8 @@ static struct {
     uint8_t operation;
     bool assembling_request;
     bool response_ready;
+    /* The core is holding the request until it has an answer. */
+    bool held;
 } wire;
 
 static uint16_t get_le16(const uint8_t *data) {
@@ -72,9 +77,12 @@ static uint32_t frame_crc(const uint8_t *frame, size_t payload_len) {
 
 static void send_fragment(uint8_t flags, size_t offset, const uint8_t *data,
                           size_t len) {
-    uint8_t frame[WIRE_FRAME_MAX] = {'J', '2',          '5',
-                                     '3', WIRE_VERSION, wire.operation};
+    /* Link task only: too large for its stack. */
+    static uint8_t frame[WIRE_FRAME_MAX];
 
+    memcpy(frame, WIRE_MAGIC, WIRE_MAGIC_SIZE);
+    frame[WIRE_VERSION_OFFSET] = WIRE_VERSION;
+    frame[WIRE_OPERATION_OFFSET] = wire.operation;
     put_le16(frame + WIRE_FLAGS_OFFSET, WIRE_RESPONSE | flags);
     j2534_put32(frame + WIRE_SEQUENCE_OFFSET, wire.sequence);
     put_le16(frame + WIRE_FRAGMENT_OFFSET, offset);
@@ -130,10 +138,23 @@ static void process_frame(void) {
         return;
     }
 
+    /* One that arrives after its request was answered finds nothing held. */
+    if (flags == WIRE_WAKE) {
+        if (!len && wire.held && sequence == wire.sequence &&
+            operation == wire.operation)
+            j2534_core_wake_held();
+        return;
+    }
+
     if (flags & ~(unsigned)WIRE_MORE)
         return;
 
     if (!offset) {
+        /* A new request means the host stopped waiting for the held one. */
+        if (wire.held) {
+            j2534_core_cancel_held();
+            wire.held = false;
+        }
         wire.request_len = 0;
         wire.sequence = sequence;
         wire.operation = operation;
@@ -159,8 +180,13 @@ static void process_frame(void) {
     }
 
     wire.assembling_request = false;
-    wire.response_len = j2534_core_request(wire.operation, wire.request,
-                                           wire.request_len, wire.response);
+    size_t response_len = j2534_core_request(wire.operation, wire.request,
+                                             wire.request_len, wire.response);
+    if (response_len == J2534_CORE_HELD) {
+        wire.held = true;
+        return;
+    }
+    wire.response_len = response_len;
     wire.response_ready = true;
     send_response_fragment(0);
 }
@@ -203,6 +229,18 @@ static void feed(const uint8_t *data, size_t len) {
     }
 }
 
+static void poll(void) {
+    size_t len;
+
+    j2534_core_poll();
+    if (wire.held && j2534_core_take_held(wire.response, &len)) {
+        wire.held = false;
+        wire.response_len = len;
+        wire.response_ready = true;
+        send_response_fragment(0);
+    }
+}
+
 static bool start(void) {
     memset(&wire, 0, sizeof(wire));
     return j2534_core_start();
@@ -217,8 +255,10 @@ const vif_frontend_t j2534_frontend = {
     .name = "j2534",
     .start = start,
     .feed = feed,
-    .poll = j2534_core_poll,
+    .poll = poll,
     .stop = stop,
+    .next_wake = j2534_core_next_wake,
+    .progress = j2534_core_progress,
 };
 
 void j2534_register(void) {

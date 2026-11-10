@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "../common/api_trace.h"
 #include "../include/j2534.h"
+#include "link.h"
 #include <exception>
 
 extern const void *moduleAnchor;
@@ -277,6 +278,14 @@ extern "C" J2534_EXPORT J2534_LONG J2534_CALL OpenDiagLogicalConnect0404(J2534_U
                                                                          void *descriptor,
                                                                          J2534_ULONG *channel) {
     return logicalConnect(physical, protocol, flags, descriptor, channel, true);
+}
+
+// Private bridge: 04.04 lets threads overlap, which 05.00 forbids, so its adapter keeps
+// one native call at a time and arms this to cut a waiting call short for the next one.
+// It is the one entry that runs alongside another call, so it takes no API guard.
+extern "C" J2534_EXPORT J2534_LONG J2534_CALL OpenDiagWakeWait0404(J2534_ULONG armed) {
+    Link::wakeWaits(armed != 0);
+    return STATUS_NOERROR;
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruLogicalDisconnect(J2534_ULONG ChannelID) {

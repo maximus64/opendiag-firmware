@@ -3,7 +3,12 @@
 
 #include "vif.h"
 
-#define J2534_FRAGMENT_MAX 192u
+/* Payload per wire frame: a 258-byte flash block, with its message header,
+ * fits one frame. The host sends a frame only once the last is answered, so
+ * a link's receive buffer must hold one whole frame: this, 16 bytes of header
+ * and a 4-byte CRC. */
+#define J2534_FRAGMENT_MAX 1024u
+#define J2534_WIRE_FRAME_MAX (J2534_FRAGMENT_MAX + 20u)
 #define J2534_RPC_MAX 4608u
 #define J2534_DATA_MAX 4128u
 #define J2534_PHYSICAL_MAX 3u
@@ -108,8 +113,27 @@ void j2534_register(void);
 bool j2534_core_start(void);
 void j2534_core_stop(void);
 void j2534_core_poll(void);
+/* The next instant poll() has work for without input or bus events. */
+bool j2534_core_next_wake(uint32_t *due_us);
+/* Rises whenever poll() acts; see vif_frontend_t.progress. */
+uint32_t j2534_core_progress(void);
+/* RPC contract revision, Capabilities.wire_version. 2: Read and Select wait
+ * on the device. 3: a WAKE frame ends that wait early. */
+#define J2534_PROTOCOL_REVISION 3u
+/* Longest a Read or Select may wait on the device, as J2534 allows. */
+#define J2534_WAIT_MAX_MS 30000u
+/* j2534_core_request() result for a request answered later, from
+ * j2534_core_take_held(). */
+#define J2534_CORE_HELD SIZE_MAX
 size_t j2534_core_request(uint8_t op, const uint8_t *in, size_t len,
                           uint8_t out[J2534_RPC_MAX]);
+/* After each poll: the held request's answer once it has one or times out. */
+bool j2534_core_take_held(uint8_t out[J2534_RPC_MAX], size_t *len);
+/* The host has moved on, so a held request must not be answered. */
+void j2534_core_cancel_held(void);
+/* Another caller needs the link: answer the held request on the next poll,
+ * as though its timeout had run out. */
+void j2534_core_wake_held(void);
 
 static inline uint32_t j2534_u32(const uint8_t *p) {
     return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 |

@@ -30,7 +30,7 @@
 #include "vif.h"
 #include "vif_ctrl.h"
 
-#define OBD_PIN_HS 6
+#define OBD_PIN_HS 13
 
 static const vif_bus_cfg_t can500 = {.bitrate = 500000};
 

@@ -60,8 +60,17 @@ bool fake_can_last_listen_only(void);
 /** Makes the next can_send() fail, to exercise the error path. */
 void fake_can_fail_next_send(void);
 
+/** Lets @p sends more can_send() calls succeed, then fails the one after. */
+void fake_can_fail_send_after(int sends);
+/** Reports each controlled send as having ended @p lag_us before it returns,
+ * as the hardware finishes before the task that collects it hears. */
+void fake_can_tx_end_lag_us(uint32_t lag_us);
+
 /** Makes can_bus_setup() refuse, to exercise a driver that will not start. */
 void fake_can_fail_setup(bool fail);
+
+/** Called inside setup/teardown to exercise a reserved, inactive CAN claim. */
+void fake_can_on_lifecycle(void (*hook)(void));
 
 /* --- Inspecting transmitted traffic --- */
 

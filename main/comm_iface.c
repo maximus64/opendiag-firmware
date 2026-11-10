@@ -6,6 +6,7 @@
 #include <strings.h>
 #include "freertos/ringbuf.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "ble_uart.h"
@@ -27,6 +28,7 @@ static struct {
     bool initialized;
     SemaphoreHandle_t lock; /* Protects the table below */
     port_t ports[COMM_MAX_PORTS];
+    void (*rx_hook)(comm_port_id_t port_id);
 } g_comm;
 
 #define LOCK() xSemaphoreTake(g_comm.lock, portMAX_DELAY)
@@ -131,7 +133,8 @@ esp_err_t comm_port_rx(comm_port_id_t port_id, const uint8_t *data,
 
     /* Non-blocking on purpose. We are running in the transport's task, so
      * waiting here would stall USB or BLE for every other consumer. */
-    if (xRingbufferSend(port->rx_stream, data, length, 0) == pdTRUE) {
+    bool queued = xRingbufferSend(port->rx_stream, data, length, 0) == pdTRUE;
+    if (queued) {
         port->rx_pending += length;
     } else {
         port->rx_dropped++;
@@ -142,7 +145,16 @@ esp_err_t comm_port_rx(comm_port_id_t port_id, const uint8_t *data,
     }
     UNLOCK();
 
+    /* Woken for a full buffer too: its reader is the one falling behind. */
+    void (*hook)(comm_port_id_t) =
+        __atomic_load_n(&g_comm.rx_hook, __ATOMIC_ACQUIRE);
+    if (hook)
+        hook(port_id);
     return ESP_OK;
+}
+
+void comm_iface_set_rx_hook(void (*hook)(comm_port_id_t port_id)) {
+    __atomic_store_n(&g_comm.rx_hook, hook, __ATOMIC_RELEASE);
 }
 
 size_t comm_port_read(comm_port_id_t port_id, uint8_t *buf, size_t length,
@@ -258,33 +270,44 @@ void comm_port_client_ready(comm_port_id_t port_id) {
     UNLOCK();
 }
 
+/** Ticks a transport may take nothing before a write gives up: a host that
+ * stops reading costs this much, rather than stalling the link. */
+#define PORT_WRITE_STALL_TICKS 2
+
 /**
- * @brief Write to one port, retrying the remainder once through a flush.
+ * @brief Write to one port, flushing while it drains.
  *
- * tinyusb_cdcacm_write_queue() accepts only what fits in its FIFO, so a large
- * response would otherwise be silently truncated when the host is slow.
+ * tinyusb_cdcacm_write_queue() accepts only what fits in its FIFO, and a
+ * J2534 wire frame can be larger than that, so the rest goes in as the host
+ * reads rather than being silently truncated.
  */
 static bool port_write_all(const comm_port_ops_t *ops, const uint8_t *data,
                            size_t length) {
-    int written = ops->write(data, length);
+    unsigned stalls = 0;
 
-    if (written <= 0) {
-        return false;
-    }
+    for (;;) {
+        int written = ops->write(data, length);
 
-    if ((size_t)written < length && ops->flush) {
+        if (written < 0) {
+            return false;
+        }
+        data += written;
+        length -= (size_t)written;
+        if (!length) {
+            return true;
+        }
+        if (!ops->flush) {
+            return false;
+        }
         ops->flush();
-        int more = ops->write(data + written, length - written);
-        if (more > 0) {
-            written += more;
+        if (written) {
+            stalls = 0;
+        } else if (stalls++ == PORT_WRITE_STALL_TICKS) {
+            return false;
+        } else {
+            vTaskDelay(1);
         }
     }
-
-    if ((size_t)written < length) {
-        return false;
-    }
-
-    return true;
 }
 
 esp_err_t comm_port_write(comm_port_id_t port_id, const void *data,

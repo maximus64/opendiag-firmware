@@ -69,7 +69,7 @@ LDFLAGS += -static -static-libgcc -static-libstdc++ -Wl,--no-insert-timestamp
 LDFLAGS += -Wl,--major-subsystem-version,5,--minor-subsystem-version,1
 LDFLAGS += -Wl,--subsystem,windows
 PLATFORM := platform/windows.cpp
-LDLIBS += -lws2_32
+LDLIBS += -lws2_32 -lshell32
 NATIVE_LIB := $(BUILD_DIR)/opendiag32.dll
 LEGACY_LIB := $(BUILD_DIR)/odg40432.dll
 PRODUCTS := $(NATIVE_LIB) $(LEGACY_LIB) $(BUILD_DIR)/opendiag_config.exe
@@ -117,7 +117,7 @@ $(sort $(CORE_OBJECTS) $(LEGACY_OBJECTS) $(GUI_OBJECTS)) $(BUILD_DIR)/tests/abi0
 $(call objects,$(CORE)): $(GENERATED_DIR)/j2534.pb.h
 ifeq ($(TARGET_OS),win32)
 $(BUILD_DIR)/driver/version.res $(BUILD_DIR)/legacy/version.res $(BUILD_DIR)/config/config.res: $(CONFIG_STAMP) $(VERSION_HEADER) Makefile
-$(BUILD_DIR)/config/config.res: config/resource.h
+$(BUILD_DIR)/config/config.res: config/resource.h config/config.manifest
 endif
 
 .PHONY: all clean test repeat-test check-toolchain check-wincompat package

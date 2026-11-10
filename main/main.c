@@ -37,9 +37,10 @@
 comm_port_id_t g_port_usb_cdc0 = COMM_INVALID_PORT_ID;
 comm_port_id_t g_port_ble = COMM_INVALID_PORT_ID;
 
-/** Room for a full command line and then some; overflow is dropped, not
- * blocked. */
-#define LINK_RX_BUF 256
+/** Room for a whole J2534 wire frame, and so for any command line; overflow
+ * is dropped, not blocked. */
+#define LINK_RX_BUF 2048
+_Static_assert(LINK_RX_BUF >= J2534_WIRE_FRAME_MAX, "a frame must fit");
 
 /* USB CDC 0: the USB data link */
 static int port_usb_cdc0_write(const void *buf, uint32_t length) {

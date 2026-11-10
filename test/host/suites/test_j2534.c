@@ -2,6 +2,7 @@
 #include <string.h>
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "esp_timer.h"
 #include "fake_board.h"
 #include "fake_bus.h"
 #include "fake_bus_tx_worker.h"
@@ -34,17 +35,20 @@ static uint32_t call(void) {
     TEST_ASSERT_TRUE(pb_decode(&input, opendiag_Response_fields, &res));
     return res.status;
 }
-static uint32_t connect_can(uint32_t flags) {
+static uint32_t connect_can_at(uint32_t flags, uint32_t rate) {
     command(opendiag_Request_connect_tag);
     req.command.connect = (opendiag_Connect){.device = dev,
                                              .protocol = J2534_CAN,
                                              .flags = flags,
-                                             .baudrate = 500000,
+                                             .baudrate = rate,
                                              .connector = 1,
                                              .pins_count = 2,
                                              .pins = {6, 14}};
     TEST_ASSERT_EQUAL_INT(0, call());
     return res.id;
+}
+static uint32_t connect_can(uint32_t flags) {
+    return connect_can_at(flags, 500000);
 }
 static uint32_t logical(uint32_t physical, bool extended) {
     command(opendiag_Request_logical_connect_tag);
@@ -226,6 +230,18 @@ TEST(logical_single_frame_receive_is_independent_of_physical_filter) {
                           7);
     TEST_ASSERT_EQUAL_INT(J2534_EMPTY, read_message(p));
 }
+TEST(physical_can_transmits_raw_frames_while_logical_channels_are_open) {
+    uint32_t physical = connect_can(0);
+    logical(physical, false);
+    const uint8_t raw[] = {0, 0, 7, 0xdf, 2, 1, 0x0c};
+    queue(physical, J2534_CAN, 0, raw, sizeof(raw));
+    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
+    j2534_core_poll();
+    TEST_ASSERT_EQUAL_INT(1, fake_can_sent_count());
+    TEST_ASSERT_EQUAL_INT(0x7df, fake_can_sent(0)->id);
+    TEST_ASSERT_EQUAL_INT(3, fake_can_sent(0)->dlc);
+    TEST_ASSERT_EQUAL_MEM(raw + 4, fake_can_sent(0)->data, 3);
+}
 TEST(logical_multiframe_receive_emits_start_and_flow_control) {
     uint32_t ch = logical(connect_can(0), false);
     const uint8_t first[] = {0x10, 10, 1, 2, 3, 4, 5, 6};
@@ -262,6 +278,196 @@ TEST(logical_transmit_waits_for_flow_control) {
     TEST_ASSERT_EQUAL_INT(0x21, fake_can_sent(1)->data[0]);
     TEST_ASSERT_EQUAL_INT(0, read_message(ch));
     TEST_ASSERT_EQUAL_INT(J2534_TX_SUCCESS, res.message.rx_status);
+}
+/* FF plus five CFs; the flow control frame is staged by each test. */
+static uint32_t queue_segmented(void) {
+    uint32_t ch = logical(connect_can(0), false);
+    uint8_t msg[4 + 40] = {0, 0, 7, 0xe0};
+    for (unsigned i = 4; i < sizeof(msg); i++)
+        msg[i] = (uint8_t)i;
+    queue(ch, J2534_ISOTP, J2534_PAD, msg, sizeof(msg));
+    TEST_ASSERT_EQUAL_INT(0, call());
+    j2534_core_poll();
+    TEST_ASSERT_EQUAL_INT(1, fake_can_sent_count());
+    return ch;
+}
+static void stage_flow_control(uint8_t block_size, uint8_t stmin) {
+    const uint8_t fc[] = {0x30, block_size, stmin, 0, 0, 0, 0, 0};
+    fake_can_stage_stale(0x7e8, 8, fc);
+}
+/* Microseconds from now until the core wants polling again; -1 for never. */
+static int64_t next_wake_in_us(void) {
+    uint32_t due;
+    if (!j2534_core_next_wake(&due))
+        return -1;
+    return (int32_t)(due - (uint32_t)esp_timer_get_time());
+}
+TEST(nothing_to_do_asks_for_no_wakeup) {
+    logical(connect_can(0), false);
+    j2534_core_poll();
+    TEST_ASSERT_EQUAL_INT(-1, next_wake_in_us());
+}
+TEST(frames_beyond_the_receive_budget_ask_for_another_pass_now) {
+    uint32_t p = connect_can(0);
+    filter(p, 1, 0, 0);
+    const uint8_t frame[8] = {1};
+    for (int i = 0; i < 40; i++)
+        fake_can_stage_stale(0x123, 8, frame);
+    j2534_core_poll();
+    uint32_t due;
+    TEST_ASSERT_TRUE(j2534_core_next_wake(&due));
+    TEST_ASSERT_TRUE((int32_t)(due - (uint32_t)esp_timer_get_time()) <= 0);
+    j2534_core_poll();
+    TEST_ASSERT_FALSE(j2534_core_next_wake(&due));
+}
+TEST(every_received_frame_counts_as_progress) {
+    uint32_t p = connect_can(0);
+    filter(p, 1, 0, 0);
+    const uint8_t frame[8] = {1};
+    uint32_t before = j2534_core_progress();
+    fake_can_stage_stale(0x123, 8, frame);
+    j2534_core_poll();
+    TEST_ASSERT_TRUE(j2534_core_progress() != before);
+    before = j2534_core_progress();
+    j2534_core_poll();
+    TEST_ASSERT_EQUAL_INT(before, j2534_core_progress());
+}
+TEST(zero_stmin_sends_the_rest_of_the_message_as_one_train) {
+    uint32_t ch = queue_segmented();
+    stage_flow_control(0, 0);
+    j2534_core_poll();
+    TEST_ASSERT_EQUAL_INT(6, fake_can_sent_count());
+    for (int i = 1; i < 6; i++)
+        TEST_ASSERT_EQUAL_INT(0x20 + i, fake_can_sent(i)->data[0]);
+    TEST_ASSERT_EQUAL_INT(43, fake_can_sent(5)->data[6]);
+    TEST_ASSERT_EQUAL_INT(0, read_message(ch));
+    TEST_ASSERT_EQUAL_INT(J2534_TX_SUCCESS, res.message.rx_status);
+    TEST_ASSERT_EQUAL_INT(-1, next_wake_in_us());
+}
+static void assert_wakes_for_stmin(uint8_t stmin, int64_t separation_us) {
+    queue_segmented();
+    stage_flow_control(0, stmin);
+    j2534_core_poll();
+    TEST_ASSERT_EQUAL_INT(2, fake_can_sent_count());
+    int64_t wait = next_wake_in_us();
+    TEST_ASSERT_TRUE(wait > separation_us - 50 && wait <= separation_us);
+    j2534_core_poll();
+    TEST_ASSERT_EQUAL_INT(2, fake_can_sent_count());
+    fake_clock_advance_ms(separation_us / 1000 + 1);
+    j2534_core_poll();
+    TEST_ASSERT_EQUAL_INT(3, fake_can_sent_count());
+    TEST_ASSERT_EQUAL_INT(0x22, fake_can_sent(2)->data[0]);
+}
+TEST(next_wake_is_the_peers_stmin_after_a_consecutive_frame) {
+    assert_wakes_for_stmin(5, 5000);
+}
+TEST(next_wake_honours_sub_millisecond_stmin) {
+    assert_wakes_for_stmin(0xf5, 500);
+}
+TEST(stmin_runs_from_when_the_frame_left_not_when_it_was_collected) {
+    queue_segmented();
+    stage_flow_control(0, 5);
+    fake_can_tx_end_lag_us(300);
+    j2534_core_poll();
+    TEST_ASSERT_EQUAL_INT(2, fake_can_sent_count());
+    int64_t wait = next_wake_in_us();
+    TEST_ASSERT_TRUE(wait > 4650 && wait <= 4700);
+}
+/* A long message after a zero STmin flow control: the frames of the first
+ * train, which must fit the time budget at @p rate. */
+static int first_train_at(uint32_t rate) {
+    uint32_t ch = logical(connect_can_at(0, rate), false);
+    uint8_t msg[4 + 300] = {0, 0, 7, 0xe0};
+    queue(ch, J2534_ISOTP, J2534_PAD, msg, sizeof(msg));
+    TEST_ASSERT_EQUAL_INT(0, call());
+    j2534_core_poll();
+    TEST_ASSERT_EQUAL_INT(1, fake_can_sent_count());
+    stage_flow_control(0, 0);
+    j2534_core_poll();
+    return fake_can_sent_count() - 1;
+}
+/* 11-bit, eight bytes, worst-case stuffing: 135 bits. */
+TEST(a_train_holds_the_bus_for_at_most_four_milliseconds_at_500k) {
+    TEST_ASSERT_EQUAL_INT(14, first_train_at(500000));
+}
+TEST(a_train_holds_the_bus_for_at_most_four_milliseconds_at_125k) {
+    TEST_ASSERT_EQUAL_INT(3, first_train_at(125000));
+}
+TEST(a_frame_longer_than_the_budget_goes_out_alone) {
+    TEST_ASSERT_EQUAL_INT(1, first_train_at(50000));
+}
+TEST(trains_follow_each_other_until_the_message_is_sent) {
+    uint32_t ch = logical(connect_can(0), false);
+    uint8_t msg[4 + 300] = {0, 0, 7, 0xe0};
+    queue(ch, J2534_ISOTP, J2534_PAD, msg, sizeof(msg));
+    TEST_ASSERT_EQUAL_INT(0, call());
+    j2534_core_poll();
+    stage_flow_control(0, 0);
+    for (int i = 0; i < 10 && fake_can_sent_count() < 43; i++)
+        j2534_core_poll();
+    TEST_ASSERT_EQUAL_INT(43, fake_can_sent_count());
+    TEST_ASSERT_EQUAL_INT(0x2a, fake_can_sent(42)->data[0]);
+    TEST_ASSERT_EQUAL_INT(0, read_message(ch));
+    TEST_ASSERT_EQUAL_INT(J2534_TX_SUCCESS, res.message.rx_status);
+}
+TEST(a_train_stops_at_the_block_size_and_waits_for_the_n_bs_timeout) {
+    queue_segmented();
+    stage_flow_control(2, 0);
+    j2534_core_poll();
+    TEST_ASSERT_EQUAL_INT(3, fake_can_sent_count());
+    j2534_core_poll();
+    TEST_ASSERT_EQUAL_INT(3, fake_can_sent_count());
+    int64_t wait = next_wake_in_us();
+    TEST_ASSERT_TRUE(wait > 999000 && wait <= 1000000);
+    stage_flow_control(2, 0);
+    j2534_core_poll();
+    TEST_ASSERT_EQUAL_INT(5, fake_can_sent_count());
+    TEST_ASSERT_EQUAL_INT(0x23, fake_can_sent(3)->data[0]);
+    TEST_ASSERT_EQUAL_INT(0x24, fake_can_sent(4)->data[0]);
+}
+TEST(a_frame_failing_mid_train_fails_the_message_once_and_sends_no_more) {
+    uint32_t ch = queue_segmented();
+    stage_flow_control(0, 0);
+    fake_can_fail_send_after(2);
+    j2534_core_poll();
+    TEST_ASSERT_EQUAL_INT(3, fake_can_sent_count());
+    TEST_ASSERT_EQUAL_INT(0, read_message(ch));
+    TEST_ASSERT_EQUAL_INT(J2534_TX_FAILED, res.message.rx_status);
+    TEST_ASSERT_EQUAL_INT(J2534_EMPTY, read_message(ch));
+    j2534_core_poll();
+    TEST_ASSERT_EQUAL_INT(3, fake_can_sent_count());
+    TEST_ASSERT_EQUAL_INT(-1, next_wake_in_us());
+}
+TEST(every_frame_of_a_train_is_echoed_in_order) {
+    uint32_t p = connect_can(0);
+    filter(p, 1, 0, 0);
+    command(opendiag_Request_ioctl_tag);
+    req.command.ioctl.target = p;
+    req.command.ioctl.id = 2;
+    req.command.ioctl.config_count = 1;
+    req.command.ioctl.config[0] =
+        (opendiag_Config){.parameter = 0x31, .value = 1};
+    TEST_ASSERT_EQUAL_INT(0, call());
+    uint32_t ch = logical(p, false);
+    uint8_t msg[4 + 40] = {0, 0, 7, 0xe0};
+    queue(ch, J2534_ISOTP, J2534_PAD, msg, sizeof(msg));
+    TEST_ASSERT_EQUAL_INT(0, call());
+    j2534_core_poll();
+    stage_flow_control(0, 0);
+    j2534_core_poll();
+    TEST_ASSERT_EQUAL_INT(6, fake_can_sent_count());
+    uint8_t expected = 0x10, echoes = 0;
+    uint32_t previous = 0;
+    while (read_message(p) == 0) {
+        if (!(res.message.rx_status & J2534_TX_MSG))
+            continue;
+        TEST_ASSERT_EQUAL_INT(expected, res.message.data.bytes[4]);
+        TEST_ASSERT_TRUE((int32_t)(res.message.timestamp_us - previous) >= 0);
+        previous = res.message.timestamp_us;
+        expected = expected == 0x10 ? 0x21 : expected + 1;
+        echoes++;
+    }
+    TEST_ASSERT_EQUAL_INT(6, echoes);
 }
 TEST(parent_disconnect_invalidates_logical_handle) {
     uint32_t p = connect_can(0), ch = logical(p, false);
@@ -360,12 +566,15 @@ TEST(periodic_messages_stop_and_clear) {
     uint32_t id = res.id;
     j2534_core_poll();
     TEST_ASSERT_EQUAL_INT(1, fake_can_sent_count());
+    int64_t wait = next_wake_in_us();
+    TEST_ASSERT_TRUE(wait > 9900 && wait <= 10000);
     fake_clock_advance_ms(10);
     j2534_core_poll();
     TEST_ASSERT_EQUAL_INT(2, fake_can_sent_count());
     command(opendiag_Request_stop_periodic_tag);
     req.command.stop_periodic = (opendiag_Object){ch, id};
     TEST_ASSERT_EQUAL_INT(0, call());
+    TEST_ASSERT_EQUAL_INT(-1, next_wake_in_us());
     fake_clock_advance_ms(20);
     j2534_core_poll();
     TEST_ASSERT_EQUAL_INT(2, fake_can_sent_count());
@@ -431,6 +640,34 @@ TEST(bytebus_crc_is_removed_and_checksum_disabled_is_preserved) {
     TEST_ASSERT_EQUAL_INT(0, read_message(ch));
     TEST_ASSERT_EQUAL_INT(6, res.message.data.size);
 }
+TEST(all_bytebus_protocols_strip_the_checksum_when_enabled) {
+    const uint32_t protocols[] = {J2534_VPW, J2534_PWM, J2534_ISO9141,
+                                  J2534_ISO14230};
+    const fake_bus_id_t buses[] = {FAKE_BUS_J1850_VPW, FAKE_BUS_J1850_PWM,
+                                   FAKE_BUS_KLINE, FAKE_BUS_KLINE};
+    const uint8_t raw[] = {0x48, 0x6b, 0x10, 0x41, 0, 0xaa};
+    for (unsigned i = 0; i < 4; i++) {
+        command(opendiag_Request_connect_tag);
+        req.command.connect =
+            (opendiag_Connect){.device = dev,
+                               .protocol = protocols[i],
+                               .baudrate = i == 1 ? 41600 : 10400,
+                               .connector = 1,
+                               .pins_count = i == 0 ? 1 : 2,
+                               .pins = {i < 2 ? 2 : 7, i < 2 ? 10 : 15}};
+        TEST_ASSERT_EQUAL_INT(J2534_OK, call());
+        uint32_t channel = res.id;
+        filter(channel, 1, 0, 0);
+        fake_bus_stage_stale(buses[i], raw, sizeof(raw));
+        j2534_core_poll();
+        TEST_ASSERT_EQUAL_INT(J2534_OK, read_message(channel));
+        TEST_ASSERT_EQUAL_INT(sizeof(raw) - 1, res.message.data.size);
+        TEST_ASSERT_EQUAL_MEM(raw, res.message.data.bytes, sizeof(raw) - 1);
+        command(opendiag_Request_disconnect_tag);
+        req.command.disconnect.id = channel;
+        TEST_ASSERT_EQUAL_INT(J2534_OK, call());
+    }
+}
 TEST(voltage_request_cannot_drive_active_can_pins) {
     connect_can(0);
     command(opendiag_Request_voltage_tag);
@@ -439,84 +676,138 @@ TEST(voltage_request_cannot_drive_active_can_pins) {
     TEST_ASSERT_FALSE(vif_any_pin_active());
     req.command.voltage.pin = 12;
     req.command.voltage.millivolts = 30000;
-    TEST_ASSERT_EQUAL_INT(J2534_VALUE, call());
+    TEST_ASSERT_EQUAL_INT(J2534_LIMIT, call());
     TEST_ASSERT_FALSE(vif_any_pin_active());
 }
 
-#if OPENDIAG_HW_LS_OBD_9
-TEST(pin_9_ground_works_during_kline_and_is_released_on_close) {
+static uint32_t voltage_status(unsigned pin, uint32_t millivolts) {
+    command(opendiag_Request_voltage_tag);
+    req.command.voltage = (opendiag_Voltage){dev, 1, pin, millivolts};
+    return call();
+}
+
+TEST(can_connect_conflicts_only_with_its_own_pins) {
+    const unsigned pins[] = {6, 14};
+    for (unsigned i = 0; i < 2; i++) {
+        TEST_ASSERT_EQUAL_INT(J2534_OK, voltage_status(pins[i], 12000));
+        command(opendiag_Request_connect_tag);
+        req.command.connect = (opendiag_Connect){.device = dev,
+                                                 .protocol = J2534_CAN,
+                                                 .baudrate = 500000,
+                                                 .connector = 1,
+                                                 .pins_count = 2,
+                                                 .pins = {6, 14}};
+        TEST_ASSERT_EQUAL_INT(J2534_CONFLICT, call());
+        TEST_ASSERT_FALSE(fake_can_is_up());
+        TEST_ASSERT_EQUAL_INT(1, fake_board_hs_state(pins[i]));
+        TEST_ASSERT_EQUAL_INT(J2534_OK, voltage_status(pins[i], UINT32_MAX));
+    }
+    TEST_ASSERT_EQUAL_INT(J2534_OK, voltage_status(13, 12000));
+    uint32_t physical = connect_can(0);
+    logical(physical, false);
+    TEST_ASSERT_EQUAL_INT(1, fake_board_hs_state(13));
+    TEST_ASSERT_EQUAL_INT(J2534_OK, voltage_status(6, UINT32_MAX));
+    TEST_ASSERT_EQUAL_INT(J2534_OK, voltage_status(14, UINT32_MAX));
+    TEST_ASSERT_TRUE(fake_can_is_up());
+}
+
+TEST(programming_voltage_reports_foreign_generator_and_pin_ownership) {
+    TEST_ASSERT_EQUAL_INT(
+        ESP_OK, vif_pin_set(VIF_OWNER_SHELL, 13, VIF_PIN_VOLTAGE, 12000));
+    TEST_ASSERT_EQUAL_INT(J2534_VOLTAGE_IN_USE, voltage_status(12, 12000));
+    TEST_ASSERT_EQUAL_INT(J2534_PIN_IN_USE, voltage_status(13, 12000));
+    TEST_ASSERT_EQUAL_INT(J2534_PIN_IN_USE, voltage_status(13, UINT32_MAX));
+    TEST_ASSERT_EQUAL_INT(1, fake_board_hs_state(13));
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+                          vif_pin_set(VIF_OWNER_SHELL, 13, VIF_PIN_OFF, 0));
+    TEST_ASSERT_EQUAL_INT(J2534_OK, voltage_status(12, 12000));
+    TEST_ASSERT_EQUAL_INT(J2534_VOLTAGE_IN_USE, voltage_status(13, 12000));
+}
+
+static uint32_t kline_connect_status(uint32_t protocol, bool k_only) {
     command(opendiag_Request_connect_tag);
     req.command.connect = (opendiag_Connect){.device = dev,
-                                             .protocol = J2534_ISO9141,
+                                             .protocol = protocol,
+                                             .flags = k_only ? J2534_K_ONLY : 0,
                                              .baudrate = 10400,
                                              .connector = 1,
-                                             .pins_count = 2,
+                                             .pins_count = k_only ? 1 : 2,
                                              .pins = {7, 15}};
-    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
-    command(opendiag_Request_voltage_tag);
-    req.command.voltage = (opendiag_Voltage){dev, 1, 9, UINT32_MAX - 1};
-    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
-    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
-    TEST_ASSERT_EQUAL_INT(1, fake_board_ls_state(9));
-    req.command.voltage.millivolts = UINT32_MAX;
-    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
-    TEST_ASSERT_EQUAL_INT(0, fake_board_ls_state(9));
-    req.command.voltage.millivolts = UINT32_MAX - 1;
-    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
-    command(opendiag_Request_close_tag);
-    req.command.close.id = dev;
-    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
-    TEST_ASSERT_EQUAL_INT(0, fake_board_ls_state(9));
-    TEST_ASSERT_FALSE(vif_any_pin_active());
+    return call();
 }
 
-TEST(programming_voltage_keeps_pin_9_modes_interlocked) {
-    command(opendiag_Request_voltage_tag);
-    req.command.voltage = (opendiag_Voltage){dev, 1, 9, UINT32_MAX - 1};
-    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
-    req.command.voltage.millivolts = 12000;
-    TEST_ASSERT_EQUAL_INT(J2534_PIN_IN_USE, call());
-    TEST_ASSERT_EQUAL_INT(1, fake_board_ls_state(9));
-    req.command.voltage.millivolts = UINT32_MAX;
-    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
-    req.command.voltage.millivolts = 12000;
-    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
-    req.command.voltage.millivolts = UINT32_MAX - 1;
-    TEST_ASSERT_EQUAL_INT(J2534_PIN_IN_USE, call());
-    TEST_ASSERT_EQUAL_INT(1, fake_board_hs_state(9));
-    TEST_ASSERT_EQUAL_INT(0, fake_board_ls_state(9));
-    req.command.voltage.millivolts = UINT32_MAX;
-    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
-    req.command.voltage.pin = 12;
-    req.command.voltage.millivolts = 12000;
-    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
-    req.command.voltage.pin = 9;
-    req.command.voltage.millivolts = UINT32_MAX - 1;
-    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
-    req.command.voltage.millivolts = UINT32_MAX;
-    TEST_ASSERT_EQUAL_INT(J2534_OK, call());
-    TEST_ASSERT_EQUAL_INT(0, fake_board_ls_state(9));
-    TEST_ASSERT_EQUAL_INT(1, fake_board_hs_state(12));
-    req.command.voltage.millivolts = 12000;
-    TEST_ASSERT_EQUAL_INT(J2534_VOLTAGE_IN_USE, call());
+TEST(k_only_allows_ground_on_pin_15_in_both_orders) {
+    const uint32_t protocols[] = {J2534_ISO9141, J2534_ISO14230};
+    for (unsigned i = 0; i < 2; i++) {
+        for (unsigned ground_first = 0; ground_first < 2; ground_first++) {
+            if (ground_first)
+                TEST_ASSERT_EQUAL_INT(J2534_OK,
+                                      voltage_status(15, UINT32_MAX - 1));
+            TEST_ASSERT_EQUAL_INT(J2534_OK,
+                                  kline_connect_status(protocols[i], true));
+            uint32_t channel = res.id;
+            TEST_ASSERT_EQUAL_INT(J2534_OK, voltage_status(15, UINT32_MAX - 1));
+            TEST_ASSERT_EQUAL_INT(1, fake_board_ls_state(15));
+            command(opendiag_Request_disconnect_tag);
+            req.command.disconnect.id = channel;
+            TEST_ASSERT_EQUAL_INT(J2534_OK, call());
+            TEST_ASSERT_EQUAL_INT(J2534_OK, voltage_status(15, UINT32_MAX));
+        }
+    }
 }
-#else
-TEST(programming_voltage_rejects_pin_9_ground_without_the_hardware_mod) {
+
+TEST(l_line_and_pin_15_ground_conflict_in_both_orders) {
+    const uint32_t protocols[] = {J2534_ISO9141, J2534_ISO14230};
+    for (unsigned i = 0; i < 2; i++) {
+        TEST_ASSERT_EQUAL_INT(J2534_OK, voltage_status(15, UINT32_MAX - 1));
+        TEST_ASSERT_EQUAL_INT(J2534_CONFLICT,
+                              kline_connect_status(protocols[i], false));
+        TEST_ASSERT_FALSE(fake_bus_is_up(FAKE_BUS_KLINE));
+        TEST_ASSERT_EQUAL_INT(1, fake_board_ls_state(15));
+        TEST_ASSERT_EQUAL_INT(J2534_OK, voltage_status(15, UINT32_MAX));
+        TEST_ASSERT_EQUAL_INT(J2534_OK,
+                              kline_connect_status(protocols[i], false));
+        uint32_t channel = res.id;
+        TEST_ASSERT_EQUAL_INT(J2534_PIN_IN_USE,
+                              voltage_status(15, UINT32_MAX - 1));
+        TEST_ASSERT_EQUAL_INT(0, fake_board_ls_state(15));
+        command(opendiag_Request_disconnect_tag);
+        req.command.disconnect.id = channel;
+        TEST_ASSERT_EQUAL_INT(J2534_OK, call());
+    }
+}
+
+TEST(connect_distinguishes_resource_count_from_wrong_pins) {
+    command(opendiag_Request_connect_tag);
+    req.command.connect = (opendiag_Connect){.device = dev,
+                                             .protocol = J2534_CAN,
+                                             .baudrate = 500000,
+                                             .connector = 1,
+                                             .pins_count = 0,
+                                             .pins = {6, 14}};
+    TEST_ASSERT_EQUAL_INT(J2534_CONFLICT, call());
+    req.command.connect.pins_count = 1;
+    TEST_ASSERT_EQUAL_INT(J2534_CONFLICT, call());
+    req.command.connect.pins_count = 2;
+    req.command.connect.pins[1] = 13;
+    TEST_ASSERT_EQUAL_INT(J2534_PIN, call());
+    TEST_ASSERT_FALSE(fake_can_is_up());
+}
+
+TEST(programming_voltage_rejects_pin_9_ground_even_on_modified_boards) {
     command(opendiag_Request_voltage_tag);
     req.command.voltage = (opendiag_Voltage){dev, 1, 9, UINT32_MAX - 1};
-    TEST_ASSERT_EQUAL_INT(J2534_VALUE, call());
-    TEST_ASSERT_EQUAL_INT(-1, fake_board_ls_state(9));
+    TEST_ASSERT_EQUAL_INT(J2534_PIN, call());
     TEST_ASSERT_FALSE(vif_any_pin_active());
 }
-#endif
 
 TEST(programming_voltage_validates_each_pins_supported_modes) {
     command(opendiag_Request_voltage_tag);
     req.command.voltage = (opendiag_Voltage){dev, 1, 6, UINT32_MAX - 1};
-    TEST_ASSERT_EQUAL_INT(J2534_VALUE, call());
+    TEST_ASSERT_EQUAL_INT(J2534_PIN, call());
     req.command.voltage.pin = 15;
     req.command.voltage.millivolts = 12000;
-    TEST_ASSERT_EQUAL_INT(J2534_VALUE, call());
+    TEST_ASSERT_EQUAL_INT(J2534_PIN, call());
     req.command.voltage.millivolts = UINT32_MAX - 1;
     TEST_ASSERT_EQUAL_INT(J2534_OK, call());
     TEST_ASSERT_EQUAL_INT(1, fake_board_ls_state(15));
@@ -525,9 +816,9 @@ TEST(programming_voltage_validates_each_pins_supported_modes) {
     TEST_ASSERT_EQUAL_INT(0, fake_board_ls_state(15));
     req.command.voltage.pin = 9;
     req.command.voltage.millivolts = 4999;
-    TEST_ASSERT_EQUAL_INT(J2534_VALUE, call());
+    TEST_ASSERT_EQUAL_INT(J2534_LIMIT, call());
     req.command.voltage.millivolts = 20001;
-    TEST_ASSERT_EQUAL_INT(J2534_VALUE, call());
+    TEST_ASSERT_EQUAL_INT(J2534_LIMIT, call());
     TEST_ASSERT_FALSE(vif_any_pin_active());
 }
 
@@ -540,14 +831,15 @@ static uint32_t crc(const uint8_t *p, size_t n) {
     }
     return ~v;
 }
-static size_t frame(uint8_t *dst, unsigned op, unsigned flags, unsigned offset,
-                    const uint8_t *data, unsigned len) {
+static size_t frame_seq(uint8_t *dst, unsigned op, unsigned flags,
+                        uint32_t sequence, unsigned offset, const uint8_t *data,
+                        unsigned len) {
     memset(dst, 0, 20 + len);
     memcpy(dst, "J253", 4);
     dst[4] = 1;
     dst[5] = op;
     dst[6] = flags;
-    j2534_put32(dst + 8, 77);
+    j2534_put32(dst + 8, sequence);
     dst[12] = offset;
     dst[13] = offset >> 8;
     dst[14] = len;
@@ -555,6 +847,10 @@ static size_t frame(uint8_t *dst, unsigned op, unsigned flags, unsigned offset,
     memcpy(dst + 16, data, len);
     j2534_put32(dst + 16 + len, crc(dst + 4, 12 + len));
     return 20 + len;
+}
+static size_t frame(uint8_t *dst, unsigned op, unsigned flags, unsigned offset,
+                    const uint8_t *data, unsigned len) {
+    return frame_seq(dst, op, flags, 77, offset, data, len);
 }
 TEST(passthru_at_command_is_ignored_before_binary_request) {
     const uint8_t text[] = "AT VIF PASSTHRU\r";
@@ -599,6 +895,20 @@ TEST(wire_fragmentation_does_not_execute_until_final_fragment) {
     TEST_ASSERT_EQUAL_INT(0, fake_can_sent_count());
     n = frame(f, 15, 0, 192, encoded + 192, enc.bytes_written - 192);
     j2534_frontend.feed(f, n);
+    j2534_core_poll();
+    TEST_ASSERT_EQUAL_INT(1, fake_can_sent_count());
+}
+TEST(a_flash_block_request_travels_in_one_wire_frame) {
+    static uint8_t f[J2534_WIRE_FRAME_MAX];
+    uint32_t ch = logical(connect_can(0), false);
+    uint8_t data[4 + 258] = {0, 0, 7, 0xe0, 0x36, 1};
+    queue(ch, J2534_ISOTP, J2534_PAD, data, sizeof(data));
+    pb_ostream_t enc = pb_ostream_from_buffer(encoded, sizeof(encoded));
+    TEST_ASSERT_TRUE(pb_encode(&enc, opendiag_Request_fields, &req));
+    size_t n = frame(f, 15, 0, 0, encoded, enc.bytes_written);
+    fake_port_reset();
+    j2534_frontend.feed(f, n);
+    TEST_ASSERT_EQUAL_INT(0x80, (uint8_t)fake_port_text(0)[6]);
     j2534_core_poll();
     TEST_ASSERT_EQUAL_INT(1, fake_can_sent_count());
 }
@@ -693,7 +1003,7 @@ TEST(k_line_and_l_line_require_matching_resources_and_preserve_flags) {
                 .pins_count = k_only ? 2 : 1,
                 .pins = {7, 15},
             };
-            TEST_ASSERT_EQUAL_INT(J2534_PIN, call());
+            TEST_ASSERT_EQUAL_INT(J2534_CONFLICT, call());
             req.command.connect.pins_count = k_only ? 1 : 2;
             TEST_ASSERT_EQUAL_INT(0, call());
             uint32_t channel = res.id;
@@ -1223,4 +1533,227 @@ TEST(
     fake_can_stage_stale(0x7e8, sizeof(response), response);
     j2534_core_poll();
     TEST_ASSERT_FALSE(repeat_active(channel, id));
+}
+
+/* ------------------------------------------------------------------ *
+ * Reads and selects that wait on the device
+ * ------------------------------------------------------------------ */
+
+/* Sends req; false when it was answered at once, with the answer in res. */
+static bool request_is_held(void) {
+    pb_ostream_t output = pb_ostream_from_buffer(encoded, sizeof(encoded));
+    TEST_ASSERT_TRUE(pb_encode(&output, opendiag_Request_fields, &req));
+    size_t len = j2534_core_request(req.which_command - 1, encoded,
+                                    output.bytes_written, reply);
+    if (len == J2534_CORE_HELD)
+        return true;
+    pb_istream_t input = pb_istream_from_buffer(reply, len);
+    memset(&res, 0, sizeof(res));
+    TEST_ASSERT_TRUE(pb_decode(&input, opendiag_Response_fields, &res));
+    return false;
+}
+/* The held request's answer after one poll; false while it still waits. */
+static bool poll_held(void) {
+    size_t len;
+    j2534_core_poll();
+    if (!j2534_core_take_held(reply, &len))
+        return false;
+    pb_istream_t input = pb_istream_from_buffer(reply, len);
+    memset(&res, 0, sizeof(res));
+    TEST_ASSERT_TRUE(pb_decode(&input, opendiag_Response_fields, &res));
+    return true;
+}
+static void read_waiting(uint32_t ch, uint32_t timeout_ms) {
+    command(opendiag_Request_read_tag);
+    req.command.read = (opendiag_Read){.id = ch, .timeout_ms = timeout_ms};
+}
+static const uint8_t single_frame[] = {3, 0x41, 0x0c, 0x55, 0, 0, 0, 0};
+
+/* Sends a 5 s read on @p ch over the wire; it is held, so nothing comes back.
+ */
+static void send_held_read(uint32_t ch) {
+    static uint8_t f[J2534_WIRE_FRAME_MAX];
+    read_waiting(ch, 5000);
+    pb_ostream_t enc = pb_ostream_from_buffer(encoded, sizeof(encoded));
+    TEST_ASSERT_TRUE(pb_encode(&enc, opendiag_Request_fields, &req));
+    fake_port_reset();
+    j2534_frontend.feed(f, frame(f, opendiag_Request_read_tag - 1, 0, 0,
+                                 encoded, enc.bytes_written));
+    j2534_frontend.poll();
+    TEST_ASSERT_EQUAL_INT(0, fake_port_len(0));
+}
+static void send_wake(uint32_t sequence) {
+    uint8_t f[20];
+    j2534_frontend.feed(f, frame_seq(f, opendiag_Request_read_tag - 1, 8,
+                                     sequence, 0, NULL, 0));
+    j2534_frontend.poll();
+}
+TEST(a_wake_ends_a_held_read_as_if_its_timeout_ran_out) {
+    send_held_read(logical(connect_can(0), false));
+    send_wake(77);
+    TEST_ASSERT_TRUE(fake_port_len(0) > 20);
+    const uint8_t *answer = (const uint8_t *)fake_port_text(0);
+    TEST_ASSERT_EQUAL_INT(0x80, answer[6]);
+    pb_istream_t input = pb_istream_from_buffer(answer + 16, answer[14]);
+    memset(&res, 0, sizeof(res));
+    TEST_ASSERT_TRUE(pb_decode(&input, opendiag_Response_fields, &res));
+    TEST_ASSERT_EQUAL_INT(J2534_EMPTY, res.status);
+}
+TEST(a_wake_for_another_request_leaves_the_held_one_waiting) {
+    send_held_read(logical(connect_can(0), false));
+    send_wake(76);
+    TEST_ASSERT_EQUAL_INT(0, fake_port_len(0));
+    uint32_t due;
+    TEST_ASSERT_TRUE(j2534_core_next_wake(&due));
+    TEST_ASSERT_TRUE((int32_t)(due - (uint32_t)esp_timer_get_time()) > 4000000);
+}
+
+TEST(a_read_without_timeout_answers_empty_at_once) {
+    uint32_t ch = logical(connect_can(0), false);
+    read_waiting(ch, 0);
+    TEST_ASSERT_FALSE(request_is_held());
+    TEST_ASSERT_EQUAL_INT(J2534_EMPTY, res.status);
+}
+TEST(a_read_with_timeout_is_answered_when_the_message_arrives) {
+    uint32_t ch = logical(connect_can(0), false);
+    read_waiting(ch, 100);
+    TEST_ASSERT_TRUE(request_is_held());
+    TEST_ASSERT_FALSE(poll_held());
+    int64_t wait = next_wake_in_us();
+    TEST_ASSERT_TRUE(wait > 99000 && wait <= 100000);
+    fake_clock_advance_ms(40);
+    fake_can_stage_stale(0x7e8, 8, single_frame);
+    TEST_ASSERT_TRUE(poll_held());
+    TEST_ASSERT_EQUAL_INT(0, res.status);
+    TEST_ASSERT_EQUAL_MEM("\0\0\x07\xe8\x41\x0c\x55", res.message.data.bytes,
+                          7);
+    TEST_ASSERT_EQUAL_INT(-1, next_wake_in_us());
+    TEST_ASSERT_FALSE(poll_held());
+}
+TEST(a_message_already_queued_is_read_without_holding) {
+    uint32_t ch = logical(connect_can(0), false);
+    fake_can_stage_stale(0x7e8, 8, single_frame);
+    j2534_core_poll();
+    read_waiting(ch, 100);
+    TEST_ASSERT_FALSE(request_is_held());
+    TEST_ASSERT_EQUAL_INT(0, res.status);
+    TEST_ASSERT_EQUAL_INT(1, res.count);
+}
+TEST(a_held_read_answers_empty_at_its_deadline) {
+    uint32_t ch = logical(connect_can(0), false);
+    read_waiting(ch, 100);
+    TEST_ASSERT_TRUE(request_is_held());
+    fake_clock_advance_ms(99);
+    TEST_ASSERT_FALSE(poll_held());
+    fake_clock_advance_ms(1);
+    TEST_ASSERT_TRUE(poll_held());
+    TEST_ASSERT_EQUAL_INT(J2534_EMPTY, res.status);
+}
+TEST(a_held_read_reports_its_channel_going_away) {
+    uint32_t p = connect_can(0), ch = logical(p, false);
+    read_waiting(ch, 100);
+    TEST_ASSERT_TRUE(request_is_held());
+    TEST_ASSERT_EQUAL_INT(ESP_OK, vif_bus_release_all(VIF_OWNER_LINK));
+    TEST_ASSERT_TRUE(poll_held());
+    TEST_ASSERT_EQUAL_INT(J2534_CHANNEL, res.status);
+}
+TEST(cancelling_or_stopping_drops_a_held_request) {
+    uint32_t ch = logical(connect_can(0), false);
+    read_waiting(ch, 100);
+    TEST_ASSERT_TRUE(request_is_held());
+    j2534_core_cancel_held();
+    fake_can_stage_stale(0x7e8, 8, single_frame);
+    TEST_ASSERT_FALSE(poll_held());
+    TEST_ASSERT_EQUAL_INT(-1, next_wake_in_us());
+    read_waiting(ch, 100);
+    TEST_ASSERT_FALSE(request_is_held());
+    TEST_ASSERT_EQUAL_INT(0, res.status);
+    read_waiting(ch, 100);
+    TEST_ASSERT_TRUE(request_is_held());
+    j2534_core_stop();
+    TEST_ASSERT_FALSE(poll_held());
+}
+TEST(waits_are_capped_at_the_j2534_maximum) {
+    uint32_t ch = logical(connect_can(0), false);
+    read_waiting(ch, 60000);
+    TEST_ASSERT_TRUE(request_is_held());
+    int64_t wait = next_wake_in_us();
+    TEST_ASSERT_TRUE(wait > 29999000 && wait <= 30000000);
+}
+TEST(a_select_waits_for_its_threshold_of_readable_channels) {
+    uint32_t one = logical(connect_can(0), false);
+    req.command.logical_connect.local_address.bytes[3] = 0xe9;
+    req.command.logical_connect.remote_address.bytes[3] = 0xe1;
+    TEST_ASSERT_EQUAL_INT(0, call());
+    uint32_t two = res.id;
+    command(opendiag_Request_select_tag);
+    req.command.select = (opendiag_Select){.type = 1,
+                                           .channels_count = 2,
+                                           .channels = {one, two},
+                                           .threshold = 2,
+                                           .timeout_ms = 100};
+    TEST_ASSERT_TRUE(request_is_held());
+    fake_can_stage_stale(0x7e8, 8, single_frame);
+    TEST_ASSERT_FALSE(poll_held());
+    fake_can_stage_stale(0x7e9, 8, single_frame);
+    TEST_ASSERT_TRUE(poll_held());
+    TEST_ASSERT_EQUAL_INT(0, res.status);
+    TEST_ASSERT_EQUAL_INT(2, res.channels_count);
+}
+TEST(a_select_without_threshold_or_timeout_answers_at_once) {
+    uint32_t ch = logical(connect_can(0), false);
+    command(opendiag_Request_select_tag);
+    req.command.select = (opendiag_Select){
+        .type = 1, .channels_count = 1, .channels = {ch}, .timeout_ms = 100};
+    TEST_ASSERT_FALSE(request_is_held());
+    req.command.select.threshold = 1;
+    req.command.select.timeout_ms = 0;
+    TEST_ASSERT_FALSE(request_is_held());
+}
+TEST(a_held_select_times_out_with_the_channels_that_are_readable) {
+    uint32_t ch = logical(connect_can(0), false);
+    command(opendiag_Request_select_tag);
+    req.command.select = (opendiag_Select){.type = 1,
+                                           .channels_count = 1,
+                                           .channels = {ch},
+                                           .threshold = 1,
+                                           .timeout_ms = 20};
+    TEST_ASSERT_TRUE(request_is_held());
+    fake_clock_advance_ms(20);
+    TEST_ASSERT_TRUE(poll_held());
+    TEST_ASSERT_EQUAL_INT(0, res.status);
+    TEST_ASSERT_EQUAL_INT(0, res.channels_count);
+}
+TEST(the_wire_answers_a_held_read_from_poll_and_drops_it_for_a_new_request) {
+    uint32_t ch = logical(connect_can(0), false);
+    uint8_t f[212];
+    read_waiting(ch, 100);
+    pb_ostream_t enc = pb_ostream_from_buffer(encoded, sizeof(encoded));
+    TEST_ASSERT_TRUE(pb_encode(&enc, opendiag_Request_fields, &req));
+    size_t n =
+        frame(f, req.which_command - 1, 0, 0, encoded, enc.bytes_written);
+    fake_port_reset();
+    j2534_frontend.feed(f, n);
+    j2534_frontend.poll();
+    TEST_ASSERT_EQUAL_INT(0, fake_port_len(0));
+    fake_can_stage_stale(0x7e8, 8, single_frame);
+    j2534_frontend.poll();
+    TEST_ASSERT_TRUE(fake_port_len(0) > 20);
+    TEST_ASSERT_EQUAL_INT(0x80, (uint8_t)fake_port_text(0)[6]);
+
+    /* A second held read, abandoned for a different request. */
+    read_waiting(ch, 100);
+    enc = pb_ostream_from_buffer(encoded, sizeof(encoded));
+    TEST_ASSERT_TRUE(pb_encode(&enc, opendiag_Request_fields, &req));
+    n = frame(f, req.which_command - 1, 0, 0, encoded, enc.bytes_written);
+    fake_port_reset();
+    j2534_frontend.feed(f, n);
+    TEST_ASSERT_EQUAL_INT(0, fake_port_len(0));
+    command(opendiag_Request_read_tag);
+    req.command.read.id = ch;
+    TEST_ASSERT_EQUAL_INT(J2534_EMPTY, wire_call());
+    fake_port_reset();
+    fake_can_stage_stale(0x7e8, 8, single_frame);
+    j2534_frontend.poll();
+    TEST_ASSERT_EQUAL_INT(0, fake_port_len(0));
 }

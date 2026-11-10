@@ -32,3 +32,26 @@ The ZIP includes `opendiag-cdc-xp.inf` for the diagnostic data and debug console
 USB CDC ports on Windows XP SP3 (x86), using Windows' built-in `usbser.sys`.
 Follow the hardware wizard instructions in [packaging/README.txt](packaging/README.txt).
 The INF source is [packaging/opendiag-cdc-xp.inf](packaging/opendiag-cdc-xp.inf).
+
+## Configuration and logs
+
+Default locations:
+
+| Platform | System configuration | User log directory |
+| --- | --- | --- |
+| Windows Vista and later | `%ProgramData%\OpenDIAG\opendiag.ini` | `%LOCALAPPDATA%\OpenDIAG\logs\` |
+| Windows XP SP3 | `%ALLUSERSPROFILE%\Application Data\OpenDIAG\opendiag.ini` | `%USERPROFILE%\Local Settings\Application Data\OpenDIAG\logs\` |
+| Linux | `/etc/opendiag/opendiag.ini` | `$HOME/.local/state/opendiag/` |
+| macOS | `/Library/Application Support/OpenDIAG/opendiag.ini` | `$HOME/Library/Logs/OpenDIAG/` |
+
+On Linux, an absolute `XDG_STATE_HOME` changes the log directory to `$XDG_STATE_HOME/opendiag/`.
+
+The driver reads `OPENDIAG_DRIVER_CONFIG` when set, otherwise the system file.
+The selected file must exist. Configuration errors produce an empty scan; a failed
+`PassThruOpen` gives the reason through `PassThruGetLastError`.
+Use a full path and set it for both the configuration utility and diagnostic application.
+
+The Windows utility saves the override or system file, starting with defaults for a new file.
+
+Logging is off by default. Enable it in the Windows utility or set `Enabled=1` under `[logging]`.
+If the user log directory cannot be created, logs go beside the library.

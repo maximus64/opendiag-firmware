@@ -17,6 +17,7 @@ typedef struct {
     int writes;
     bool connected;
     size_t write_limit; /* 0 means accept everything */
+    bool stalled;
     comm_port_id_t id;
 } fake_port_t;
 
@@ -27,6 +28,9 @@ static int port_write(int idx, const void *buf, uint32_t length) {
     size_t n = length;
 
     p->writes++;
+    if (p->stalled) {
+        return 0;
+    }
 
     if (p->write_limit && n > p->write_limit) {
         n = p->write_limit;
@@ -121,6 +125,12 @@ int fake_port_flush_count(int idx) {
 void fake_port_set_connected(int idx, bool connected) {
     if (idx >= 0 && idx < FAKE_PORT_COUNT) {
         g_port[idx].connected = connected;
+    }
+}
+
+void fake_port_set_stalled(int idx, bool stalled) {
+    if (idx >= 0 && idx < FAKE_PORT_COUNT) {
+        g_port[idx].stalled = stalled;
     }
 }
 

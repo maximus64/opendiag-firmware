@@ -80,7 +80,16 @@ message FastInit {
   bytes data = 3;
   bool no_response = 4;
 }
-message Select { uint32 type = 1; repeated uint32 channels = 2; }
+// Waits up to timeout_ms on the device for a message; zero answers at once.
+message Read { uint32 id = 1; uint32 timeout_ms = 2; }
+// Waits up to timeout_ms for threshold channels to become readable; a zero
+// threshold or timeout answers at once.
+message Select {
+  uint32 type = 1;
+  repeated uint32 channels = 2;
+  uint32 threshold = 3;
+  uint32 timeout_ms = 4;
+}
 message Request {
   oneof command {
     Empty capabilities = 1;
@@ -88,7 +97,7 @@ message Request {
     Target close = 3;
     Connect connect = 4;
     Target disconnect = 5;
-    Target read = 6;
+    Read read = 6;
     Periodic start_periodic = 8;
     Object stop_periodic = 9;
     Filter start_filter = 10;

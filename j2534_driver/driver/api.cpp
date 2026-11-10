@@ -27,7 +27,7 @@ struct Device {
     J2534_ULONG remote;
     opendiag_Capabilities capabilities;
     bool disconnected;
-    bool programmingVoltage;
+    int programmingPin;
     platform::Lease lease;
     std::map<J2534_ULONG, Channel> channels;
 
@@ -36,7 +36,7 @@ struct Device {
           remote(0),
           capabilities(),
           disconnected(false),
-          programmingVoltage(false) {
+          programmingPin(-1) {
     }
     ~Device() {
         link.close();
@@ -150,10 +150,12 @@ static J2534_LONG checkChannel(J2534_ULONG id, Channel *&channel) {
 }
 
 // A broken wire exchange invalidates the session; replay could duplicate a vehicle command.
-static J2534_LONG rpc(const opendiag_Request &request, opendiag_Response &response) {
+static J2534_LONG rpc(const opendiag_Request &request,
+                      opendiag_Response &response,
+                      uint32_t waitMs = 0) {
     memset(&response, 0, sizeof(response));
     try {
-        device->link.rpc(request, response);
+        device->link.rpc(request, response, waitMs);
         if (response.status == ERR_DEVICE_NOT_OPEN || response.status == ERR_INVALID_DEVICE_ID) {
             device->disconnected = true;
             device->link.close();
@@ -173,10 +175,11 @@ static J2534_LONG rpc(const opendiag_Request &request, opendiag_Response &respon
 // The firmware contract this driver was built against. A mismatch means firmware and
 // driver came from different protocol revisions, so name the field that differs instead
 // of failing blind: PassThruGetLastError is the only channel a host application has.
-static const uint32_t REQUIRED_WIRE = 1;
+static const uint32_t REQUIRED_WIRE = 3;
 static const uint32_t REQUIRED_API = 0x0500;
-static const uint32_t REQUIRED_FRAGMENT = 192;
 static const uint32_t REQUIRED_RPC = 4608;
+// The firmware chooses its fragment size; anything from a sane minimum to a whole RPC works.
+static const uint32_t MIN_FRAGMENT = 64;
 
 static bool contractMismatch(const char *field, uint32_t found, uint32_t needed) {
     platform::format(detail,
@@ -222,12 +225,19 @@ static bool compatible(Link &link, opendiag_Capabilities *capabilities = NULL) {
                          (unsigned)REQUIRED_API);
         return false;
     }
-    if (caps.fragment_bytes != REQUIRED_FRAGMENT) {
-        return contractMismatch("fragment", caps.fragment_bytes, REQUIRED_FRAGMENT);
+    if (caps.fragment_bytes < MIN_FRAGMENT || caps.fragment_bytes > REQUIRED_RPC) {
+        platform::format(detail,
+                         sizeof(detail),
+                         "firmware fragment %u, driver needs %u to %u; update one of them",
+                         (unsigned)caps.fragment_bytes,
+                         (unsigned)MIN_FRAGMENT,
+                         (unsigned)REQUIRED_RPC);
+        return false;
     }
     if (caps.rpc_bytes != REQUIRED_RPC) {
         return contractMismatch("RPC", caps.rpc_bytes, REQUIRED_RPC);
     }
+    link.setFragment(caps.fragment_bytes);
     return true;
 }
 
@@ -236,16 +246,23 @@ J2534_LONG PassThruScanForDevices(J2534_ULONG *count) {
         return ERR_NULL_PARAMETER;
     }
 
+    scanFound = false;
+    scanConsumed = false;
+    *count = 0;
+
     Device candidate;
-    candidate.settings = loadSettings();
+    try {
+        candidate.settings = loadSettings();
+    } catch (const std::exception &) {
+        // No configured device to enumerate; PassThruOpen reports the reason.
+        return STATUS_NOERROR;
+    }
     SDEVICE info = {};
     platform::copyText(info.DeviceName, sizeof(info.DeviceName), candidate.settings.name.c_str());
     info.DeviceConnectMedia = DEVICE_CONN_WIRED;
     info.DeviceSignalQuality = 0xffffffffUL;
     info.DeviceSignalStrength = 0xffffffffUL;
     info.DeviceConnectSpeed = candidate.settings.transport == "com" ? 12000000 : 0;
-    scanFound = false;
-    scanConsumed = false;
     if (device || !acquireLease(candidate)) {
         info.DeviceAvailable = DEVICE_IN_USE;
         info.DeviceDLLFWStatus = device && !device->disconnected
@@ -378,7 +395,7 @@ J2534_LONG PassThruConnect(J2534_ULONG id,
     }
 
     if (resources.NumOfResources > 2 || !resources.NumOfResources) {
-        return ERR_PIN_NOT_SUPPORTED;
+        return ERR_RESOURCE_CONFLICT;
     }
 
     opendiag_Request request = {};
@@ -624,27 +641,27 @@ J2534_LONG PassThruReadMsgs(J2534_ULONG id,
     }
 
     // Keep caller outputs untouched until the read result permits returning messages.
+    // Each read waits on the device for the time left, which answers as soon as a
+    // message arrives and reports empty only once that time has run out.
     uint32_t start = platform::milliseconds();
     std::vector<opendiag_Message> collected;
     while (collected.size() < requested) {
         opendiag_Request request = {};
         opendiag_Response response = {};
+        uint32_t elapsed = platform::milliseconds() - start;
         request.which_command = opendiag_Request_read_tag;
         request.command.read.id = channel->remote;
-        status = rpc(request, response);
+        request.command.read.timeout_ms = timeout > elapsed ? timeout - elapsed : 0;
+        status = rpc(request, response, request.command.read.timeout_ms);
         if (status == ERR_BUFFER_EMPTY) {
-            if (!timeout || platform::milliseconds() - start >= timeout) {
-                if (collected.empty()) {
-                    status = ERR_BUFFER_EMPTY;
-                } else if (timeout) {
-                    status = ERR_TIMEOUT;
-                } else {
-                    status = STATUS_NOERROR;
-                }
-                break;
+            if (collected.empty()) {
+                status = ERR_BUFFER_EMPTY;
+            } else if (timeout) {
+                status = ERR_TIMEOUT;
+            } else {
+                status = STATUS_NOERROR;
             }
-            platform::sleepMs(1);
-            continue;
+            break;
         }
         if (status) {
             return status;
@@ -717,46 +734,40 @@ J2534_LONG PassThruSelect(SCHANNELSET *set, J2534_ULONG type, J2534_ULONG timeou
         request.command.select.channels[i] = channel->remote;
     }
 
-    uint32_t start = platform::milliseconds();
-    for (;;) {
-        opendiag_Response response = {};
-        status = rpc(request, response);
-        if (status && status != ERR_BUFFER_EMPTY) {
-            return status;
+    // The device waits until the threshold is met or the timeout passes, then answers
+    // with whichever channels are readable.
+    request.command.select.threshold = set->ChannelThreshold;
+    request.command.select.timeout_ms = timeout;
+    opendiag_Response response = {};
+    status = rpc(request, response, timeout);
+    if (status && status != ERR_BUFFER_EMPTY) {
+        return status;
+    }
+    if (response.channels_count > original.size()) {
+        return ERR_INVALID_MSG;
+    }
+    J2534_ULONG readable[5] = {};
+    for (unsigned i = 0; i < response.channels_count; ++i) {
+        unsigned j = 0;
+        while (j < original.size() && request.command.select.channels[j] != response.channels[i]) {
+            ++j;
         }
-        if (response.channels_count > original.size()) {
+        if (j == original.size() ||
+            std::find(readable, readable + i, original[j]) != readable + i) {
             return ERR_INVALID_MSG;
         }
-        J2534_ULONG readable[5] = {};
-        for (unsigned i = 0; i < response.channels_count; ++i) {
-            unsigned j = 0;
-            while (j < original.size() &&
-                   request.command.select.channels[j] != response.channels[i]) {
-                ++j;
-            }
-            if (j == original.size() ||
-                std::find(readable, readable + i, original[j]) != readable + i) {
-                return ERR_INVALID_MSG;
-            }
-            readable[i] = original[j];
-        }
-        bool snapshot = timeout == 0 || set->ChannelThreshold == 0;
-        bool thresholdReached = response.channels_count >= set->ChannelThreshold;
-        bool timedOut = platform::milliseconds() - start >= timeout;
-        if (snapshot || thresholdReached || timedOut) {
-            std::copy(readable, readable + response.channels_count, set->ChannelList);
-            bool enough = response.channels_count >= set->ChannelThreshold;
-            set->ChannelCount = response.channels_count;
-            if (!response.channels_count) {
-                return ERR_BUFFER_EMPTY;
-            }
-            if (timeout && !enough) {
-                return ERR_TIMEOUT;
-            }
-            return STATUS_NOERROR;
-        }
-        platform::sleepMs(1);
+        readable[i] = original[j];
     }
+    std::copy(readable, readable + response.channels_count, set->ChannelList);
+    bool enough = response.channels_count >= set->ChannelThreshold;
+    set->ChannelCount = response.channels_count;
+    if (!response.channels_count) {
+        return ERR_BUFFER_EMPTY;
+    }
+    if (timeout && !enough) {
+        return ERR_TIMEOUT;
+    }
+    return STATUS_NOERROR;
 }
 
 J2534_LONG PassThruStartPeriodicMsg(J2534_ULONG id,
@@ -900,7 +911,11 @@ J2534_LONG PassThruSetProgrammingVoltage(J2534_ULONG id,
     request.command.voltage.millivolts = voltage;
     status = rpc(request, response);
     if (!status && voltage != SHORT_TO_GROUND) {
-        device->programmingVoltage = voltage != PIN_OFF;
+        if (voltage != PIN_OFF) {
+            device->programmingPin = static_cast<int>(resources.ResourceListPtr[0]);
+        } else if (device->programmingPin == static_cast<int>(resources.ResourceListPtr[0])) {
+            device->programmingPin = -1;
+        }
     }
 
     return status;
@@ -975,7 +990,7 @@ static J2534_LONG readVoltageIoctl(J2534_ULONG target, J2534_ULONG id, void *inp
     status = rpc(request, response);
     if (!status) {
         J2534_ULONG millivolts = response.millivolts;
-        if (id == READ_PROG_VOLTAGE && !device->programmingVoltage) {
+        if (id == READ_PROG_VOLTAGE && device->programmingPin < 0) {
             millivolts = 0;
         }
         *(J2534_ULONG *)output = millivolts;

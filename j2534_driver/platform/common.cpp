@@ -2,6 +2,7 @@
 #include "platform.h"
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 
 namespace platform {
@@ -33,8 +34,40 @@ void copyText(char *destination, size_t capacity, const char *source) {
     }
 }
 
-std::string configPath(const void *anchor) {
-    return moduleDirectory(anchor) + "opendiag.ini";
+std::string selectConfigPath(const std::string &overridePath, const std::string &systemPath) {
+    if (!overridePath.empty()) {
+        std::string path = absolutePath(overridePath);
+        if (!fileExists(path)) {
+            throw std::runtime_error("OPENDIAG_DRIVER_CONFIG file not found: " + path);
+        }
+        return path;
+    }
+    if (systemPath.empty()) {
+        throw std::runtime_error("Cannot locate the system configuration folder");
+    }
+    if (!fileExists(systemPath)) {
+        throw std::runtime_error("OpenDIAG config file not found: " + systemPath);
+    }
+    return systemPath;
+}
+
+std::string configPath() {
+    const char *overridePath = std::getenv("OPENDIAG_DRIVER_CONFIG");
+    return selectConfigPath(overridePath ? overridePath : "", systemConfigPath());
+}
+
+std::string configWritePath() {
+    const char *overridePath = std::getenv("OPENDIAG_DRIVER_CONFIG");
+    return overridePath && *overridePath ? absolutePath(overridePath) : systemConfigPath();
+}
+
+std::string logDirectory(const std::string &libraryDirectory) {
+    std::string directory = userLogDirectory();
+    return !directory.empty() && createDirectories(directory) ? directory : libraryDirectory;
+}
+
+std::string logDirectory(const void *anchor) {
+    return logDirectory(moduleDirectory(anchor));
 }
 
 uint32_t remaining(uint32_t deadline) {

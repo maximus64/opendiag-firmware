@@ -15,6 +15,9 @@
 /** Returned without an open bus claim or from the wrong owner's task. */
 #define VIF_ERR_NO_CLAIM (-3)
 
+/** The voltage generator is already routed to a different connector pin. */
+#define VIF_ERR_VOLTAGE_IN_USE (-4)
+
 typedef enum {
     VIF_BUS_NONE = 0,
     VIF_BUS_CAN,
@@ -82,6 +85,24 @@ typedef struct {
     void (*stop)(void);
     /** Poll cadence; zero uses the default for streaming frontends. */
     uint32_t poll_interval_ms;
+    /**
+     * When poll() must next run, as an esp_timer_get_time() microsecond, or
+     * false when nothing is due. Asked before each sleep. Optional.
+     *
+     * A front-end with this sleeps until input, bus news, a control request or
+     * the time it gives, so it must report every duty that falls due with time
+     * alone. A time already past means poll again at once, and is only for
+     * work that pass will make progress on: work blocked on something else
+     * would spin the link task, so whatever it waits on must wake it instead.
+     * The poll cadence becomes a backstop for anything that slips through.
+     */
+    bool (*next_wake)(uint32_t *due_us);
+    /**
+     * A count that rises whenever poll() acts: receives, sends, completes or
+     * times something out. vif reads it around a poll only the backstop woke,
+     * where work means an event or a deadline went unreported. Optional.
+     */
+    uint32_t (*progress)(void);
 } vif_frontend_t;
 
 /**
@@ -293,6 +314,10 @@ int vif_bus_send(vif_owner_t owner, vif_bus_t bus, const bus_msg_t *msg,
  * These calls keep the same owner-task requirement as synchronous I/O. */
 int vif_bus_submit(vif_owner_t owner, vif_bus_t bus, const bus_msg_t *msg,
                    uint32_t flags, uint32_t rx_sequence);
+/* Frames sent back to back as one transmission; CAN only. */
+int vif_bus_submit_train(vif_owner_t owner, vif_bus_t bus,
+                         const bus_msg_t *msgs, unsigned count, uint32_t flags,
+                         uint32_t rx_sequence);
 bool vif_bus_tx_poll(vif_owner_t owner, vif_bus_t bus, bus_tx_result_t *result);
 void vif_bus_tx_cancel(vif_owner_t owner, vif_bus_t bus);
 int vif_bus_tx_wait(vif_owner_t owner, vif_bus_t bus);
@@ -356,8 +381,9 @@ int vif_bus_reset_stats(vif_bus_t bus);
  * @param mv      Millivolts, for VIF_PIN_VOLTAGE.
  *
  * Releasing a pin nobody drives succeeds and does nothing. Anything that would
- * break the one-high-one-low rule, or touch a pin the other owner claimed,
- * fails with ESP_ERR_INVALID_STATE. Release pin 9 before changing drive mode.
+ * use a bus pin, or touch a pin the other owner claimed, fails with
+ * ESP_ERR_INVALID_STATE. Routing voltage to a second pin returns
+ * VIF_ERR_VOLTAGE_IN_USE. Release pin 9 before changing drive mode.
  */
 esp_err_t vif_pin_set(vif_owner_t owner, int obd_pin, vif_pin_mode_t m,
                       uint32_t mv);

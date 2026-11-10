@@ -15,6 +15,10 @@ struct bus_tx_worker {
     bool executed;
     bool timing_reported;
     int result;
+    unsigned train_count;
+    bus_msg_t train[BUS_TX_TRAIN_MAX];
+    uint8_t train_data[BUS_TX_TRAIN_MAX][8];
+    bus_tx_train_t train_result;
 };
 
 static bool held;
@@ -37,6 +41,7 @@ int bus_tx_worker_submit(bus_tx_worker_t *worker, const bus_msg_t *msg,
     memcpy(worker->data, msg->data, msg->len);
     worker->message = *msg;
     worker->message.data = worker->data;
+    worker->train_count = 0;
     worker->flags = flags;
     bus_tx_prepare(&worker->control, rx_sequence);
     worker->control.check_rx = !!(flags & BUS_TX_CHECK_RX);
@@ -44,12 +49,45 @@ int bus_tx_worker_submit(bus_tx_worker_t *worker, const bus_msg_t *msg,
     worker->executed = worker->timing_reported = false;
     return 0;
 }
+int bus_tx_worker_submit_train(bus_tx_worker_t *worker, const bus_msg_t *msgs,
+                               unsigned count, uint32_t flags,
+                               uint32_t rx_sequence) {
+    if (!count || count > BUS_TX_TRAIN_MAX)
+        return BUS_ERR_BAD_ARG;
+    if (!worker->ops->send_train)
+        return BUS_ERR_UNSUPPORTED;
+    if (worker->pending)
+        return BUS_ERR_NO_SPACE;
+    for (unsigned i = 0; i < count; i++) {
+        if (msgs[i].len > sizeof(worker->train_data[i]))
+            return BUS_ERR_TOO_LONG;
+        memcpy(worker->train_data[i], msgs[i].data, msgs[i].len);
+        worker->train[i] = msgs[i];
+        worker->train[i].data = worker->train_data[i];
+    }
+    worker->train_count = count;
+    worker->train_result.sent = 0;
+    worker->flags = flags;
+    bus_tx_prepare(&worker->control, rx_sequence);
+    worker->control.check_rx = !!(flags & BUS_TX_CHECK_RX);
+    worker->pending = true;
+    worker->executed = worker->timing_reported = false;
+    return 0;
+}
+
+static int execute(bus_tx_worker_t *worker) {
+    if (worker->train_count)
+        return worker->ops->send_train(worker->train, worker->train_count,
+                                       &worker->control, &worker->train_result);
+    return worker->ops->send_controlled(&worker->message, worker->flags,
+                                        &worker->control);
+}
+
 bool bus_tx_worker_poll(bus_tx_worker_t *worker, bus_tx_result_t *result) {
     if (!worker || !worker->pending || held)
         return false;
     if (!worker->executed) {
-        worker->result = worker->ops->send_controlled(
-            &worker->message, worker->flags, &worker->control);
+        worker->result = execute(worker);
         worker->executed = true;
     }
     bool complete = !completion_held;
@@ -59,8 +97,10 @@ bool bus_tx_worker_poll(bus_tx_worker_t *worker, bus_tx_result_t *result) {
         .status = worker->result,
         .complete = complete,
         .started = worker->control.state == BUS_TX_ACTIVE,
+        .ended = worker->control.ended,
         .started_us = worker->control.started_us,
         .ended_us = worker->control.ended_us,
+        .train = complete && worker->train_count ? &worker->train_result : NULL,
     };
     worker->pending = !complete;
     worker->timing_reported = true;
@@ -76,8 +116,7 @@ int bus_tx_worker_wait(bus_tx_worker_t *worker) {
     if (held || completion_held)
         return BUS_ERR_TIMEOUT;
     if (!worker->executed) {
-        worker->result = worker->ops->send_controlled(
-            &worker->message, worker->flags, &worker->control);
+        worker->result = execute(worker);
         worker->executed = true;
     }
     return 0;

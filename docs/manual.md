@@ -321,7 +321,7 @@ supported. This is a working subset of J2534, not a certified implementation. SC
    [releases page](https://github.com/maximus64/opendiag-firmware/releases).
 2. Close any diagnostic applications.
 3. Extract the ZIP, keeping its files together.
-4. Run `install.cmd` from an **administrator** command prompt. It copies everything to
+4. Run `install.cmd` from an **administrator** command prompt. It installs the driver files in
    `C:\OpenDIAG` and registers the device with Windows' J2534 registry.
 5. **Windows XP only:** install the USB driver for the two serial ports. When the Found New
    Hardware wizard appears, choose to install from a specific location and point it at

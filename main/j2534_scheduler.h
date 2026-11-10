@@ -55,7 +55,11 @@ j2534_schedule_job_t *j2534_schedule_next(j2534_scheduler_t *scheduler,
                                           uint32_t now_us, bool allow_repeat);
 void j2534_schedule_receive(j2534_scheduler_t *scheduler, const uint8_t *data,
                             size_t len, uint32_t flags, uint32_t timestamp_us);
-void j2534_schedule_expire(j2534_scheduler_t *scheduler, uint32_t now_us);
+/* Ends repeats whose window closed unanswered; returns how many. */
+unsigned j2534_schedule_expire(j2534_scheduler_t *scheduler, uint32_t now_us);
+/* Earliest due time of an active job not already handed to the bus. */
+bool j2534_schedule_next_due(const j2534_scheduler_t *scheduler,
+                             uint32_t *due_us);
 void j2534_schedule_transmitted(j2534_schedule_job_t *job, uint32_t started_us,
                                 uint32_t ended_us);
 void j2534_schedule_defer(j2534_schedule_job_t *job);

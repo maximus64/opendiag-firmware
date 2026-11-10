@@ -6,6 +6,7 @@ import ctypes as c
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -211,6 +212,87 @@ class LegacyIOTests(unittest.TestCase):
             self.assertGreater(len(received), 0)
             self.assertLessEqual(len(received), 4)
             self.assertLessEqual(operations.count("read"), 4)
+
+    def test_timed_read_waits_on_the_device_instead_of_polling(self):
+        with self.session(5) as (session, operations):
+            operations.clear()
+            start = time.monotonic()
+            status, received = session.read(timeout=60)
+            waited = (time.monotonic() - start) * 1000
+            self.assertEqual((status, received), (16, []))
+            self.assertGreaterEqual(waited, 55)
+            self.assertEqual(operations, ["read", "select"])
+
+    def wait_for(self, operations, name):
+        deadline = time.monotonic() + 2
+        while name not in operations and time.monotonic() < deadline:
+            time.sleep(0.001)
+        self.assertIn(name, operations)
+
+    def timed(self, outcome, key, call):
+        start = time.monotonic()
+        outcome[key] = call()
+        outcome[key + "_ms"] = (time.monotonic() - start) * 1000
+
+    def test_a_write_from_another_thread_during_a_timed_read_goes_through(self):
+        """04.04 lets an application read on one thread and write on another."""
+        peers = []
+        with self.session(5, lambda peer, request, response: peers.append(peer)) as (
+                session, operations):
+            operations.clear()
+            outcome = {}
+            reader = threading.Thread(
+                target=self.timed, args=(outcome, "read", lambda: session.read(timeout=500)))
+            reader.start()
+            self.wait_for(operations, "select")
+            self.timed(outcome, "write", lambda: session.write(message(protocol=5), timeout=0))
+            reader.join()
+            self.assertEqual(outcome["write"], (0, 1))
+            # Not held up for the rest of the read's timeout either.
+            self.assertLess(outcome["write_ms"], 100)
+            self.assertGreaterEqual(peers[-1].wakes, 1)
+            # The read still keeps its own deadline, and sees what the write produced.
+            self.assertEqual(outcome["read"][0], 0)
+            self.assertLess(outcome["read_ms"], 600)
+
+    def test_readers_on_two_threads_share_one_wait_instead_of_waking_each_other(self):
+        with self.session(5) as (session, operations):
+            second = U32()
+            self.assertEqual(session.api.PassThruConnect(session.device, 3, 0x1000, 10400,
+                                                         c.byref(second)), 0)
+            operations.clear()
+            outcome = {}
+
+            def read(channel, key):
+                output, count = Message(), U32(1)
+                self.timed(outcome, key, lambda: session.api.PassThruReadMsgs(
+                    channel, c.byref(output), c.byref(count), 300))
+
+            threads = [threading.Thread(target=read, args=(session.channel.value, "one")),
+                       threading.Thread(target=read, args=(second.value, "two"))]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            self.assertEqual((outcome["one"], outcome["two"]), (16, 16))
+            for key in ("one", "two"):
+                self.assertGreaterEqual(outcome[key + "_ms"], 290)
+                self.assertLess(outcome[key + "_ms"], 450)
+            # Each read gives way at most a few times; waking each other would be hundreds.
+            self.assertLess(len(operations), 20, operations)
+
+    def test_closing_the_device_from_another_thread_ends_a_timed_read(self):
+        with self.session(5) as (session, operations):
+            operations.clear()
+            outcome = {}
+            reader = threading.Thread(
+                target=self.timed, args=(outcome, "read", lambda: session.read(timeout=2000)))
+            reader.start()
+            self.wait_for(operations, "select")
+            self.assertEqual(session.api.PassThruClose(session.device), 0)
+            reader.join()
+            self.assertEqual(outcome["read"], (0x02, []))
+            self.assertLess(outcome["read_ms"], 200)
 
     def test_stopping_filter_does_not_leave_stale_readiness_state(self):
         with self.session() as (session, operations):

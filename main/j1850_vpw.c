@@ -76,6 +76,9 @@
 #include "j1850_vpw.h"
 #include "pinout.h"
 
+/* The claim holder's ear on this bus; see bus_listener_t. */
+static bus_listener_t listener;
+
 #define TAG "J1850_VPW"
 
 /* ------------------------------------------------------------------ *
@@ -482,6 +485,7 @@ static void IRAM_ATTR queue_frame(const j1850_vpw_rx_t *rx, uint16_t status,
         g.stats.rx_dropped++;
         g.pending_status |= BUS_RX_BUFFER_OVERFLOW;
     }
+    bus_notify_from_isr(&listener, woken);
 }
 
 static bool receive_done(rmt_channel_handle_t channel,
@@ -1255,6 +1259,7 @@ static int j1850_vpw_tx_controlled(const bus_msg_t *msg, uint32_t flags,
             bus_rx_lost(&g.rx_epoch, f.sequence);
             g.stats.rx_dropped++;
         }
+        bus_notify(&listener);
     }
 
     xSemaphoreGive(g.tx_lock);
@@ -1802,4 +1807,5 @@ const bus_ops_t j1850_vpw_bus_ops = {
     .ioctl = j1850_vpw_ioctl,
     .get_stats = j1850_vpw_bus_stats,
     .reset_stats = j1850_vpw_bus_reset_stats,
+    .listener = &listener,
 };

@@ -20,3 +20,4 @@ EXPORTS
     PassThruLogicalDisconnect=PassThruLogicalDisconnect@4 @19
     PassThruSelect=PassThruSelect@12 @20
     OpenDiagLogicalConnect0404=OpenDiagLogicalConnect0404@20 @21
+    OpenDiagWakeWait0404=OpenDiagWakeWait0404@4 @22

@@ -221,7 +221,7 @@ static INT_PTR CALLBACK dialogProcedure(HWND window, UINT message, WPARAM wparam
             startCheck(*app);
             break;
         case IDC_LOG_FOLDER:
-            openLink(window, app->directory.c_str());
+            openLink(window, platform::logDirectory(app->directory).c_str());
             break;
         case IDC_UPDATE:
             openLink(window, UPDATE_URL);
@@ -240,7 +240,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
     try {
         Application app = {};
         app.directory = installDirectory();
-        app.ini = app.directory + "opendiag.ini";
+        app.ini = platform::configWritePath();
+        if (app.ini.empty()) {
+            throw std::runtime_error("Cannot locate the system configuration folder.");
+        }
         app.settings = readSettings(app.ini);
         INT_PTR result = DialogBoxParamA(instance,
                                          MAKEINTRESOURCEA(IDD_CONFIG),

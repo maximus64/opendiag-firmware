@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "platform.h"
+#include <climits>
 #include <cstdio>
+#include <shlobj.h>
 #include <stdexcept>
 #include <windows.h>
 #include <winsock2.h>
@@ -64,6 +66,54 @@ std::string moduleDirectory(const void *anchor) {
     }
     separator[1] = 0;
     return path;
+}
+
+bool fileExists(const std::string &path) {
+    DWORD attributes = GetFileAttributesA(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+std::string absolutePath(const std::string &path) {
+    char full[MAX_PATH];
+    DWORD length = GetFullPathNameA(path.c_str(), sizeof(full), full, NULL);
+    if (!length || length >= sizeof(full)) {
+        throw std::runtime_error("Cannot resolve the configuration path");
+    }
+    return full;
+}
+
+bool createDirectories(const std::string &path) {
+    if (path.empty()) {
+        return false;
+    }
+    // SHCreateDirectoryEx also creates missing parents and is available on XP.
+    std::string directory = path;
+    while (directory.size() > 3 && directory.back() == '\\') {
+        directory.pop_back();
+    }
+    int result = SHCreateDirectoryExA(NULL, directory.c_str(), NULL);
+    DWORD attributes = GetFileAttributesA(path.c_str());
+    return (result == ERROR_SUCCESS || result == ERROR_ALREADY_EXISTS ||
+            result == ERROR_FILE_EXISTS) &&
+           attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static std::string appData(int folder) {
+    char path[MAX_PATH];
+    if (SHGetFolderPathA(NULL, folder, NULL, SHGFP_TYPE_CURRENT, path) != S_OK || !*path) {
+        return "";
+    }
+    return std::string(path) + "\\OpenDIAG\\";
+}
+
+std::string systemConfigPath() {
+    std::string directory = appData(CSIDL_COMMON_APPDATA);
+    return directory.empty() ? "" : directory + "opendiag.ini";
+}
+
+std::string userLogDirectory() {
+    std::string directory = appData(CSIDL_LOCAL_APPDATA);
+    return directory.empty() ? "" : directory + "logs\\";
 }
 
 std::string readSetting(const std::string &path,
@@ -146,6 +196,43 @@ void appendLog(const char *path, const char *line, uint32_t maximumBytes) {
     DWORD count;
     WriteFile(file, line, static_cast<DWORD>(strlen(line)), &count, NULL);
     CloseHandle(file);
+}
+
+Mutex::Mutex()
+    : handle_(new CRITICAL_SECTION) {
+    InitializeCriticalSection(static_cast<CRITICAL_SECTION *>(handle_));
+}
+
+Mutex::~Mutex() {
+    DeleteCriticalSection(static_cast<CRITICAL_SECTION *>(handle_));
+    delete static_cast<CRITICAL_SECTION *>(handle_);
+}
+
+void Mutex::lock() {
+    EnterCriticalSection(static_cast<CRITICAL_SECTION *>(handle_));
+}
+
+void Mutex::unlock() {
+    LeaveCriticalSection(static_cast<CRITICAL_SECTION *>(handle_));
+}
+
+Semaphore::Semaphore()
+    : handle_(CreateSemaphoreW(NULL, 0, LONG_MAX, NULL)) {
+    if (!handle_) {
+        throw std::runtime_error("CreateSemaphore failed");
+    }
+}
+
+Semaphore::~Semaphore() {
+    CloseHandle(static_cast<HANDLE>(handle_));
+}
+
+void Semaphore::post() {
+    ReleaseSemaphore(static_cast<HANDLE>(handle_), 1, NULL);
+}
+
+void Semaphore::wait() {
+    WaitForSingleObject(static_cast<HANDLE>(handle_), INFINITE);
 }
 
 Lease::Lease()

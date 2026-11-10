@@ -100,6 +100,13 @@ void Backend::load(const void *owner) {
         if (!ioctl) {
             throw std::runtime_error("Missing backend export: PassThruIoctl");
         }
+        OpenDiagWakeWaitFn wakeWait =
+            (OpenDiagWakeWaitFn)platform::findSymbol(library_, "OpenDiagWakeWait0404");
+        if (!wakeWait) {
+            throw std::runtime_error("Missing backend export: OpenDiagWakeWait0404");
+        }
+        platform::MutexLock lock(lifetime_);
+        wakeWait_ = wakeWait;
     } catch (...) {
         unload();
         throw;
@@ -107,8 +114,19 @@ void Backend::load(const void *owner) {
 }
 
 void Backend::unload() {
+    {
+        platform::MutexLock lock(lifetime_);
+        wakeWait_ = NULL;
+    }
     if (library_) {
         platform::closeLibrary(library_);
         library_ = NULL;
+    }
+}
+
+void Backend::wake(bool armed) {
+    platform::MutexLock lock(lifetime_);
+    if (wakeWait_) {
+        wakeWait_(armed ? 1 : 0);
     }
 }
