@@ -391,6 +391,12 @@ Use it to sniff a bus you don't know yet, for example to find its bit rate: try 
   `S<n>` keeps the mode.
 - In the debug shell, `vif` shows `listen-only` next to the CAN bus while it is open that way.
 
+Each command ends with a CR. An LF also ends a command, so CRLF and LF-only tools both work.
+
+`F` returns the status flags. It replies `F08` (data overrun) once frames have been lost to a full
+receive buffer since the channel was opened, and `F00` otherwise. The flag stays set until the
+channel is reopened with `O` or `L`.
+
 ---
 
 ## Switching modes
