@@ -412,6 +412,12 @@ back to the OBD-II connector, and so does a restart.
 - `canport` is refused while a CAN bus is open. Close it first.
 - Keep the tap short and twisted, and don't add a terminating resistor.
 
+Each command ends with a CR. An LF also ends a command, so CRLF and LF-only tools both work.
+
+`F` returns the status flags. It replies `F08` (data overrun) once frames have been lost to a full
+receive buffer since the channel was opened, and `F00` otherwise. The flag stays set until the
+channel is reopened with `O` or `L`.
+
 ---
 
 ## Switching modes

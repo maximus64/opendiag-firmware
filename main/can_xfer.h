@@ -50,8 +50,15 @@ static inline int can_frame_send_confirmed(const struct can_frame *f) {
     return ret;
 }
 
-/** @brief Receive one frame. 0 when one arrived, negative otherwise. */
-static inline int can_frame_recv(struct can_frame *f, TickType_t wait) {
+/**
+ * @brief Receive one frame, and the driver's status for it.
+ *
+ * On success @p status (when not NULL) gets the bus_msg status bits, such as
+ * BUS_RX_BUFFER_OVERFLOW when frames were lost just before this one. Returns 0
+ * when a frame arrived, negative otherwise.
+ */
+static inline int can_frame_recv_status(struct can_frame *f, TickType_t wait,
+                                        uint32_t *status) {
     bus_msg_t msg;
     int rc;
 
@@ -70,6 +77,14 @@ static inline int can_frame_recv(struct can_frame *f, TickType_t wait) {
 
     f->id = msg.id;
     f->dlc = (uint8_t)msg.len;
+    if (status) {
+        *status = msg.status;
+    }
 
     return 0;
+}
+
+/** @brief Receive one frame. 0 when one arrived, negative otherwise. */
+static inline int can_frame_recv(struct can_frame *f, TickType_t wait) {
+    return can_frame_recv_status(f, wait, NULL);
 }

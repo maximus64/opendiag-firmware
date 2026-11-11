@@ -44,6 +44,10 @@ typedef struct {
     int cmdidx;
     bool discard; /* dropping the tail of an over-long command */
 
+    /* Frames were lost to a full receive buffer since the channel was opened.
+     * Reported by F (LAWICEL status bit 3, data overrun) until it reopens. */
+    bool overrun;
+
     /* Composed here and sent in one go. Written and drained by the link task
      * alone, so it needs no locking of its own. */
     char txbuf[SLCAN_TX_BUF];
@@ -252,9 +256,11 @@ static void slcan_close_bus(slcan_ctx_t *c) {
 static void slcan_parse_command(slcan_ctx_t *c, const char *buf) {
     switch (buf[0]) {
     case 'O': /* open the channel */
+        c->overrun = false;
         slcan_open_bus(c, false);
         break;
     case 'L': /* open the channel listen-only (LAWICEL) */
+        c->overrun = false;
         slcan_open_bus(c, true);
         break;
     case 'C': /* close the channel */
@@ -310,8 +316,8 @@ static void slcan_parse_command(slcan_ctx_t *c, const char *buf) {
     case 'm': /* acceptance mask */
         slcan_ack(c);
         break;
-    case 'F': /* status flags */
-        slcan_reply_str(c, "F00");
+    case 'F': /* status flags: 0x08 data overrun, else none */
+        slcan_reply_str(c, c->overrun ? "F08" : "F00");
         slcan_ack(c);
         break;
     case 'V': /* version */
@@ -385,7 +391,10 @@ static void slcan_fe_feed(const uint8_t *data, size_t len) {
     for (size_t i = 0; i < len; i++) {
         char val = (char)data[i];
 
-        if (val == '\r') {
+        /* A CR ends a command. An LF is a line end too, so a CRLF pair ends
+         * one command, and the LF after the CR is an empty line that is
+         * ignored. Without this the LF was glued onto the next command. */
+        if (val == '\r' || val == '\n') {
             if (c->discard) {
                 c->discard = false;
                 slcan_nack(c);
@@ -414,13 +423,18 @@ static void slcan_fe_feed(const uint8_t *data, size_t len) {
 static void slcan_fe_poll(void) {
     slcan_ctx_t *c = &g_slcan;
     struct can_frame frame;
+    uint32_t status;
     int forwarded = 0;
 
     if (!slcan_is_open(c)) {
         return;
     }
 
-    while (forwarded < SLCAN_RX_BURST && can_frame_recv(&frame, 0) == 0) {
+    while (forwarded < SLCAN_RX_BURST &&
+           can_frame_recv_status(&frame, 0, &status) == 0) {
+        if (status & BUS_RX_BUFFER_OVERFLOW) {
+            c->overrun = true;
+        }
         slcan_print_frame(c, &frame);
         forwarded++;
     }
