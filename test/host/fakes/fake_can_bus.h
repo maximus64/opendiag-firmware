@@ -44,6 +44,10 @@ void fake_can_stage_response_at(uint32_t id, uint8_t dlc, const uint8_t *data,
 /** Queue a frame that is already sitting in the driver before any request. */
 void fake_can_stage_stale(uint32_t id, uint8_t dlc, const uint8_t *data);
 
+/** As fake_can_stage_stale(), with BUS_RX_* flags on the received message. */
+void fake_can_stage_stale_status(uint32_t id, uint8_t dlc, const uint8_t *data,
+                                 uint32_t status);
+
 /** The next frame received reports BUS_RX_BUFFER_OVERFLOW, as after a lost burst. */
 void fake_can_stage_overflow(void);
 

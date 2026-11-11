@@ -23,6 +23,7 @@ typedef struct {
     uint32_t delay_ms;
     uint64_t ready_ms;
     uint32_t timestamp_us;
+    uint32_t status; /* BUS_RX_* flags reported with the frame */
     int release_at; /* Transmit count that frees this frame */
 } staged_t;
 
@@ -41,6 +42,7 @@ static struct {
     int confirmed_send_error;
     uint32_t tx_end_lag_us; /* How long before the send returns a frame ends. */
     bool overflow_next; /* next received frame reports BUS_RX_BUFFER_OVERFLOW */
+    uint32_t rx_status; /* status staged with the frame just received */
 
     staged_t live[MAX_FRAMES]; /* Readable now */
     int live_head, live_count;
@@ -108,6 +110,16 @@ void fake_can_stage_stale(uint32_t id, uint8_t dlc, const uint8_t *data) {
     slot = (g.live_head + g.live_count) % MAX_FRAMES;
     stage(&g.live[slot], id, dlc, data, 0);
     g.live_count++;
+}
+
+void fake_can_stage_stale_status(uint32_t id, uint8_t dlc, const uint8_t *data,
+                                 uint32_t status) {
+    int before = g.live_count;
+
+    fake_can_stage_stale(id, dlc, data);
+    if (g.live_count > before) {
+        g.live[(g.live_head + before) % MAX_FRAMES].status = status;
+    }
 }
 
 int fake_can_setup_count(void) { return g.setup_count; }
@@ -243,6 +255,7 @@ int can_receive(struct can_frame *frame, TickType_t ticks_to_wait) {
 
     fake_clock_advance_ms(delay_ms);
     g.rx_timestamp_us = s->timestamp_us;
+    g.rx_status = s->status;
 
     g.live_head = (g.live_head + 1) % MAX_FRAMES;
     g.live_count--;
@@ -350,7 +363,7 @@ static int can_ops_recv(bus_msg_t *msg, TickType_t wait) {
     msg->len = f.dlc;
     msg->timestamp_us = g.rx_timestamp_us;
     msg->sequence = ++g.rx_sequence;
-    msg->status = g.overflow_next ? BUS_RX_BUFFER_OVERFLOW : 0;
+    msg->status = (g.overflow_next ? BUS_RX_BUFFER_OVERFLOW : 0) | g.rx_status;
     g.overflow_next = false;
 
     return (int)len;

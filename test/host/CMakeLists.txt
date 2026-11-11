@@ -119,6 +119,19 @@ set(SUITES
     test_j1850_pwm_codec
     test_j1850_vpw_codec
     test_kline_codec
+    test_kline_codec_cov
+    test_kline_init_cov
+    test_kline_api_cov
+    test_utility_cov
+    test_comm_iface_cov
+    test_button_cov
+    test_slcan_cov
+    test_vif_cov
+    test_bus_tx_worker_cov
+    test_j2534_cfg_cov
+    test_j2534_misc_cov
+    test_j2534_wire_cov
+    test_can_driver_cov
 )
 
 set(test_elm327_at_FW      ${ELM327_FW})
@@ -178,6 +191,23 @@ set(test_j2534_FW ${test_slcan_FW} ${FW_DIR}/j2534.c
     ${FW_DIR}/j2534_wire.c ${FW_DIR}/j2534.pb.c ${FW_DIR}/isotp.c
     ${NANOPB_DIR}/pb_common.c ${NANOPB_DIR}/pb_encode.c ${NANOPB_DIR}/pb_decode.c)
 
+# Coverage suites (test_*_cov): same source lists as the stock suite each one
+# targets. A suite that #includes a firmware .c takes it from the list only if
+# that file is not included, see the note above SUITES.
+set(test_kline_codec_cov_FW   ${test_kline_codec_FW})
+set(test_kline_init_cov_FW    ${test_kline_driver_FW})
+set(test_kline_api_cov_FW     ${test_kline_driver_FW})
+set(test_utility_cov_FW       "")
+set(test_comm_iface_cov_FW    "")
+set(test_button_cov_FW        "")
+set(test_slcan_cov_FW         ${test_slcan_FW})
+set(test_vif_cov_FW           ${test_vif_FW})
+set(test_bus_tx_worker_cov_FW driver_stubs/driver_rtos.c)
+set(test_j2534_cfg_cov_FW     ${test_j2534_FW})
+set(test_j2534_misc_cov_FW    ${test_j2534_FW})
+set(test_j2534_wire_cov_FW    ${test_j2534_FW})
+set(test_can_driver_cov_FW    ${test_can_driver_FW})
+
 # Public-API contracts load the real firmware core behind a loopback wire peer.
 add_library(j2534_contract_firmware SHARED EXCLUDE_FROM_ALL
     fakes/j2534_contract_firmware.c ${test_j2534_FW})
@@ -200,7 +230,9 @@ foreach(suite ${SUITES})
     add_executable(${suite} suites/${suite}.c ${${suite}_FW})
     target_link_libraries(${suite} PRIVATE td_fakes td_framework)
     if(suite STREQUAL "test_can_driver" OR suite STREQUAL "test_kline_driver"
-       OR suite STREQUAL "test_bus_tx_worker")
+       OR suite STREQUAL "test_bus_tx_worker"
+       OR suite STREQUAL "test_kline_init_cov" OR suite STREQUAL "test_kline_api_cov"
+       OR suite STREQUAL "test_bus_tx_worker_cov" OR suite STREQUAL "test_can_driver_cov")
         target_include_directories(${suite} BEFORE PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/driver_stubs)
     endif()

@@ -3,6 +3,7 @@
 #define xTaskCreate driver_task_create
 #define vTaskDelete driver_task_delete
 #define vTaskNotifyGiveFromISR driver_task_notify
+#define ulTaskNotifyTake driver_task_take
 #include "../../stubs/freertos/task.h"
 typedef int portMUX_TYPE;
 #define portMUX_INITIALIZER_UNLOCKED 0

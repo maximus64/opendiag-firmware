@@ -22,6 +22,7 @@ int driver_queue_set_waits;
 bool driver_fail_task, driver_exit_on_wait;
 int driver_set_joins, driver_fail_set_join;
 int driver_task_starts, driver_task_exits, driver_notifications;
+uint32_t (*driver_notify_take_hook)(void);
 
 void driver_rtos_reset(void) {
     driver_queue_set_waits = 0;
@@ -36,6 +37,7 @@ void driver_rtos_reset(void) {
     driver_set_joins = driver_fail_set_join = 0;
     driver_task_starts = driver_task_exits = driver_notifications = 0;
     driver_fail_task = driver_exit_on_wait = false;
+    driver_notify_take_hook = NULL;
     worker = NULL;
 }
 
@@ -183,4 +185,14 @@ void vTaskNotifyGiveFromISR(TaskHandle_t task, BaseType_t *woken) {
     TEST_ASSERT_TRUE(worker_alive);
     TEST_ASSERT_NOT_NULL(task);
     driver_notifications++;
+}
+/* Named ulTaskNotifyTake here; freertos/task.h renames it to driver_task_take
+ * for every suite that links this file, so it does not clash with the
+ * idf_stub.c version that the other suites use. */
+uint32_t ulTaskNotifyTake(BaseType_t clear_on_exit, TickType_t ticks_to_wait) {
+    (void)clear_on_exit;
+    if (driver_notify_take_hook)
+        return driver_notify_take_hook();
+    fake_clock_advance_ms((uint32_t)ticks_to_wait);
+    return 0;
 }
