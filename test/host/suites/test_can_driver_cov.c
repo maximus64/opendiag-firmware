@@ -1,0 +1,992 @@
+/* SPDX-License-Identifier: GPL-3.0-only */
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include "esp_twai_onchip.h"
+#include "bus_tx.h"
+#include "can_bus.h"
+#include "driver/gpio.h"
+#include "driver_rtos.h"
+#include "fake_clock.h"
+#include "pinout.h"
+#include "td_test.h"
+
+enum operation {
+    NEW,
+    REGISTER,
+    ENABLE,
+    GET_INFO,
+    DISABLE,
+    DELETE,
+    TRANSMIT,
+    WAIT_TX,
+    OP_COUNT
+};
+static esp_err_t result[OP_COUNT];
+static int calls[OP_COUNT];
+static bool node_live, node_enabled;
+static bool bus_off_on_disable;
+static bool tx_unsuccessful;
+static bool complete_on_poll;
+static int silent;
+static twai_event_callbacks_t callbacks;
+static int node_token;
+static bool forced_bus_off;
+static unsigned recover_calls;
+static const twai_frame_t *pending_tx[8];
+static unsigned pending_count, wire_count;
+static uint32_t last_wire_id;
+static twai_onchip_node_config_t last_node_cfg;
+/* Knobs for the cov tests. Each has a default that leaves the fakes as they
+ * were before they existed; td_setup() restores the defaults. */
+static esp_err_t rx_isr_result, recover_result;
+static bool rx_next_rtr, recover_leaves_bus_off, state_override;
+static uint8_t rx_next_dlc = 1;
+static twai_error_state_t state_value;
+#define NODE ((twai_node_handle_t) & node_token)
+#define CALL(op)                                                               \
+    do {                                                                       \
+        calls[op]++;                                                           \
+        if (result[op])                                                        \
+            return result[op];                                                 \
+    } while (0)
+
+esp_err_t gpio_set_level(gpio_num_t pin, uint32_t value) {
+    if (pin == PIN_CAN0_SILENT)
+        silent = value;
+    return ESP_OK;
+}
+esp_err_t twai_new_node_onchip(const twai_onchip_node_config_t *cfg,
+                               twai_node_handle_t *node) {
+    CALL(NEW);
+    last_node_cfg = *cfg;
+    TEST_ASSERT_FALSE(node_live);
+    node_live = true;
+    *node = NODE;
+    return ESP_OK;
+}
+esp_err_t twai_node_register_event_callbacks(twai_node_handle_t node,
+                                             const twai_event_callbacks_t *cb,
+                                             void *arg) {
+    CALL(REGISTER);
+    callbacks = *cb;
+    return ESP_OK;
+}
+esp_err_t twai_node_enable(twai_node_handle_t node) {
+    CALL(ENABLE);
+    node_enabled = true;
+    return ESP_OK;
+}
+esp_err_t twai_node_disable(twai_node_handle_t node) {
+    CALL(DISABLE);
+    TEST_ASSERT_TRUE(node_live);
+    if (bus_off_on_disable)
+        node_enabled = false;
+    if (!node_enabled)
+        return ESP_ERR_INVALID_STATE;
+    node_enabled = false;
+    return ESP_OK;
+}
+esp_err_t twai_node_delete(twai_node_handle_t node) {
+    CALL(DELETE);
+    TEST_ASSERT_TRUE(node_live);
+    TEST_ASSERT_FALSE(node_enabled);
+    TEST_ASSERT_EQUAL_INT(driver_task_starts, driver_task_exits);
+    node_live = false;
+    pending_count = 0;
+    return ESP_OK;
+}
+esp_err_t twai_node_recover(twai_node_handle_t node) {
+    recover_calls++;
+    if (recover_result)
+        return recover_result;
+    if (!recover_leaves_bus_off)
+        forced_bus_off = false;
+    return ESP_OK;
+}
+esp_err_t twai_node_transmit(twai_node_handle_t node, const twai_frame_t *frame,
+                             int ms) {
+    CALL(TRANSMIT);
+    TEST_ASSERT_TRUE(node_live && node_enabled);
+    TEST_ASSERT_TRUE(pending_count < 8);
+    pending_tx[pending_count++] = frame;
+    return ESP_OK;
+}
+static void complete_pending_tx(void) {
+    if (!node_live || !node_enabled || silent)
+        return;
+    for (unsigned i = 0; i < pending_count; i++) {
+        if (!tx_unsuccessful) {
+            wire_count++;
+            last_wire_id = pending_tx[i]->header.id;
+        }
+        twai_tx_done_event_data_t event = {.is_tx_success = !tx_unsuccessful};
+        callbacks.on_tx_done(NODE, &event, NULL);
+    }
+    pending_count = 0;
+}
+esp_err_t twai_node_transmit_wait_all_done(twai_node_handle_t node, int ms) {
+    calls[WAIT_TX]++;
+    if (result[WAIT_TX] && !(ms == 0 && complete_on_poll))
+        return result[WAIT_TX];
+    TEST_ASSERT_TRUE(node_live && node_enabled);
+    complete_pending_tx();
+    return ESP_OK;
+}
+esp_err_t twai_node_receive_from_isr(twai_node_handle_t node,
+                                     twai_frame_t *frame) {
+    if (rx_isr_result)
+        return rx_isr_result;
+    frame->header.id = 0x123;
+    frame->header.rtr = rx_next_rtr;
+    frame->header.dlc = rx_next_dlc;
+    frame->buffer[0] = 0x55;
+    return ESP_OK;
+}
+esp_err_t twai_node_get_info(twai_node_handle_t node,
+                             twai_node_status_t *status,
+                             twai_node_record_t *record) {
+    CALL(GET_INFO);
+    if (status) {
+        memset(status, 0, sizeof(*status));
+        status->state = state_override ? state_value
+                        : node_enabled && !forced_bus_off ? TWAI_ERROR_ACTIVE
+                                                          : TWAI_ERROR_BUS_OFF;
+    }
+    if (record)
+        memset(record, 0, sizeof(*record));
+    return ESP_OK;
+}
+
+void td_setup(void) {
+    driver_rtos_reset();
+    rx_isr_result = ESP_OK;
+    recover_result = ESP_OK;
+    rx_next_rtr = false;
+    rx_next_dlc = 1;
+    recover_leaves_bus_off = false;
+    state_override = false;
+    forced_bus_off = false;
+    recover_calls = 0;
+    memset(result, 0, sizeof(result));
+    memset(calls, 0, sizeof(calls));
+    memset(&callbacks, 0, sizeof(callbacks));
+    TEST_ASSERT_FALSE(node_live);
+    bus_off_on_disable = false;
+    tx_unsuccessful = false;
+    complete_on_poll = false;
+    TEST_ASSERT_EQUAL_INT(0, pending_count);
+    wire_count = 0;
+    driver_exit_on_wait = true;
+}
+void td_teardown(void) {
+    memset(result, 0, sizeof(result));
+    driver_exit_on_wait = true;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_teardown());
+    TEST_ASSERT_EQUAL_INT(0, driver_live_objects);
+    TEST_ASSERT_FALSE(node_live);
+}
+
+TEST(the_node_is_listen_only_only_when_the_build_asks_for_it) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    TEST_ASSERT_EQUAL_INT(0, last_node_cfg.flags.enable_listen_only);
+}
+
+/* Captures what can_print_stat() writes to stdout. */
+static const char *printed_stats(void) {
+    static char text[2048];
+    FILE *capture = tmpfile();
+    TEST_ASSERT_NOT_NULL(capture);
+    fflush(stdout);
+    int saved = dup(STDOUT_FILENO);
+    TEST_ASSERT_TRUE(saved >= 0);
+    TEST_ASSERT_TRUE(dup2(fileno(capture), STDOUT_FILENO) >= 0);
+    can_print_stat();
+    fflush(stdout);
+    int restored = dup2(saved, STDOUT_FILENO);
+    close(saved);
+    rewind(capture);
+    size_t length = fread(text, 1, sizeof(text) - 1, capture);
+    text[length] = 0;
+    fclose(capture);
+    TEST_ASSERT_TRUE(restored >= 0);
+    return text;
+}
+
+static void assert_io_stopped(void) {
+    struct can_frame frame = {.id = 0x123, .dlc = 1};
+    TEST_ASSERT_EQUAL_INT(-1, can_send(&frame));
+    TEST_ASSERT_EQUAL_INT(-1, can_receive(&frame, 0));
+    TEST_ASSERT_EQUAL_INT(1, silent);
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_STATE, can_bus_setup(500000));
+}
+
+TEST(can_worker_timeout_retains_resources_until_late_acknowledgement) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    twai_state_change_event_data_t state = {.new_sta = TWAI_ERROR_BUS_OFF};
+    callbacks.on_state_change(NODE, &state, NULL);
+    TEST_ASSERT_EQUAL_INT(1, driver_notifications);
+    driver_exit_on_wait = false;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_TIMEOUT, can_bus_teardown());
+    TEST_ASSERT_EQUAL_INT(0, calls[DISABLE]);
+    TEST_ASSERT_EQUAL_INT(0, calls[DELETE]);
+    TEST_ASSERT_EQUAL_INT(2, driver_live_objects);
+    TEST_ASSERT_EQUAL_INT(0, driver_task_exits);
+    assert_io_stopped();
+
+    callbacks.on_state_change(NODE, &state, NULL);
+    TEST_ASSERT_EQUAL_INT(1, driver_notifications);
+    driver_run_worker();
+    callbacks.on_state_change(NODE, &state, NULL);
+    callbacks.on_rx_done(NODE, NULL, NULL);
+    TEST_ASSERT_EQUAL_INT(1, driver_notifications);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_teardown());
+    TEST_ASSERT_EQUAL_INT(0, driver_live_objects);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+}
+
+TEST(can_peripheral_failures_retain_queues_and_allow_cleanup_retry) {
+    const int failures[] = {GET_INFO, DISABLE, DELETE};
+    for (size_t i = 0; i < sizeof(failures) / sizeof(failures[0]); i++) {
+        TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+        int fail = failures[i];
+        result[fail] = ESP_FAIL;
+        int deletes = calls[DELETE];
+        int disables = calls[DISABLE];
+        TEST_ASSERT_EQUAL_INT(ESP_FAIL, can_bus_ops.close());
+        TEST_ASSERT_TRUE(node_live);
+        TEST_ASSERT_EQUAL_INT(2, driver_live_objects);
+        assert_io_stopped();
+        if (fail != DELETE)
+            TEST_ASSERT_EQUAL_INT(deletes, calls[DELETE]);
+        callbacks.on_rx_done(NODE, NULL, NULL);
+        twai_state_change_event_data_t state = {.new_sta = TWAI_ERROR_BUS_OFF};
+        callbacks.on_state_change(NODE, &state, NULL);
+        result[fail] = ESP_OK;
+        TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_teardown());
+        TEST_ASSERT_EQUAL_INT(disables + (fail == DISABLE ? 2 : 1),
+                              calls[DISABLE]);
+        TEST_ASSERT_EQUAL_INT(0, driver_live_objects);
+    }
+}
+
+TEST(can_bus_off_node_can_be_deleted) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    node_enabled = false;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_teardown());
+    TEST_ASSERT_EQUAL_INT(0, calls[DISABLE]);
+    TEST_ASSERT_FALSE(node_live);
+}
+
+TEST(can_bus_off_between_status_and_disable_can_be_deleted) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    bus_off_on_disable = true;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_teardown());
+    TEST_ASSERT_EQUAL_INT(1, calls[DISABLE]);
+    TEST_ASSERT_FALSE(node_live);
+}
+
+TEST(can_failed_startup_waits_for_worker_before_releasing_node) {
+    result[ENABLE] = ESP_FAIL;
+    driver_exit_on_wait = false;
+    TEST_ASSERT_EQUAL_INT(ESP_FAIL, can_bus_setup(500000));
+    TEST_ASSERT_EQUAL_INT(0, calls[DELETE]);
+    TEST_ASSERT_TRUE(node_live);
+    assert_io_stopped();
+    result[ENABLE] = ESP_OK;
+    driver_exit_on_wait = true;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_teardown());
+    TEST_ASSERT_EQUAL_INT(0, calls[DISABLE]);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+}
+
+TEST(can_partial_startup_failure_releases_all_owned_resources) {
+    const int failures[] = {NEW, REGISTER, ENABLE};
+    for (size_t i = 0; i < sizeof(failures) / sizeof(failures[0]); i++) {
+        result[failures[i]] = ESP_FAIL;
+        TEST_ASSERT_EQUAL_INT(ESP_FAIL, can_bus_setup(500000));
+        TEST_ASSERT_EQUAL_INT(0, driver_live_objects);
+        TEST_ASSERT_FALSE(node_live);
+        result[failures[i]] = ESP_OK;
+    }
+    driver_fail_task = true;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NO_MEM, can_bus_setup(500000));
+    TEST_ASSERT_EQUAL_INT(0, driver_live_objects);
+    TEST_ASSERT_FALSE(node_live);
+    driver_fail_task = false;
+    TEST_ASSERT_EQUAL_INT(0, calls[DISABLE]);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+}
+
+TEST(can_partial_allocation_failure_is_recoverable) {
+    for (int allocation = 1; allocation <= 2; allocation++) {
+        driver_fail_allocation = driver_allocations + allocation;
+        TEST_ASSERT_EQUAL_INT(ESP_ERR_NO_MEM, can_bus_setup(500000));
+        TEST_ASSERT_EQUAL_INT(0, driver_live_objects);
+        TEST_ASSERT_FALSE(node_live);
+    }
+    driver_fail_allocation = 0;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+}
+
+TEST(confirmed_can_send_waits_for_wire_completion_and_reports_failure) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    uint8_t data[] = {0x30, 0, 0};
+    bus_msg_t msg;
+    bus_msg_tx(&msg, data, sizeof(data), 0x7e0);
+    TEST_ASSERT_EQUAL_INT(0, can_bus_ops.send(&msg, 0));
+    TEST_ASSERT_EQUAL_INT(0, calls[WAIT_TX]);
+    TEST_ASSERT_EQUAL_INT(0, can_bus_ops.send(&msg, BUS_TX_WAIT_DONE));
+    TEST_ASSERT_EQUAL_INT(1, calls[WAIT_TX]);
+    tx_unsuccessful = true;
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_TX_FAILED,
+                          can_bus_ops.send(&msg, BUS_TX_WAIT_DONE));
+    TEST_ASSERT_TRUE(node_live && node_enabled);
+    TEST_ASSERT_EQUAL_INT(0, silent);
+    TEST_ASSERT_EQUAL_INT(0, calls[DISABLE]);
+    TEST_ASSERT_EQUAL_INT(0, calls[DELETE]);
+    tx_unsuccessful = false;
+    TEST_ASSERT_EQUAL_INT(0, can_bus_ops.send(&msg, BUS_TX_WAIT_DONE));
+    TEST_ASSERT_EQUAL_INT(1, calls[NEW]);
+    result[WAIT_TX] = ESP_ERR_TIMEOUT;
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_TX_ABORTED,
+                          can_bus_ops.send(&msg, BUS_TX_WAIT_DONE));
+    TEST_ASSERT_FALSE(node_live);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    result[WAIT_TX] = ESP_ERR_INVALID_STATE;
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_TX_ABORTED,
+                          can_bus_ops.send(&msg, BUS_TX_WAIT_DONE));
+    TEST_ASSERT_FALSE(node_live);
+}
+
+TEST(confirmed_send_timeout_discards_frames_before_reopen) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    uint8_t data[] = {0x30, 0, 0};
+    bus_msg_t msg;
+    bus_msg_tx(&msg, data, sizeof(data), 0x7e0);
+    TEST_ASSERT_EQUAL_INT(0, can_bus_ops.send(&msg, 0));
+    result[WAIT_TX] = ESP_ERR_TIMEOUT;
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_TX_ABORTED,
+                          can_bus_ops.send(&msg, BUS_TX_WAIT_DONE));
+    TEST_ASSERT_EQUAL_INT(0, pending_count);
+    TEST_ASSERT_FALSE(node_live);
+    complete_pending_tx();
+    TEST_ASSERT_EQUAL_INT(0, wire_count);
+
+    result[WAIT_TX] = ESP_OK;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    complete_pending_tx();
+    TEST_ASSERT_EQUAL_INT(0, wire_count);
+    msg.id = 0x7e1;
+    TEST_ASSERT_EQUAL_INT(0, can_bus_ops.send(&msg, BUS_TX_WAIT_DONE));
+    TEST_ASSERT_EQUAL_INT(1, wire_count);
+    TEST_ASSERT_EQUAL_HEX32(0x7e1, last_wire_id);
+}
+
+TEST(confirmed_send_enqueue_failure_keeps_can_and_older_frames_running) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    uint8_t data[] = {0x30, 0, 0};
+    bus_msg_t msg;
+    bus_msg_tx(&msg, data, sizeof(data), 0x7e0);
+    TEST_ASSERT_EQUAL_INT(0, can_bus_ops.send(&msg, 0));
+    msg.id = 0x7e1;
+    result[TRANSMIT] = ESP_ERR_TIMEOUT;
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_TX_FAILED,
+                          can_bus_ops.send(&msg, BUS_TX_WAIT_DONE));
+    TEST_ASSERT_EQUAL_INT(1, pending_count);
+    TEST_ASSERT_TRUE(node_live && node_enabled);
+    TEST_ASSERT_EQUAL_INT(0, silent);
+    TEST_ASSERT_EQUAL_INT(0, calls[WAIT_TX]);
+    TEST_ASSERT_EQUAL_INT(0, calls[DISABLE]);
+    TEST_ASSERT_EQUAL_INT(0, calls[DELETE]);
+    complete_pending_tx();
+    TEST_ASSERT_EQUAL_INT(1, wire_count);
+    TEST_ASSERT_EQUAL_HEX32(0x7e0, last_wire_id);
+    result[TRANSMIT] = ESP_OK;
+    TEST_ASSERT_EQUAL_INT(0, can_bus_ops.send(&msg, BUS_TX_WAIT_DONE));
+    TEST_ASSERT_EQUAL_INT(2, wire_count);
+    TEST_ASSERT_EQUAL_HEX32(0x7e1, last_wire_id);
+    TEST_ASSERT_EQUAL_INT(1, calls[NEW]);
+}
+
+TEST(completion_racing_the_timeout_keeps_can_open) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    uint8_t data[] = {0x30, 0, 0};
+    bus_msg_t msg;
+    bus_msg_tx(&msg, data, sizeof(data), 0x7e0);
+    result[WAIT_TX] = ESP_ERR_TIMEOUT;
+    complete_on_poll = true;
+    TEST_ASSERT_EQUAL_INT(0, can_bus_ops.send(&msg, BUS_TX_WAIT_DONE));
+    TEST_ASSERT_EQUAL_INT(1, wire_count);
+    tx_unsuccessful = true;
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_TX_FAILED,
+                          can_bus_ops.send(&msg, BUS_TX_WAIT_DONE));
+    TEST_ASSERT_EQUAL_INT(4, calls[WAIT_TX]);
+    TEST_ASSERT_EQUAL_INT(0, pending_count);
+    TEST_ASSERT_TRUE(node_live && node_enabled);
+    TEST_ASSERT_EQUAL_INT(0, silent);
+    TEST_ASSERT_EQUAL_INT(0, calls[DISABLE]);
+    TEST_ASSERT_EQUAL_INT(0, calls[DELETE]);
+}
+
+TEST(failed_tx_abort_keeps_the_transceiver_silent_until_cleanup_succeeds) {
+    const int failures[] = {GET_INFO, DISABLE, DELETE, -1};
+    for (unsigned i = 0; i < sizeof(failures) / sizeof(failures[0]); i++) {
+        TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+        uint8_t data[] = {0x30, 0, 0};
+        bus_msg_t msg;
+        bus_msg_tx(&msg, data, sizeof(data), 0x7e0);
+        result[WAIT_TX] = ESP_ERR_TIMEOUT;
+        if (failures[i] < 0)
+            driver_exit_on_wait = false;
+        else
+            result[failures[i]] = ESP_FAIL;
+        TEST_ASSERT_EQUAL_INT(BUS_ERR_TX_ABORTED,
+                              can_bus_ops.send(&msg, BUS_TX_WAIT_DONE));
+        TEST_ASSERT_TRUE(node_live);
+        assert_io_stopped();
+        node_enabled = true;
+        complete_pending_tx();
+        TEST_ASSERT_EQUAL_INT(0, wire_count);
+        memset(result, 0, sizeof(result));
+        driver_exit_on_wait = true;
+        TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_teardown());
+        TEST_ASSERT_EQUAL_INT(0, pending_count);
+    }
+}
+
+TEST(arbitration_losses_are_not_counted_as_bus_errors) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    twai_error_event_data_t event = {.err_flags = {.arb_lost = 1}};
+    for (unsigned i = 0; i < 9; i++)
+        callbacks.on_error(NODE, &event, NULL);
+    const char *stats = printed_stats();
+    TEST_ASSERT_NOT_NULL(strstr(stats, "bus_error_count: 0\n"));
+    TEST_ASSERT_NOT_NULL(strstr(stats, "arb_lost_count: 9\n"));
+    TEST_ASSERT_NOT_NULL(strstr(stats, "unclassified_error_count: 0\n"));
+}
+
+TEST(real_errors_are_counted_even_when_arbitration_is_also_reported) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    const twai_error_flags_t flags[] = {
+        {.bit_err = 1},
+        {.form_err = 1},
+        {.stuff_err = 1},
+        {.ack_err = 1},
+        {.arb_lost = 1, .bit_err = 1},
+        {.val = 0},
+        {.val = 1u << 8},
+    };
+    for (unsigned i = 0; i < sizeof(flags) / sizeof(flags[0]); i++) {
+        twai_error_event_data_t event = {.err_flags = flags[i]};
+        callbacks.on_error(NODE, &event, NULL);
+    }
+    const char *stats = printed_stats();
+    TEST_ASSERT_NOT_NULL(strstr(stats, "bus_error_count: 7\n"));
+    TEST_ASSERT_NOT_NULL(strstr(stats, "arb_lost_count: 1\n"));
+    TEST_ASSERT_NOT_NULL(strstr(stats, "bit_error_count: 2\n"));
+    TEST_ASSERT_NOT_NULL(strstr(stats, "form_error_count: 1\n"));
+    TEST_ASSERT_NOT_NULL(strstr(stats, "stuff_error_count: 1\n"));
+    TEST_ASSERT_NOT_NULL(strstr(stats, "ack_error_count: 1\n"));
+    TEST_ASSERT_NOT_NULL(strstr(stats, "unclassified_error_count: 2\n"));
+}
+
+TEST(diagnostic_counters_reset_when_a_new_can_session_opens) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    twai_error_event_data_t event = {
+        .err_flags = {.arb_lost = 1, .ack_err = 1}};
+    callbacks.on_error(NODE, &event, NULL);
+    twai_tx_done_event_data_t tx_event = {.is_tx_success = false};
+    callbacks.on_tx_done(NODE, &tx_event, NULL);
+    TEST_ASSERT_NOT_NULL(strstr(printed_stats(), "tx_failed_count: 1\n"));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_teardown());
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    const char *stats = printed_stats();
+    TEST_ASSERT_NOT_NULL(strstr(stats, "bus_error_count: 0\n"));
+    TEST_ASSERT_NOT_NULL(strstr(stats, "arb_lost_count: 0\n"));
+    TEST_ASSERT_NOT_NULL(strstr(stats, "ack_error_count: 0\n"));
+    TEST_ASSERT_NOT_NULL(strstr(stats, "tx_failed_count: 0\n"));
+}
+
+TEST(bus_receive_preserves_interrupt_timestamp_and_overflow) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    fake_clock_reset();
+    fake_clock_advance_ms(123);
+    twai_rx_done_event_data_t event = {0};
+    for (unsigned i = 0; i < 33; i++)
+        callbacks.on_rx_done(NODE, &event, NULL);
+    uint8_t data[8];
+    bus_msg_t msg;
+    bus_msg_init(&msg, data, sizeof(data));
+    fake_clock_advance_ms(10);
+    TEST_ASSERT_EQUAL_INT(1, can_bus_ops.recv(&msg, 0));
+    TEST_ASSERT_EQUAL_INT(123001, msg.timestamp_us);
+    TEST_ASSERT_EQUAL_INT(0x123, msg.id);
+    TEST_ASSERT_EQUAL_INT(0x55, data[0]);
+    callbacks.on_rx_done(NODE, &event, NULL);
+    bool overflow = false;
+    while (can_bus_ops.recv(&msg, 0) >= 0)
+        overflow |= !!(msg.status & BUS_RX_BUFFER_OVERFLOW);
+    TEST_ASSERT_TRUE(overflow);
+}
+
+TEST(j2534_bus_off_is_reported_and_bus_on_recovers) {
+    bus_cfg_t cfg = {.bitrate = 500000, .manual_recovery = true};
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_ops.open(&cfg));
+    forced_bus_off = true;
+    twai_state_change_event_data_t event = {.old_sta = TWAI_ERROR_ACTIVE,
+                                            .new_sta = TWAI_ERROR_BUS_OFF};
+    callbacks.on_state_change(NODE, &event, NULL);
+    bus_msg_t msg;
+    uint8_t data[8];
+    bus_msg_init(&msg, data, sizeof(data));
+    TEST_ASSERT_EQUAL_INT(0, can_bus_ops.recv(&msg, 0));
+    TEST_ASSERT_EQUAL_INT(BUS_RX_LINK_DOWN, msg.status);
+    TEST_ASSERT_EQUAL_INT(0, recover_calls);
+    TEST_ASSERT_EQUAL_INT(0, can_bus_ops.ioctl(BUS_IOCTL_BUS_ON, NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(1, recover_calls);
+    TEST_ASSERT_EQUAL_INT(0, can_bus_ops.ioctl(BUS_IOCTL_BUS_ON, NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(1, recover_calls);
+}
+
+TEST(controlled_can_timeout_silences_tx_but_retains_rx_resources_until_close) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    uint8_t data[] = {1};
+    bus_msg_t message;
+    bus_msg_tx(&message, data, sizeof(data), 0x7e0);
+    bus_tx_control_t control;
+    bus_tx_prepare(&control, 0);
+    result[WAIT_TX] = ESP_ERR_TIMEOUT;
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_TX_ABORTED,
+                          can_bus_ops.send_controlled(&message, 0, &control));
+    TEST_ASSERT_TRUE(node_live);
+    TEST_ASSERT_TRUE(silent);
+    complete_pending_tx();
+    TEST_ASSERT_EQUAL_INT(0, wire_count);
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_teardown());
+    TEST_ASSERT_FALSE(node_live);
+    TEST_ASSERT_EQUAL_INT(0, pending_count);
+}
+
+TEST(
+    controlled_can_receive_guard_prevents_an_unobserved_frame_being_overtaken) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    callbacks.on_rx_done(NODE, NULL, NULL);
+    uint8_t data[] = {1};
+    bus_msg_t message;
+    bus_msg_tx(&message, data, sizeof(data), 0x7e0);
+    bus_tx_control_t control;
+    bus_tx_prepare(&control, 0);
+    control.check_rx = true;
+    TEST_ASSERT_EQUAL_INT(
+        BUS_ERR_RX_PENDING,
+        can_bus_ops.send_controlled(&message, BUS_TX_WAIT_DONE, &control));
+    TEST_ASSERT_EQUAL_INT(0, wire_count);
+    bus_msg_init(&message, data, sizeof(data));
+    TEST_ASSERT_EQUAL_INT(1, can_bus_ops.recv(&message, 0));
+    TEST_ASSERT_EQUAL_INT(1, message.sequence);
+}
+TEST(an_extended_identifier_goes_out_with_its_ide_bit_set) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    struct can_frame frame = {.id = 0x1234567U | CAN_EFF_FLAG, .dlc = 2,
+                              .data = {0xAA, 0x55}};
+    TEST_ASSERT_EQUAL_INT(0, can_send(&frame));
+    TEST_ASSERT_EQUAL_INT(1, pending_count);
+    TEST_ASSERT_EQUAL_INT(1, pending_tx[0]->header.ide);
+    TEST_ASSERT_EQUAL_INT(0, pending_tx[0]->header.rtr);
+    TEST_ASSERT_EQUAL_HEX32(0x1234567, pending_tx[0]->header.id);
+    TEST_ASSERT_EQUAL_INT(2, pending_tx[0]->buffer_len);
+    complete_pending_tx();
+    TEST_ASSERT_EQUAL_INT(1, wire_count);
+    TEST_ASSERT_EQUAL_HEX32(0x1234567, last_wire_id);
+}
+
+TEST(a_remote_request_asks_for_its_length_and_carries_no_data) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    struct can_frame frame = {.id = 0x7e8U | CAN_RTR_FLAG, .dlc = 8};
+    TEST_ASSERT_EQUAL_INT(0, can_send(&frame));
+    TEST_ASSERT_EQUAL_INT(1, pending_count);
+    TEST_ASSERT_EQUAL_INT(1, pending_tx[0]->header.rtr);
+    TEST_ASSERT_EQUAL_INT(0, pending_tx[0]->header.ide);
+    TEST_ASSERT_EQUAL_INT(8, pending_tx[0]->header.dlc);
+    TEST_ASSERT_EQUAL_INT(0, pending_tx[0]->buffer_len);
+    TEST_ASSERT_EQUAL_HEX32(0x7e8, pending_tx[0]->header.id);
+    complete_pending_tx();
+    TEST_ASSERT_EQUAL_INT(1, wire_count);
+    TEST_ASSERT_EQUAL_HEX32(0x7e8, last_wire_id);
+}
+
+/* ------------------------------------------------------------------ *
+ * Tests that never transmit.
+ * ------------------------------------------------------------------ */
+
+static void set_bus_off(bool off) { forced_bus_off = off; }
+
+TEST(each_controller_state_has_its_own_name_in_the_printout) {
+    static const struct {
+        twai_error_state_t state;
+        const char *line;
+    } cases[] = {
+        {TWAI_ERROR_ACTIVE, "state: error active\n"},
+        {TWAI_ERROR_WARNING, "state: error warning\n"},
+        {TWAI_ERROR_PASSIVE, "state: error passive\n"},
+        {TWAI_ERROR_BUS_OFF, "state: bus off or stopped\n"},
+        {(twai_error_state_t)99, "state: UNKNOWN\n"},
+    };
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        state_override = true;
+        state_value = cases[i].state;
+        TEST_ASSERT_NOT_NULL(strstr(printed_stats(), cases[i].line));
+    }
+}
+
+TEST(a_config_asking_for_listen_only_sets_the_node_flag) {
+    const bus_cfg_t cfg = {.bitrate = 500000, .listen_only = true};
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_ops.open(&cfg));
+    TEST_ASSERT_EQUAL_INT(1, last_node_cfg.flags.enable_listen_only);
+    TEST_ASSERT_EQUAL_INT(500000, last_node_cfg.bit_timing.bitrate);
+}
+
+TEST(a_config_without_listen_only_follows_the_build) {
+    const bus_cfg_t cfg = {.bitrate = 500000};
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_ops.open(&cfg));
+    TEST_ASSERT_EQUAL_INT(0, last_node_cfg.flags.enable_listen_only);
+}
+
+TEST(a_runtime_listen_only_node_refuses_every_transmit_path) {
+    const bus_cfg_t cfg = {.bitrate = 500000, .listen_only = true};
+    uint8_t data[] = {0x30};
+    bus_msg_t msg;
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_ops.open(&cfg));
+
+    bus_msg_tx(&msg, data, sizeof(data), 0x7e0);
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_TX_FAILED, can_bus_ops.send(&msg, 0));
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_TX_FAILED,
+                          can_bus_ops.send(&msg, BUS_TX_WAIT_DONE));
+    TEST_ASSERT_EQUAL_INT(0, calls[TRANSMIT]);
+    TEST_ASSERT_EQUAL_INT(0, pending_count);
+    TEST_ASSERT_EQUAL_INT(0, wire_count);
+}
+
+TEST(a_runtime_listen_only_node_refuses_a_train_before_admitting_it) {
+    const bus_cfg_t cfg = {.bitrate = 500000, .listen_only = true};
+    uint8_t data[] = {0x30, 0, 0};
+    bus_msg_t msgs[2];
+    bus_tx_train_t train;
+    bus_tx_control_t control;
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_ops.open(&cfg));
+    bus_msg_tx(&msgs[0], data, sizeof(data), 0x7e0);
+    bus_msg_tx(&msgs[1], data, sizeof(data), 0x7e0);
+    bus_tx_prepare(&control, 0);
+    train.sent = 99;
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_TX_FAILED,
+                          can_bus_ops.send_train(msgs, 2, &control, &train));
+    TEST_ASSERT_EQUAL_INT(0, train.sent);
+    TEST_ASSERT_EQUAL_INT(BUS_TX_QUEUED, control.state);
+    TEST_ASSERT_EQUAL_INT(0, calls[TRANSMIT]);
+    TEST_ASSERT_EQUAL_INT(0, pending_count);
+}
+
+TEST(a_listen_only_node_still_receives) {
+    const bus_cfg_t cfg = {.bitrate = 500000, .listen_only = true};
+    struct can_frame frame = {0};
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_ops.open(&cfg));
+    callbacks.on_rx_done(NODE, NULL, NULL);
+
+    TEST_ASSERT_EQUAL_INT(0, can_receive(&frame, 0));
+    TEST_ASSERT_EQUAL_HEX32(0x123, frame.id);
+}
+
+TEST(reopening_normal_after_listen_only_clears_the_refusal) {
+    const bus_cfg_t listen = {.bitrate = 500000, .listen_only = true};
+    const bus_cfg_t normal = {.bitrate = 500000};
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_ops.open(&listen));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_ops.close());
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_ops.open(&normal));
+    struct can_frame frame = {.id = 0x123, .dlc = 1};
+
+    TEST_ASSERT_EQUAL_INT(0, last_node_cfg.flags.enable_listen_only);
+    TEST_ASSERT_EQUAL_INT(0, can_send(&frame));
+    TEST_ASSERT_EQUAL_INT(1, calls[TRANSMIT]);
+}
+
+TEST(printing_before_setup_reads_nothing_from_the_controller) {
+    const char *stats = printed_stats();
+    TEST_ASSERT_NULL(strstr(stats, "CAN bus status info"));
+    TEST_ASSERT_EQUAL_INT(0, calls[GET_INFO]);
+}
+
+TEST(printing_gives_up_when_the_controller_cannot_be_read) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    result[GET_INFO] = ESP_FAIL;
+    const char *stats = printed_stats();
+    TEST_ASSERT_NULL(strstr(stats, "CAN bus status info"));
+    TEST_ASSERT_EQUAL_INT(1, calls[GET_INFO]);
+}
+
+TEST(can_receive_copies_the_next_frame_and_fails_when_none_is_waiting) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    callbacks.on_rx_done(NODE, NULL, NULL);
+    struct can_frame frame = {0};
+    TEST_ASSERT_EQUAL_INT(0, can_receive(&frame, 0));
+    TEST_ASSERT_EQUAL_HEX32(0x123, frame.id);
+    TEST_ASSERT_EQUAL_INT(1, frame.dlc);
+    TEST_ASSERT_EQUAL_HEX32(0x55, frame.data[0]);
+    TEST_ASSERT_EQUAL_INT(-1, can_receive(&frame, 0));
+}
+
+TEST(a_frame_the_isr_cannot_read_is_dropped_without_using_a_sequence_number) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    rx_isr_result = ESP_FAIL;
+    callbacks.on_rx_done(NODE, NULL, NULL);
+    rx_isr_result = ESP_OK;
+    callbacks.on_rx_done(NODE, NULL, NULL);
+    uint8_t data[8];
+    bus_msg_t msg;
+    bus_msg_init(&msg, data, sizeof(data));
+    TEST_ASSERT_EQUAL_INT(1, can_bus_ops.recv(&msg, 0));
+    TEST_ASSERT_EQUAL_INT(1, msg.sequence);
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_TIMEOUT, can_bus_ops.recv(&msg, 0));
+}
+
+TEST(unsupported_bit_rates_are_refused_before_any_hardware_is_touched) {
+    const int rates[] = {0, 100000, 2000000};
+    for (unsigned i = 0; i < sizeof(rates) / sizeof(rates[0]); i++) {
+        TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, can_bus_setup(rates[i]));
+        TEST_ASSERT_EQUAL_INT(0, calls[NEW]);
+        TEST_ASSERT_EQUAL_INT(0, driver_allocations);
+    }
+}
+
+TEST(open_refuses_a_missing_or_zero_bit_rate) {
+    bus_cfg_t zero = {.bitrate = 0};
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, can_bus_ops.open(NULL));
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, can_bus_ops.open(&zero));
+    TEST_ASSERT_EQUAL_INT(0, calls[NEW]);
+    TEST_ASSERT_EQUAL_INT(0, driver_allocations);
+}
+
+TEST(bus_off_and_recovery_edges_wake_the_worker_and_other_changes_do_not) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    twai_state_change_event_data_t event = {.old_sta = TWAI_ERROR_BUS_OFF,
+                                            .new_sta = TWAI_ERROR_ACTIVE};
+    callbacks.on_state_change(NODE, &event, NULL);
+    TEST_ASSERT_EQUAL_INT(1, driver_notifications);
+    event = (twai_state_change_event_data_t){.old_sta = TWAI_ERROR_ACTIVE,
+                                             .new_sta = TWAI_ERROR_WARNING};
+    callbacks.on_state_change(NODE, &event, NULL);
+    event = (twai_state_change_event_data_t){.old_sta = TWAI_ERROR_WARNING,
+                                             .new_sta = TWAI_ERROR_PASSIVE};
+    callbacks.on_state_change(NODE, &event, NULL);
+    TEST_ASSERT_EQUAL_INT(1, driver_notifications);
+    event = (twai_state_change_event_data_t){.old_sta = TWAI_ERROR_ACTIVE,
+                                             .new_sta = TWAI_ERROR_BUS_OFF};
+    callbacks.on_state_change(NODE, &event, NULL);
+    TEST_ASSERT_EQUAL_INT(2, driver_notifications);
+}
+
+TEST(bus_on_refuses_requests_it_does_not_handle) {
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_UNSUPPORTED,
+                          can_bus_ops.ioctl(BUS_IOCTL_CLEAR_TX_QUEUE, NULL,
+                                            NULL));
+}
+
+TEST(bus_on_before_the_bus_is_open_is_not_ready) {
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_NOT_READY,
+                          can_bus_ops.ioctl(BUS_IOCTL_BUS_ON, NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(0, calls[GET_INFO]);
+}
+
+TEST(bus_on_reports_a_controller_that_cannot_be_read) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    result[GET_INFO] = ESP_FAIL;
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_INIT,
+                          can_bus_ops.ioctl(BUS_IOCTL_BUS_ON, NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(1, calls[GET_INFO]);
+    TEST_ASSERT_EQUAL_INT(0, recover_calls);
+}
+
+TEST(bus_on_reports_a_failed_recovery) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    set_bus_off(true);
+    recover_result = ESP_FAIL;
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_INIT,
+                          can_bus_ops.ioctl(BUS_IOCTL_BUS_ON, NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(1, recover_calls);
+    TEST_ASSERT_TRUE(forced_bus_off);
+    recover_result = ESP_OK;
+    set_bus_off(false);
+}
+
+TEST(bus_on_polls_for_a_hundred_milliseconds_then_gives_up_on_a_stuck_bus) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    set_bus_off(true);
+    recover_leaves_bus_off = true;
+    fake_clock_reset();
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_INIT,
+                          can_bus_ops.ioctl(BUS_IOCTL_BUS_ON, NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(1, recover_calls);
+    TEST_ASSERT_EQUAL_INT(101, calls[GET_INFO]);
+    TEST_ASSERT_EQUAL_INT(100, (int)fake_clock_ms());
+    recover_leaves_bus_off = false;
+    set_bus_off(false);
+}
+
+TEST(a_remote_frame_received_carries_its_length_and_no_data) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    rx_next_rtr = true;
+    rx_next_dlc = 4;
+    callbacks.on_rx_done(NODE, NULL, NULL);
+    uint8_t data[8];
+    bus_msg_t msg;
+    bus_msg_init(&msg, data, sizeof(data));
+    TEST_ASSERT_EQUAL_INT(0, can_bus_ops.recv(&msg, 0));
+    TEST_ASSERT_EQUAL_HEX32(0x123 | CAN_RTR_FLAG, msg.id);
+    TEST_ASSERT_EQUAL_INT(4, msg.len);
+}
+
+TEST(a_frame_too_long_for_the_buffer_is_refused_and_consumed) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    callbacks.on_rx_done(NODE, NULL, NULL);
+    uint8_t data[1];
+    bus_msg_t msg;
+    bus_msg_init(&msg, data, 0);
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_NO_SPACE, can_bus_ops.recv(&msg, 0));
+    bus_msg_init(&msg, data, sizeof(data));
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_TIMEOUT, can_bus_ops.recv(&msg, 0));
+}
+
+/* ------------------------------------------------------------------ *
+ * Transmit refusals and the worker script.
+ * ------------------------------------------------------------------ */
+TEST(a_train_of_no_frames_or_too_many_is_refused_before_admission) {
+    uint8_t data[] = {0x30, 0, 0};
+    bus_msg_t msgs[1];
+    bus_tx_train_t train;
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    bus_msg_tx(&msgs[0], data, sizeof(data), 0x7e0);
+    train.sent = 99;
+    /* The count is refused before any frame is read. */
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_BAD_ARG,
+                          can_bus_ops.send_train(msgs, 0, NULL, &train));
+    TEST_ASSERT_EQUAL_INT(0, train.sent);
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_BAD_ARG,
+                          can_bus_ops.send_train(msgs, BUS_TX_TRAIN_MAX + 1,
+                                                 NULL, &train));
+    TEST_ASSERT_EQUAL_INT(0, calls[TRANSMIT]);
+}
+
+TEST(a_train_on_a_control_cancelled_before_admission_is_refused_as_cancelled) {
+    uint8_t data[] = {0x30, 0, 0};
+    bus_msg_t msgs[2];
+    bus_tx_train_t train;
+    bus_tx_control_t control;
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    bus_msg_tx(&msgs[0], data, sizeof(data), 0x7e0);
+    bus_msg_tx(&msgs[1], data, sizeof(data), 0x7e0);
+    bus_tx_prepare(&control, 0);
+    TEST_ASSERT_TRUE(bus_tx_cancel(&control));
+    train.sent = 99;
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_CANCELLED,
+                          can_bus_ops.send_train(msgs, 2, &control, &train));
+    TEST_ASSERT_EQUAL_INT(0, train.sent);
+    TEST_ASSERT_EQUAL_INT(0, calls[TRANSMIT]);
+}
+
+TEST(a_train_whose_first_frame_cannot_be_queued_sends_nothing_and_fails) {
+    uint8_t data[] = {0x30, 0, 0};
+    bus_msg_t msgs[3];
+    bus_tx_train_t train;
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    for (unsigned i = 0; i < 3; i++)
+        bus_msg_tx(&msgs[i], data, sizeof(data), 0x7e0 + i);
+    result[TRANSMIT] = ESP_ERR_TIMEOUT;
+    train.sent = 99;
+    TEST_ASSERT_EQUAL_INT(BUS_ERR_TX_FAILED,
+                          can_bus_ops.send_train(msgs, 3, NULL, &train));
+    TEST_ASSERT_EQUAL_INT(0, train.sent);
+    TEST_ASSERT_EQUAL_INT(1, calls[TRANSMIT]);
+    TEST_ASSERT_EQUAL_INT(0, calls[WAIT_TX]);
+    TEST_ASSERT_EQUAL_INT(0, pending_count);
+    TEST_ASSERT_TRUE(node_live && node_enabled);
+    TEST_ASSERT_EQUAL_INT(0, silent);
+}
+
+static unsigned take_step;
+
+static void request_worker_exit(void) {
+    driver_exit_on_wait = false;
+    forced_bus_off = false;
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_TIMEOUT, can_bus_teardown());
+}
+
+static uint32_t take_script(void) {
+    switch (take_step++) {
+    case 0: /* timeout: nothing happened */
+        return 0;
+    case 1: /* notified, controller bus-off: recovery is asked for */
+        forced_bus_off = true;
+        return 1;
+    case 2: /* notified, bus back: only reported */
+        return 1;
+    case 3: /* notified but the controller cannot be read */
+        result[GET_INFO] = ESP_FAIL;
+        return 1;
+    case 4: /* bus-off again, and the recovery request fails */
+        result[GET_INFO] = ESP_OK;
+        forced_bus_off = true;
+        recover_result = ESP_FAIL;
+        return 1;
+    default: /* leave while a notification is still outstanding */
+        recover_result = ESP_OK;
+        request_worker_exit();
+        return 1;
+    }
+}
+
+TEST(the_worker_recovers_a_bus_off_node_and_reports_the_return) {
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_setup(500000));
+    driver_notify_take_hook = take_script;
+    take_step = 0;
+    driver_run_worker();
+    TEST_ASSERT_EQUAL_INT(6, take_step);
+    /* Recovery was attempted twice: once cleared the fault, once failed. */
+    TEST_ASSERT_EQUAL_INT(2, recover_calls);
+    TEST_ASSERT_EQUAL_INT(1, driver_task_exits);
+    driver_notify_take_hook = NULL;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_teardown());
+    TEST_ASSERT_FALSE(node_live);
+}
+
+static uint32_t take_manual_script(void) {
+    switch (take_step++) {
+    case 0:
+        forced_bus_off = true;
+        return 1;
+    default:
+        request_worker_exit();
+        return 0;
+    }
+}
+
+TEST(a_manual_recovery_worker_leaves_a_bus_off_node_alone) {
+    const bus_cfg_t cfg = {.bitrate = 500000, .manual_recovery = true};
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_ops.open(&cfg));
+    driver_notify_take_hook = take_manual_script;
+    take_step = 0;
+    driver_run_worker();
+    TEST_ASSERT_EQUAL_INT(2, take_step);
+    TEST_ASSERT_EQUAL_INT(0, recover_calls);
+    driver_notify_take_hook = NULL;
+    TEST_ASSERT_EQUAL_INT(ESP_OK, can_bus_teardown());
+}

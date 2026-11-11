@@ -11,3 +11,9 @@ void driver_rtos_reset(void);
 void driver_run_worker(void);
 
 extern int driver_queue_set_waits;
+
+/* Optional script for ulTaskNotifyTake(). When set, the stub returns whatever
+ * the hook returns; it may also change test state. When NULL (the default,
+ * restored by driver_rtos_reset()) the stub returns 0 after advancing the
+ * fake clock by the wait, as a timed-out wait would. */
+extern uint32_t (*driver_notify_take_hook)(void);
