@@ -87,7 +87,7 @@ static AdapterSettings editedSettings(Application &app) {
     s.name = controlText(app.window, IDC_NAME);
     s.transport =
         SendDlgItemMessage(app.window, IDC_TRANSPORT, CB_GETCURSEL, 0, 0) == 0 ? "com" : "tcp";
-    s.com = controlText(app.window, IDC_COM);
+    s.com = comFromLabel(controlText(app.window, IDC_COM));
     s.host = controlText(app.window, IDC_HOST);
     s.port = parseNumber(controlText(app.window, IDC_PORT), "Data TCP port", 1, 65535);
     s.baud = parseNumber(controlText(app.window, IDC_BAUD), "Serial baud rate", 300, 4000000);
@@ -117,6 +117,9 @@ static unsigned __stdcall connectionWorker(void *context) {
     } catch (const std::exception &error) {
         *result = std::string(error.what()) +
                   "\r\nCheck power, cables and port settings. Close other diagnostic applications.";
+        if (app.settings.transport == "com" && comPortRole(app.settings.com) == PORT_DEBUG) {
+            *result += " This is the DEBUG console port. Select the COM port.";
+        }
     }
     if (!PostMessage(app.window, WM_CHECK_FINISHED, 0, (LPARAM)result)) {
         delete result;
@@ -176,7 +179,7 @@ static INT_PTR CALLBACK dialogProcedure(HWND window, UINT message, WPARAM wparam
             for (unsigned i = 0; i < sizeof(edits) / sizeof(edits[0]); ++i) {
                 SendDlgItemMessage(window, edits[i], EM_SETLIMITTEXT, 79, 0);
             }
-            SendDlgItemMessage(window, IDC_COM, CB_LIMITTEXT, 16, 0);
+            SendDlgItemMessage(window, IDC_COM, CB_LIMITTEXT, 32, 0);
             showSettings(*app);
             return TRUE;
         }

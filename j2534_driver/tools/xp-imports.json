@@ -147,6 +147,7 @@
     ],
     "advapi32.dll": [
       "RegCloseKey",
+      "RegEnumKeyExA",
       "RegEnumValueA",
       "RegOpenKeyExA",
       "RegQueryValueExA"

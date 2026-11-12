@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "../common/api_trace.h"
 #include "legacy.h"
+#include "../common/export_call.h"
 #include <exception>
 
 extern "C" J2534_LONG J2534_CALL PassThruOpen(void *name, J2534_ULONG *deviceId) {
@@ -13,16 +14,7 @@ extern "C" J2534_LONG J2534_CALL PassThruOpen(void *name, J2534_ULONG *deviceId)
     trace.outputValue("device_id", deviceId);
 
     legacy::ApiGuard guard;
-    if (!guard.entered()) {
-        return trace.result(ERR_FAILED);
-    }
-    try {
-        return trace.result(legacy::finish(legacy::PassThruOpen(name, deviceId)));
-    } catch (const std::exception &error) {
-        return trace.result(legacy::finish(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(legacy::finish(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(trace, [&]() { return legacy::PassThruOpen(name, deviceId); }, legacy::finish);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruClose(J2534_ULONG deviceId) {
@@ -33,16 +25,7 @@ extern "C" J2534_LONG J2534_CALL PassThruClose(J2534_ULONG deviceId) {
                                 deviceId);
 
     legacy::ApiGuard guard;
-    if (!guard.entered()) {
-        return trace.result(ERR_FAILED);
-    }
-    try {
-        return trace.result(legacy::finish(legacy::PassThruClose(deviceId)));
-    } catch (const std::exception &error) {
-        return trace.result(legacy::finish(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(legacy::finish(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(trace, [&]() { return legacy::PassThruClose(deviceId); }, legacy::finish);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruConnect(J2534_ULONG deviceId,
@@ -64,17 +47,10 @@ extern "C" J2534_LONG J2534_CALL PassThruConnect(J2534_ULONG deviceId,
     trace.outputValue("channel_id", channelId);
 
     legacy::ApiGuard guard;
-    if (!guard.entered()) {
-        return trace.result(ERR_FAILED);
-    }
-    try {
-        return trace.result(legacy::finish(
-            legacy::PassThruConnect(deviceId, protocol, flags, baudrate, channelId)));
-    } catch (const std::exception &error) {
-        return trace.result(legacy::finish(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(legacy::finish(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(
+        trace,
+        [&]() { return legacy::PassThruConnect(deviceId, protocol, flags, baudrate, channelId); },
+        legacy::finish);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruDisconnect(J2534_ULONG channelId) {
@@ -85,16 +61,10 @@ extern "C" J2534_LONG J2534_CALL PassThruDisconnect(J2534_ULONG channelId) {
                                 channelId);
 
     legacy::ApiGuard guard;
-    if (!guard.entered()) {
-        return trace.result(ERR_FAILED);
-    }
-    try {
-        return trace.result(legacy::finish(legacy::PassThruDisconnect(channelId)));
-    } catch (const std::exception &error) {
-        return trace.result(legacy::finish(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(legacy::finish(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(
+        trace,
+        [&]() { return legacy::PassThruDisconnect(channelId); },
+        legacy::finish);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruReadMsgs(J2534_ULONG channelId,
@@ -112,17 +82,10 @@ extern "C" J2534_LONG J2534_CALL PassThruReadMsgs(J2534_ULONG channelId,
     trace.outputValue("returned_count", count, true);
 
     legacy::ApiGuard guard;
-    if (!guard.entered()) {
-        return trace.result(ERR_FAILED);
-    }
-    try {
-        return trace.result(
-            legacy::finish(legacy::PassThruReadMsgs(channelId, messages, count, timeout)));
-    } catch (const std::exception &error) {
-        return trace.result(legacy::finish(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(legacy::finish(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(
+        trace,
+        [&]() { return legacy::PassThruReadMsgs(channelId, messages, count, timeout); },
+        legacy::finish);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruWriteMsgs(J2534_ULONG channelId,
@@ -140,17 +103,10 @@ extern "C" J2534_LONG J2534_CALL PassThruWriteMsgs(J2534_ULONG channelId,
     trace.outputValue("returned_count", count, true);
 
     legacy::ApiGuard guard;
-    if (!guard.entered()) {
-        return trace.result(ERR_FAILED);
-    }
-    try {
-        return trace.result(
-            legacy::finish(legacy::PassThruWriteMsgs(channelId, messages, count, timeout)));
-    } catch (const std::exception &error) {
-        return trace.result(legacy::finish(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(legacy::finish(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(
+        trace,
+        [&]() { return legacy::PassThruWriteMsgs(channelId, messages, count, timeout); },
+        legacy::finish);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruStartPeriodicMsg(J2534_ULONG channelId,
@@ -167,17 +123,10 @@ extern "C" J2534_LONG J2534_CALL PassThruStartPeriodicMsg(J2534_ULONG channelId,
     trace.outputValue("periodic_id", messageId);
 
     legacy::ApiGuard guard;
-    if (!guard.entered()) {
-        return trace.result(ERR_FAILED);
-    }
-    try {
-        return trace.result(legacy::finish(
-            legacy::PassThruStartPeriodicMsg(channelId, message, messageId, interval)));
-    } catch (const std::exception &error) {
-        return trace.result(legacy::finish(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(legacy::finish(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(
+        trace,
+        [&]() { return legacy::PassThruStartPeriodicMsg(channelId, message, messageId, interval); },
+        legacy::finish);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruStopPeriodicMsg(J2534_ULONG channelId,
@@ -190,16 +139,10 @@ extern "C" J2534_LONG J2534_CALL PassThruStopPeriodicMsg(J2534_ULONG channelId,
                                 messageId);
 
     legacy::ApiGuard guard;
-    if (!guard.entered()) {
-        return trace.result(ERR_FAILED);
-    }
-    try {
-        return trace.result(legacy::finish(legacy::PassThruStopPeriodicMsg(channelId, messageId)));
-    } catch (const std::exception &error) {
-        return trace.result(legacy::finish(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(legacy::finish(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(
+        trace,
+        [&]() { return legacy::PassThruStopPeriodicMsg(channelId, messageId); },
+        legacy::finish);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruStartMsgFilter(J2534_ULONG channelId,
@@ -221,17 +164,12 @@ extern "C" J2534_LONG J2534_CALL PassThruStartMsgFilter(J2534_ULONG channelId,
     trace.outputValue("filter_id", filterId);
 
     legacy::ApiGuard guard;
-    if (!guard.entered()) {
-        return trace.result(ERR_FAILED);
-    }
-    try {
-        return trace.result(legacy::finish(
-            legacy::PassThruStartMsgFilter(channelId, type, mask, pattern, flow, filterId)));
-    } catch (const std::exception &error) {
-        return trace.result(legacy::finish(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(legacy::finish(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(
+        trace,
+        [&]() {
+            return legacy::PassThruStartMsgFilter(channelId, type, mask, pattern, flow, filterId);
+        },
+        legacy::finish);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruStopMsgFilter(J2534_ULONG channelId,
@@ -244,16 +182,10 @@ extern "C" J2534_LONG J2534_CALL PassThruStopMsgFilter(J2534_ULONG channelId,
                                 filterId);
 
     legacy::ApiGuard guard;
-    if (!guard.entered()) {
-        return trace.result(ERR_FAILED);
-    }
-    try {
-        return trace.result(legacy::finish(legacy::PassThruStopMsgFilter(channelId, filterId)));
-    } catch (const std::exception &error) {
-        return trace.result(legacy::finish(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(legacy::finish(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(
+        trace,
+        [&]() { return legacy::PassThruStopMsgFilter(channelId, filterId); },
+        legacy::finish);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruSetProgrammingVoltage(J2534_ULONG deviceId,
@@ -269,17 +201,10 @@ extern "C" J2534_LONG J2534_CALL PassThruSetProgrammingVoltage(J2534_ULONG devic
                                 voltage);
 
     legacy::ApiGuard guard;
-    if (!guard.entered()) {
-        return trace.result(ERR_FAILED);
-    }
-    try {
-        return trace.result(
-            legacy::finish(legacy::PassThruSetProgrammingVoltage(deviceId, pin, voltage)));
-    } catch (const std::exception &error) {
-        return trace.result(legacy::finish(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(legacy::finish(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(
+        trace,
+        [&]() { return legacy::PassThruSetProgrammingVoltage(deviceId, pin, voltage); },
+        legacy::finish);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruReadVersion(J2534_ULONG deviceId,
@@ -293,17 +218,10 @@ extern "C" J2534_LONG J2534_CALL PassThruReadVersion(J2534_ULONG deviceId,
                                 deviceId);
 
     legacy::ApiGuard guard;
-    if (!guard.entered()) {
-        return trace.result(ERR_FAILED);
-    }
-    try {
-        return trace.result(
-            legacy::finish(legacy::PassThruReadVersion(deviceId, firmware, dll, api)));
-    } catch (const std::exception &error) {
-        return trace.result(legacy::finish(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(legacy::finish(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(
+        trace,
+        [&]() { return legacy::PassThruReadVersion(deviceId, firmware, dll, api); },
+        legacy::finish);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruGetLastError(char *description) {
@@ -314,9 +232,6 @@ extern "C" J2534_LONG J2534_CALL PassThruGetLastError(char *description) {
                                 description);
 
     legacy::ApiGuard guard;
-    if (!guard.entered()) {
-        return trace.result(ERR_FAILED);
-    }
     try {
         return trace.result(legacy::PassThruGetLastError(description));
     } catch (const std::exception &error) {
@@ -341,14 +256,8 @@ extern "C" J2534_LONG J2534_CALL PassThruIoctl(J2534_ULONG target,
                                 output);
 
     legacy::ApiGuard guard;
-    if (!guard.entered()) {
-        return trace.result(ERR_FAILED);
-    }
-    try {
-        return trace.result(legacy::finish(legacy::PassThruIoctl(target, id, input, output)));
-    } catch (const std::exception &error) {
-        return trace.result(legacy::finish(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(legacy::finish(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(
+        trace,
+        [&]() { return legacy::PassThruIoctl(target, id, input, output); },
+        legacy::finish);
 }

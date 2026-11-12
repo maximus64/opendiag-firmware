@@ -535,6 +535,193 @@ def test_fragment_size(native_path, legacy_path, peer):
     print("PASS a flash block crosses the wire as one frame each way")
 
 
+def test_export_refusals(native_path, legacy_path, peer):
+    """Every native export refuses an overlapping call while another call holds the API guard.
+
+    A version read holds its response, so the guard stays taken. Each export is then called
+    from this thread. Arguments are NULL or zero: the guard check runs before any argument is
+    read, so the refusal must not depend on them.
+    """
+    entered = threading.Event()
+    release = threading.Event()
+
+    class HoldingPeer(peer.Peer):
+        def respond(self, request):
+            if request.WhichOneof("command") == "version":
+                entered.set()
+                if not release.wait(3):
+                    raise RuntimeError("Export refusal test did not release the response")
+            return super().respond(request)
+
+    overlapping = [
+        ("PassThruScanForDevices", [None]),
+        ("PassThruGetNextDevice", [None]),
+        ("PassThruOpen", [None, None]),
+        ("PassThruClose", [0]),
+        ("PassThruConnect", [0, 0, 0, 0, None]),
+        ("PassThruDisconnect", [0]),
+        ("PassThruLogicalConnect", [0, 0, 0, 0, None]),
+        ("PassThruLogicalDisconnect", [0, 0]),
+        ("PassThruSelect", [None, 0, None, 0, 0, None]),
+        ("PassThruReadMsgs", [0, None, None, 0]),
+        ("PassThruQueueMsgs", [0, None, None]),
+        ("PassThruStartPeriodicMsg", [0, None, None, 0]),
+        ("PassThruStopPeriodicMsg", [0, 0]),
+        ("PassThruStartMsgFilter", [0, 0, None, None, None, None]),
+        ("PassThruStopMsgFilter", [0, 0]),
+        ("PassThruSetProgrammingVoltage", [0, 0]),
+        ("PassThruReadVersion", [0, None, None, None]),
+        ("PassThruGetLastError", [None]),
+        ("PassThruIoctl", [0, 0, None, None]),
+    ]
+    with tempfile.TemporaryDirectory(prefix="opendiag-exports-") as temporary:
+        directory = Path(temporary)
+        native_path, legacy_path = install_libraries(native_path, legacy_path, directory)
+        native = ctypes.CDLL(str(native_path))
+        identifier = ctypes.c_uint32()
+        buffers = [ctypes.create_string_buffer(80) for _ in range(3)]
+        statuses = []
+        with Server(HoldingPeer) as server:
+            configure(directory, server.port)
+            assert native.PassThruOpen(b"J2534-1:OpenDIAG", ctypes.byref(identifier)) == 0
+            worker = threading.Thread(target=lambda: statuses.append(
+                native.PassThruReadVersion(identifier, *buffers)))
+            worker.start()
+            try:
+                assert entered.wait(2), "Version call did not enter the transport"
+                for name, arguments in overlapping:
+                    status = getattr(native, name)(*arguments)
+                    assert status == 0x26, f"{name} accepted an overlapping call: {status:#x}"
+            finally:
+                release.set()
+                worker.join(timeout=3)
+                native.PassThruClose(identifier)
+            assert not worker.is_alive() and statuses == [0]
+            # 04.04 callers take turns rather than being refused: a call made while another
+            # holds the turnstile waits for it to return, then runs.
+            entered.clear()
+            release.clear()
+            legacy = ctypes.CDLL(str(legacy_path))
+            legacy_identifier = ctypes.c_uint32()
+            assert legacy.PassThruOpen(None, ctypes.byref(legacy_identifier)) == 0
+            results = {}
+            worker = threading.Thread(target=lambda: results.update(
+                version=legacy.PassThruReadVersion(legacy_identifier, *buffers)))
+            worker.start()
+            queued = None
+            try:
+                assert entered.wait(2), "Legacy version call did not enter the transport"
+                queued = threading.Thread(target=lambda: results.update(
+                    open=legacy.PassThruOpen(None, None)))
+                queued.start()
+                time.sleep(0.2)
+                assert "open" not in results, "A 04.04 call ran while another call held the turnstile"
+            finally:
+                release.set()
+                worker.join(timeout=3)
+                if queued:
+                    queued.join(timeout=3)
+                legacy.PassThruClose(legacy_identifier)
+            assert not worker.is_alive() and (queued is None or not queued.is_alive())
+            # The read completes; the queued open then runs and reports its NULL argument.
+            assert results == {"version": 0, "open": 0x04}, results
+    print(f"PASS {len(overlapping)} native exports refuse an overlapping call; "
+          "04.04 calls queue behind the held call")
+
+
+def test_unreachable_devices(native_path):
+    """A configured device that cannot be opened is left out of discovery, not an error."""
+    class DeviceInfo(ctypes.Structure):
+        _fields_ = [("DeviceName", ctypes.c_char * 80),
+                    ("DeviceAvailable", ctypes.c_uint32),
+                    ("DeviceDLLFWStatus", ctypes.c_uint32),
+                    ("DeviceConnectMedia", ctypes.c_uint32),
+                    ("DeviceConnectSpeed", ctypes.c_uint32),
+                    ("DeviceSignalQuality", ctypes.c_uint32),
+                    ("DeviceSignalStrength", ctypes.c_uint32)]
+
+    previous = os.environ.get("OPENDIAG_DRIVER_CONFIG")
+    with tempfile.TemporaryDirectory(prefix="opendiag-unreachable-") as temporary:
+        directory = Path(temporary)
+        shutil.copy2(native_path, directory / native_path.name)
+        native = ctypes.CDLL(str(directory / native_path.name))
+        native.PassThruScanForDevices.argtypes = [ctypes.POINTER(ctypes.c_uint32)]
+        native.PassThruScanForDevices.restype = ctypes.c_int32
+        native.PassThruGetNextDevice.argtypes = [ctypes.POINTER(DeviceInfo)]
+        native.PassThruGetNextDevice.restype = ctypes.c_int32
+        cases = {
+            # A serial port that is not there: the open fails after the lease is taken.
+            "missing serial port": "[device]\nName=OpenDIAG\nTransport=com\n"
+                                   f"COM={directory / 'no-port'}\n",
+            # A name outside printable ASCII: the link refuses it before it connects.
+            "non-ASCII name": "[device]\nName=OpenDIAGé\nTransport=tcp\nHost=127.0.0.1\n"
+                              "Port=1\nRpcTimeout=1000\n",
+        }
+        for label, text in cases.items():
+            config = directory / f"{label.replace(' ', '-')}.ini"
+            config.write_text(text, encoding="utf-8")
+            os.environ["OPENDIAG_DRIVER_CONFIG"] = str(config)
+            count = ctypes.c_uint32(0x12345678)
+            status = native.PassThruScanForDevices(ctypes.byref(count))
+            assert status == 0, f"{label}: scan returned {status:#x}"
+            assert count.value == 0, f"{label}: scan found {count.value} devices"
+            info = DeviceInfo()
+            assert native.PassThruGetNextDevice(ctypes.byref(info)) == 0x10, label
+    if previous is None:
+        os.environ.pop("OPENDIAG_DRIVER_CONFIG", None)
+    else:
+        os.environ["OPENDIAG_DRIVER_CONFIG"] = previous
+    print("PASS unreachable configured devices are left out of discovery")
+
+
+BACKEND_EXPORTS = [
+    "PassThruScanForDevices", "PassThruGetNextDevice", "PassThruOpen", "PassThruClose",
+    "PassThruConnect", "PassThruDisconnect", "OpenDiagLogicalConnect0404",
+    "PassThruLogicalDisconnect", "PassThruSelect", "PassThruReadMsgs", "PassThruQueueMsgs",
+    "PassThruStartPeriodicMsg", "PassThruStopPeriodicMsg", "PassThruStartMsgFilter",
+    "PassThruStopMsgFilter", "PassThruSetProgrammingVoltage", "PassThruReadVersion",
+    "PassThruGetLastError", "PassThruIoctl", "OpenDiagWakeWait0404",
+]
+
+
+def build_backend(directory, name, missing):
+    """Build a stand-in native library that exports every backend symbol except one."""
+    source = directory / "backend.c"
+    source.write_text("".join(f"int {symbol}(void) {{ return 0; }}\n"
+                              for symbol in BACKEND_EXPORTS if symbol != missing))
+    subprocess.run(["cc", "-shared", "-fPIC", "-o", str(directory / name), str(source)],
+                   check=True)
+
+
+def test_backend_load_failures(native_path, legacy_path):
+    """A 04.04 open whose backend cannot load, or lacks one export, fails with ERR_FAILED.
+
+    PassThruGetLastError must then name the cause. Each case gets its own copy of the legacy
+    library, so the backend is loaded fresh each time.
+    """
+    cases = [(None, "Cannot load the adjacent opendiag32.dll backend")]
+    cases += [(symbol, f"Missing backend export: {symbol}") for symbol in BACKEND_EXPORTS]
+    with tempfile.TemporaryDirectory(prefix="opendiag-backend-") as temporary:
+        for index, (missing, message) in enumerate(cases):
+            directory = Path(temporary) / str(index)
+            directory.mkdir()
+            shutil.copy2(legacy_path, directory / legacy_path.name)
+            if missing is not None:
+                build_backend(directory, native_path.name, missing)
+            legacy = ctypes.CDLL(str(directory / legacy_path.name))
+            legacy.PassThruOpen.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+            legacy.PassThruOpen.restype = ctypes.c_int32
+            legacy.PassThruGetLastError.argtypes = [ctypes.c_char_p]
+            legacy.PassThruGetLastError.restype = ctypes.c_int32
+            identifier = ctypes.c_uint32()
+            status = legacy.PassThruOpen(None, ctypes.byref(identifier))
+            assert status == 0x07, f"{message}: status {status:#x}"
+            description = ctypes.create_string_buffer(80)
+            legacy.PassThruGetLastError(description)
+            assert message in description.value.decode(), description.value
+    print(f"PASS {len(cases)} 04.04 backend load failures report ERR_FAILED with their cause")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build", type=Path, required=True)
@@ -558,6 +745,7 @@ def main():
     configure(tests, 1, logging=1)
     # The Makefile builds the test programs and both ABI headers' objects.
     subprocess.run([str(tests / "platform_test")], check=True, timeout=15)
+    subprocess.run([str(tests / "port_classify_test")], check=True, timeout=15)
     cases = [("0500", "selftest", "elm"), ("0500", "contract", "elm"),
              ("0404", "selftest", "elm"), ("0404", "contract", "elm"),
              ("0500", "selftest", "drop-first")]
@@ -606,6 +794,9 @@ def main():
     test_contract_mismatch(args.native, args.legacy, peer)
     test_device_side_waits(args.native, args.legacy, peer)
     test_fragment_size(args.native, args.legacy, peer)
+    test_export_refusals(args.native, args.legacy, peer)
+    test_backend_load_failures(args.native, args.legacy)
+    test_unreachable_devices(args.native)
     if legacy_result.returncode:
         print(legacy_result.stdout)
         raise SystemExit(legacy_result.returncode)

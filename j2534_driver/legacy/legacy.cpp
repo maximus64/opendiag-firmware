@@ -157,10 +157,9 @@ class Turnstile {
 
 static Turnstile turnstile;
 
-bool enter() {
+void enter() {
     turnstile.enter();
     errorDetail[0] = 0;
-    return true;
 }
 
 void leave() {

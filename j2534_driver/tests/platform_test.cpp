@@ -8,7 +8,9 @@
 #include <fstream>
 #include <iterator>
 #include <limits.h>
+#include <pwd.h>
 #include <stdexcept>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <thread>
@@ -28,6 +30,20 @@ static void testSerial() {
     int master = posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
     check(master >= 0 && !grantpt(master) && !unlockpt(master), "Create pseudo terminal");
     std::string slave = ptsname(master);
+    {
+        // A second terminal, so the probe's exclusive lock cannot touch the working stream.
+        int probe = posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
+        check(probe >= 0 && !grantpt(probe) && !unlockpt(probe), "Create probe terminal");
+        platform::Stream unsupported;
+        bool rejectedBaud = false;
+        try {
+            unsupported.openCom(ptsname(probe), 12345);
+        } catch (const std::runtime_error &error) {
+            rejectedBaud = !strcmp(error.what(), "Unsupported serial baud rate");
+        }
+        check(rejectedBaud, "Unsupported serial baud rate is rejected");
+        ::close(probe);
+    }
     platform::Stream stream;
     stream.openCom(slave, 115200);
     check(stream.alive(), "Serial connection is alive");
@@ -119,6 +135,10 @@ static void testLogging() {
         check(trace.result(0) == 0, "Logging preserves result");
     }
     check(errno == E2BIG, "Logging preserves errno");
+    {
+        // A trace that never receives its result records the abort when it ends.
+        diagnostics::ApiTrace abandoned(&moduleAnchor, "05.00", "Abandoned", "value=%u", 1u);
+    }
     std::string path = platform::logDirectory(&moduleAnchor) + "opendiag-05.00-" +
                        std::to_string(getpid()) + ".log";
     std::ifstream input(path.c_str());
@@ -126,6 +146,8 @@ static void testLogging() {
     check(text.find("<unreadable>") != std::string::npos &&
               text.find("0x12345678") != std::string::npos,
           "Logging records values and invalid pointers");
+    check(text.find("ABORT no return recorded") != std::string::npos,
+          "A trace without a result records its abort");
     input.close();
     platform::appendLog(path.c_str(), "record\n", 1);
     check(access((path + ".1").c_str(), F_OK) == 0, "Log rotation creates one backup");
@@ -231,6 +253,36 @@ static void testPaths() {
                                          : std::string(getenv("HOME")) + "/.local/state/opendiag/";
 #endif
     check(logs == expectedLogs && logs != directory, "Logs use a writable per-user folder");
+    // The home folder is only trusted when it is absolute; otherwise the password database
+    // answers, and a relative XDG_STATE_HOME is ignored.
+    const char *home = getenv("HOME");
+    const bool hadHome = home != nullptr;
+    const std::string savedHome = home ? home : "";
+    const char *xdgState = getenv("XDG_STATE_HOME");
+    const bool hadState = xdgState != nullptr;
+    const std::string savedState = xdgState ? xdgState : "";
+#ifdef __APPLE__
+    const std::string homeLogs = "/Library/Logs/OpenDIAG/";
+#else
+    const std::string homeLogs = "/.local/state/opendiag/";
+    setenv("XDG_STATE_HOME", "relative-state", 1);
+    check(platform::userLogDirectory() == savedHome + homeLogs,
+          "Relative XDG_STATE_HOME falls back to the home folder");
+    unsetenv("XDG_STATE_HOME");
+#endif
+    setenv("HOME", "relative-home", 1);
+    const passwd *entry = getpwuid(getuid());
+    check(entry && entry->pw_dir && entry->pw_dir[0] == '/' &&
+              platform::userLogDirectory() == std::string(entry->pw_dir) + homeLogs,
+          "Relative HOME is replaced by the password database home");
+    if (hadHome) {
+        setenv("HOME", savedHome.c_str(), 1);
+    } else {
+        unsetenv("HOME");
+    }
+    if (hadState) {
+        setenv("XDG_STATE_HOME", savedState.c_str(), 1);
+    }
     // A regular file in the directory chain prevents creation of the log folder.
     const char *variable;
     std::string blocked;
@@ -256,11 +308,76 @@ static void testPaths() {
     rmdir(temporary.c_str());
 }
 
+static void testClosedStream() {
+    platform::Stream stream;
+    const unsigned char byte = 0x5a;
+    bool expired = false;
+    try {
+        stream.write(&byte, 1, platform::milliseconds());
+    } catch (const std::runtime_error &) {
+        expired = true;
+    }
+    check(expired, "An expired transport deadline is reported");
+    bool closed = false;
+    try {
+        stream.write(&byte, 1, platform::milliseconds() + 1000);
+    } catch (const std::runtime_error &) {
+        closed = true;
+    }
+    check(closed, "Writing to a closed transport is reported");
+}
+
+static std::string readWholeFile(const std::string &path) {
+    std::ifstream file(path.c_str());
+    return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+}
+
+static void testIniFiles() {
+    const std::string directory = platform::moduleDirectory(&moduleAnchor);
+    const std::string temporary = directory + "ini-test-" + std::to_string(getpid()) + "/";
+    check(platform::createDirectories(temporary), "Create INI test folder");
+    const std::string path = temporary + "settings.ini";
+    std::ofstream(path.c_str()) << "; a comment\n# another comment\n\n[device]\n"
+                                << "Quoted='quoted value'\n"
+                                << "Double = \"double\"\n"
+                                << "Unclosed='open\n";
+    check(platform::readSetting(path, "device", "Quoted", "") == "quoted value",
+          "Single-quoted INI values are unwrapped");
+    check(platform::readSetting(path, "device", "Double", "") == "double",
+          "Double-quoted INI values are unwrapped");
+    check(platform::readSetting(path, "device", "Unclosed", "") == "'open",
+          "An unmatched quote stays in the INI value");
+    check(platform::readSetting(path, "device", "Missing", "fallback") == "fallback",
+          "A missing INI key returns the fallback");
+    std::ofstream(path.c_str()) << "[device]\nLong=" << std::string(255, 'x') << "\n";
+    bool rejected = false;
+    try {
+        platform::readSetting(path, "device", "Long", "");
+    } catch (const std::runtime_error &) {
+        rejected = true;
+    }
+    check(rejected, "Overlong INI values are rejected");
+
+    // Only a regular file is logged to. A full log that cannot be rotated is left as it is.
+    platform::appendLog("/dev/null", "ignored\n", 1);
+    const std::string log = temporary + "log.txt";
+    std::ofstream(log.c_str()) << "0123456789";
+    check(mkdir((log + ".1").c_str(), 0700) == 0, "Block log rotation with a folder");
+    platform::appendLog(log.c_str(), "next\n", 4);
+    check(readWholeFile(log) == "0123456789", "A log that cannot rotate is not written");
+    rmdir((log + ".1").c_str());
+    unlink(log.c_str());
+    unlink(path.c_str());
+    rmdir(temporary.c_str());
+}
+
 int main() {
     try {
         testSerial();
         testLease();
         testPaths();
+        testIniFiles();
+        testClosedStream();
         testLogging();
         printf("PASS %u platform checks: serial, deadlines, ownership, paths and logging\n",
                checks);
