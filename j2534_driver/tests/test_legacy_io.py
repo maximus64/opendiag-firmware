@@ -292,7 +292,10 @@ class LegacyIOTests(unittest.TestCase):
             self.assertEqual(session.api.PassThruClose(session.device), 0)
             reader.join()
             self.assertEqual(outcome["read"], (0x02, []))
-            self.assertLess(outcome["read_ms"], 200)
+            # The read's own timeout is 2000 ms. Closing must end it well before that. Under
+            # coverage instrumentation the close has been seen at 230 to 1083 ms, so the bound
+            # is set to 1500 ms rather than the 200 ms a plain build meets.
+            self.assertLess(outcome["read_ms"], 1500)
 
     def test_stopping_filter_does_not_leave_stale_readiness_state(self):
         with self.session() as (session, operations):

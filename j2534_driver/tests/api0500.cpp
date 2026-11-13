@@ -273,6 +273,61 @@ static void selfTest(Api &api, const char *name) {
     api.require(api.ioctl(physical, CLEAR_TX_QUEUE, &pin, NULL),
                 ERR_NULL_REQUIRED,
                 "Required NULL IOCTL");
+    // Byte-array IOCTLs check their buffers before any request reaches the peer.
+    unsigned char address[] = {0x33, 0x44};
+    unsigned char response[4] = {};
+    SBYTE_ARRAY initIn = {};
+    SBYTE_ARRAY initOut = {};
+    initIn.NumOfBytes = 1;
+    initIn.BytePtr = address;
+    initOut.NumOfBytes = sizeof(response);
+    initOut.BytePtr = response;
+    api.require(api.ioctl(physical, FIVE_BAUD_INIT, &initIn, &initOut),
+                STATUS_NOERROR,
+                "Five-baud init");
+    api.require(api.ioctl(physical, FIVE_BAUD_INIT, NULL, &initOut),
+                ERR_NULL_PARAMETER,
+                "Five-baud init without input");
+    api.require(api.ioctl(physical, FIVE_BAUD_INIT, &initIn, NULL),
+                ERR_NULL_PARAMETER,
+                "Five-baud init without output");
+    SBYTE_ARRAY nullBytes = {1, NULL};
+    api.require(api.ioctl(physical, FIVE_BAUD_INIT, &nullBytes, &initOut),
+                ERR_NULL_PARAMETER,
+                "Five-baud init without address bytes");
+    initIn.NumOfBytes = 2;
+    api.require(api.ioctl(physical, FIVE_BAUD_INIT, &initIn, &initOut),
+                ERR_IOCTL_VALUE_NOT_SUPPORTED,
+                "Five-baud init with two address bytes");
+    initIn.NumOfBytes = 1;
+    initOut.NumOfBytes = 1;
+    api.require(api.ioctl(physical, FIVE_BAUD_INIT, &initIn, &initOut),
+                ERR_IOCTL_VALUE_NOT_SUPPORTED,
+                "Five-baud init with a short keyword buffer");
+    SBYTE_ARRAY lookup = {2, address};
+    api.require(api.ioctl(physical, ADD_TO_FUNCT_MSG_LOOKUP_TABLE, &lookup, NULL),
+                STATUS_NOERROR,
+                "Add functional lookup");
+    api.require(api.ioctl(physical, DELETE_FROM_FUNCT_MSG_LOOKUP_TABLE, &lookup, NULL),
+                STATUS_NOERROR,
+                "Delete functional lookup");
+    api.require(api.ioctl(physical, ADD_TO_FUNCT_MSG_LOOKUP_TABLE, NULL, NULL),
+                ERR_NULL_PARAMETER,
+                "Functional lookup without input");
+    api.require(api.ioctl(physical, ADD_TO_FUNCT_MSG_LOOKUP_TABLE, &lookup, &initOut),
+                ERR_NULL_REQUIRED,
+                "Functional lookup with output");
+    SBYTE_ARRAY missingBytes = {2, NULL};
+    api.require(api.ioctl(physical, ADD_TO_FUNCT_MSG_LOOKUP_TABLE, &missingBytes, NULL),
+                ERR_NULL_PARAMETER,
+                "Functional lookup without bytes");
+    SBYTE_ARRAY oversized = {4096, address};
+    api.require(api.ioctl(physical, ADD_TO_FUNCT_MSG_LOOKUP_TABLE, &oversized, NULL),
+                ERR_EXCEEDED_LIMIT,
+                "Functional lookup beyond the frame");
+    api.require(api.ioctl(physical, FAST_INIT, NULL, NULL),
+                ERR_IOCTL_ID_NOT_SUPPORTED,
+                "Fast init needs a K-line channel");
     // Filters and logical channels must invalidate their handles when removed.
     Message mask;
     Message pattern;
@@ -308,6 +363,13 @@ static void selfTest(Api &api, const char *name) {
     api.require(api.open(name, &session.id), STATUS_NOERROR, "Reopen");
     check(session.id != oldDevice, "Device handle reused");
     api.require(api.close(oldDevice), ERR_INVALID_DEVICE_ID, "Stale device ID after reopen");
+    // Discovery reports the open device as in use, not as a second device.
+    J2534_ULONG openCount = 0;
+    api.require(api.scan(&openCount), STATUS_NOERROR, "Scan while open");
+    check(openCount == 1, "Open device is the only discovered device");
+    SDEVICE openInfo = {};
+    api.require(api.next(&openInfo), STATUS_NOERROR, "Next while open");
+    check(openInfo.DeviceAvailable == DEVICE_IN_USE, "Open device reported in use");
     printf("PASS ABI, discovery, handles, pointers, IOCTLs, timeout and filter tests\n");
 }
 

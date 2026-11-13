@@ -30,6 +30,12 @@ Windows XP SP3:
 The configuration utility saves the shared file or a custom override. For a new
 file, re-enter settings from older installs. On XP, run the utility as administrator.
 
+The opendiag.ini in the ZIP is only a build template. install.cmd does not install
+it, and the driver does not read that copy. The active file is the shared
+configuration above or the OPENDIAG_DRIVER_CONFIG path. Set its COM value to the
+data port ("data port" in opendiag_config.exe, "OpenDIAG Diagnostic Data Port" in
+Device Manager), not the COM3 placeholder or the debug console.
+
 For a custom file, set OPENDIAG_DRIVER_CONFIG to its full path for both the utility
 and diagnostic application. The selected custom or shared file must exist before
 connecting; missing files or invalid paths cause an error.

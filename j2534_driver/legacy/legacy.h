@@ -6,24 +6,19 @@
 extern const void *legacyAnchor;
 
 namespace legacy {
-bool enter();
+// 04.04 callers take turns: enter() waits until the call holding the turnstile returns.
+// It never refuses, so a call always runs.
+void enter();
 void leave();
 J2534_LONG finish(J2534_LONG status, const char *detail = NULL);
 
 class ApiGuard {
-    bool entered_;
-
   public:
-    ApiGuard()
-        : entered_(enter()) {
+    ApiGuard() {
+        enter();
     }
     ~ApiGuard() {
-        if (entered_) {
-            leave();
-        }
-    }
-    bool entered() const {
-        return entered_;
+        leave();
     }
 };
 J2534_LONG PassThruOpen(void *name, J2534_ULONG *deviceId);

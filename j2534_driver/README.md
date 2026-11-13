@@ -14,6 +14,17 @@ make -C j2534_driver test
 Make uses the native compiler by default. Set `PYTHON` to a protobuf-enabled
 interpreter if needed, for example `PYTHON=../.venv/bin/python`.
 
+For line coverage of the host build, add `COVERAGE=1` to the test run and report with gcovr
+(`--gcov-executable gcov-14` matches the GCC 14 used here). Pass it on the make command line, not in the
+environment: the environment flags reach the test/host CMake build.
+
+```sh
+make -C j2534_driver test COVERAGE=1
+```
+
+The target is at least 95% total line coverage over the host-testable sources (`driver/`, `common/`,
+`legacy/`, `platform/`, `config/`). The local build script fails below that.
+
 Build the Windows DLLs and configuration utility through Docker:
 
 ```sh
@@ -52,6 +63,12 @@ The selected file must exist. Configuration errors produce an empty scan; a fail
 Use a full path and set it for both the configuration utility and diagnostic application.
 
 The Windows utility saves the override or system file, starting with defaults for a new file.
+
+The config file must exist, and the DLLs must match the firmware. The driver accepts only
+wire revision 3 (`J2534_PROTOCOL_REVISION` in `main/j2534.h`, reported as
+`Capabilities.wire_version`). Firmware reports 3 from commit 3d0e64b onward, so 64d34fa and
+later; earlier firmware reports 1. A DLL built for another revision cannot talk to
+current firmware, so install DLLs built from the same tree.
 
 Logging is off by default. Enable it in the Windows utility or set `Enabled=1` under `[logging]`.
 If the user log directory cannot be created, logs go beside the library.

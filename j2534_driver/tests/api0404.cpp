@@ -201,6 +201,85 @@ static void selfTest(Api &api) {
     api.require(api.ioctl(channel, CLEAR_MSG_FILTERS, NULL, NULL),
                 STATUS_NOERROR,
                 "Clear flow filters");
+    // Byte-array IOCTLs pass through to the native driver, and its statuses come back as the
+    // 04.04 codes that translate() allows.
+    unsigned char address[] = {0x33, 0x44};
+    unsigned char keywords[2] = {};
+    SBYTE_ARRAY initIn = {1, address};
+    SBYTE_ARRAY initOut = {sizeof(keywords), keywords};
+    api.require(api.ioctl(channel, FIVE_BAUD_INIT, &initIn, &initOut),
+                STATUS_NOERROR,
+                "Five-baud init");
+    api.require(api.ioctl(channel, FIVE_BAUD_INIT, NULL, &initOut),
+                ERR_NULL_PARAMETER,
+                "Five-baud init without input");
+    api.require(api.ioctl(channel, FIVE_BAUD_INIT, &initIn, NULL),
+                ERR_NULL_PARAMETER,
+                "Five-baud init without output");
+    initIn.NumOfBytes = 2;
+    api.require(api.ioctl(channel, FIVE_BAUD_INIT, &initIn, &initOut),
+                ERR_INVALID_IOCTL_VALUE,
+                "Five-baud init with two address bytes");
+    initIn.NumOfBytes = 1;
+    PASSTHRU_MSG fastIn = {};
+    fastIn.ProtocolID = ISO15765;
+    fastIn.TxFlags = CAN_29BIT_ID;
+    fastIn.DataSize = 4;
+    putId(fastIn.Data, 0x18da11f1);
+    api.require(api.ioctl(channel, FAST_INIT, NULL, NULL),
+                ERR_INVALID_IOCTL_ID,
+                "Fast init on a CAN channel");
+    api.require(api.ioctl(channel, FAST_INIT, &fastIn, NULL),
+                ERR_INVALID_IOCTL_ID,
+                "Fast init with a message on a CAN channel");
+    SBYTE_ARRAY lookup = {sizeof(address), address};
+    api.require(api.ioctl(channel, ADD_TO_FUNCT_MSG_LOOKUP_TABLE, &lookup, NULL),
+                STATUS_NOERROR,
+                "Add functional lookup");
+    api.require(api.ioctl(channel, DELETE_FROM_FUNCT_MSG_LOOKUP_TABLE, &lookup, NULL),
+                STATUS_NOERROR,
+                "Delete functional lookup");
+    api.require(api.ioctl(channel, ADD_TO_FUNCT_MSG_LOOKUP_TABLE, NULL, NULL),
+                ERR_NULL_PARAMETER,
+                "Functional lookup without input");
+    api.require(api.ioctl(channel, CLEAR_FUNCT_MSG_LOOKUP_TABLE, NULL, NULL),
+                STATUS_NOERROR,
+                "Clear functional lookup");
+    // A CAN channel takes only pass and block filters, and writes must match its ID format.
+    J2534_ULONG canChannel = connect(api, session.id, CAN);
+    PASSTHRU_MSG canMask = {};
+    PASSTHRU_MSG canPattern = {};
+    canMask.ProtocolID = CAN;
+    canPattern.ProtocolID = CAN;
+    canMask.TxFlags = CAN_29BIT_ID;
+    canPattern.TxFlags = CAN_29BIT_ID;
+    canMask.DataSize = 4;
+    canPattern.DataSize = 4;
+    memset(canMask.Data, 0xff, 4);
+    putId(canPattern.Data, 0x18daf111);
+    J2534_ULONG canFilter = 0;
+    api.require(api.startFilter(canChannel,
+                                FLOW_CONTROL_FILTER,
+                                &canMask,
+                                &canPattern,
+                                NULL,
+                                &canFilter),
+                ERR_INVALID_FILTER_ID,
+                "Flow filter on a CAN channel");
+    api.require(api.startFilter(canChannel, PASS_FILTER, &canMask, &canPattern, NULL, &canFilter),
+                STATUS_NOERROR,
+                "Pass filter on a CAN channel");
+    api.require(api.stopFilter(canChannel, canFilter), STATUS_NOERROR, "Stop CAN filter");
+    PASSTHRU_MSG canWrite = {};
+    canWrite.ProtocolID = CAN;
+    canWrite.TxFlags = 0;
+    canWrite.DataSize = 4;
+    putId(canWrite.Data, 0x7e0);
+    count = 1;
+    api.require(api.write(canChannel, &canWrite, &count, 100),
+                ERR_INVALID_MSG,
+                "11-bit write on a 29-bit channel");
+    api.require(api.disconnect(canChannel), STATUS_NOERROR, "Disconnect CAN channel");
     api.require(api.disconnect(channel), STATUS_NOERROR, "Disconnect");
     count = 0;
     api.require(api.read(channel, &message, &count, 0), ERR_INVALID_CHANNEL_ID, "Stale channel");

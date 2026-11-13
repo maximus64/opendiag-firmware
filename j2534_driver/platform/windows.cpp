@@ -349,7 +349,7 @@ void Stream::openCom(const std::string &name, unsigned baud) {
                                                      FILE_FLAG_OVERLAPPED,
                                                      NULL));
     if (serial_ == -1) {
-        throw std::runtime_error("cannot open configured COM port");
+        throw std::runtime_error(std::string("cannot open configured COM port ") + name);
     }
 
     DCB dcb = {};

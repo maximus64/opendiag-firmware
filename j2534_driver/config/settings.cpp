@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "settings.h"
 #include <algorithm>
+#include <map>
 #include <stdexcept>
 #include <stdio.h>
 
@@ -232,7 +233,25 @@ void saveSettings(const std::string &path, const AdapterSettings &settings) {
     }
 }
 
-std::vector<std::string> availableComPorts() {
+static std::vector<std::string> subkeyNames(const std::string &path) {
+    std::vector<std::string> names;
+    HKEY key;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, path.c_str(), 0, KEY_READ, &key) != ERROR_SUCCESS) {
+        return names;
+    }
+    for (DWORD index = 0;; ++index) {
+        char name[256];
+        DWORD nameSize = sizeof(name);
+        if (RegEnumKeyExA(key, index, name, &nameSize, NULL, NULL, NULL, NULL) != ERROR_SUCCESS) {
+            break;
+        }
+        names.push_back(name);
+    }
+    RegCloseKey(key);
+    return names;
+}
+
+static std::vector<std::string> serialPorts() {
     std::vector<std::string> ports;
     HKEY key;
     if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "HARDWARE\\DEVICEMAP\\SERIALCOMM", 0, KEY_READ, &key) !=
@@ -260,4 +279,58 @@ std::vector<std::string> availableComPorts() {
     std::sort(ports.begin(), ports.end());
     ports.erase(std::unique(ports.begin(), ports.end()), ports.end());
     return ports;
+}
+
+// COM ports used by OpenDIAG USB interfaces, read from the PnP enumeration at
+// Enum/USB/<hardware id>/<instance>/Device Parameters/PortName. Stale entries for
+// unplugged boards can remain, so callers only use names that SERIALCOMM also lists.
+static std::map<std::string, PortRole> openDiagPortRoles() {
+    const std::string root = "SYSTEM\\CurrentControlSet\\Enum\\USB";
+    std::map<std::string, PortRole> roles;
+    std::vector<std::string> hardwareIds = subkeyNames(root);
+    for (size_t i = 0; i < hardwareIds.size(); ++i) {
+        std::vector<std::string> instances = subkeyNames(root + "\\" + hardwareIds[i]);
+        for (size_t j = 0; j < instances.size(); ++j) {
+            std::string device = hardwareIds[i] + "\\" + instances[j];
+            PortRole role = classifyDevicePath(device);
+            std::string value;
+            std::string com;
+            std::string parameters = root + "\\" + device + "\\Device Parameters";
+            if (role != PORT_OTHER && registryText(parameters.c_str(), "PortName", value) &&
+                parsePortName(value, com)) {
+                roles[com] = role;
+            }
+        }
+    }
+    return roles;
+}
+
+std::vector<std::string> availableComPorts() {
+    std::vector<std::string> ports = serialPorts();
+    std::map<std::string, PortRole> roles = openDiagPortRoles();
+    for (size_t i = 0; i < ports.size(); ++i) {
+        std::string com;
+        if (!parsePortName(ports[i], com)) {
+            continue;
+        }
+        std::map<std::string, PortRole>::const_iterator role = roles.find(com);
+        if (role != roles.end()) {
+            ports[i] = portLabel(com, role->second);
+        }
+    }
+    return ports;
+}
+
+PortRole comPortRole(const std::string &name) {
+    std::string com;
+    if (!parsePortName(name, com)) {
+        return PORT_OTHER;
+    }
+    std::vector<std::string> ports = serialPorts();
+    if (std::find(ports.begin(), ports.end(), com) == ports.end()) {
+        return PORT_OTHER;
+    }
+    std::map<std::string, PortRole> roles = openDiagPortRoles();
+    std::map<std::string, PortRole>::const_iterator role = roles.find(com);
+    return role == roles.end() ? PORT_OTHER : role->second;
 }

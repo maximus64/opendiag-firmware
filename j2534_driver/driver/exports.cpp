@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "../common/api_trace.h"
 #include "../include/j2534.h"
+#include "../common/export_call.h"
 #include "link.h"
 #include <exception>
 
@@ -91,13 +92,10 @@ extern "C" J2534_LONG J2534_CALL PassThruScanForDevices(J2534_ULONG *pDeviceCoun
         return trace.result(ERR_CONCURRENT_API_CALL);
     }
 
-    try {
-        return trace.result(host::finishApi(host::PassThruScanForDevices(pDeviceCount)));
-    } catch (const std::exception &error) {
-        return trace.result(host::finishApi(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(host::finishApi(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(
+        trace,
+        [&]() { return host::PassThruScanForDevices(pDeviceCount); },
+        host::finishApi);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruGetNextDevice(SDEVICE *psDevice) {
@@ -112,13 +110,10 @@ extern "C" J2534_LONG J2534_CALL PassThruGetNextDevice(SDEVICE *psDevice) {
         return trace.result(ERR_CONCURRENT_API_CALL);
     }
 
-    try {
-        return trace.result(host::finishApi(host::PassThruGetNextDevice(psDevice)));
-    } catch (const std::exception &error) {
-        return trace.result(host::finishApi(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(host::finishApi(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(
+        trace,
+        [&]() { return host::PassThruGetNextDevice(psDevice); },
+        host::finishApi);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruOpen(const char *pName, J2534_ULONG *pDeviceID) {
@@ -135,13 +130,10 @@ extern "C" J2534_LONG J2534_CALL PassThruOpen(const char *pName, J2534_ULONG *pD
         return trace.result(ERR_CONCURRENT_API_CALL);
     }
 
-    try {
-        return trace.result(host::finishApi(host::PassThruOpen(pName, pDeviceID)));
-    } catch (const std::exception &error) {
-        return trace.result(host::finishApi(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(host::finishApi(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(
+        trace,
+        [&]() { return host::PassThruOpen(pName, pDeviceID); },
+        host::finishApi);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruClose(J2534_ULONG DeviceID) {
@@ -156,13 +148,7 @@ extern "C" J2534_LONG J2534_CALL PassThruClose(J2534_ULONG DeviceID) {
         return trace.result(ERR_CONCURRENT_API_CALL);
     }
 
-    try {
-        return trace.result(host::finishApi(host::PassThruClose(DeviceID)));
-    } catch (const std::exception &error) {
-        return trace.result(host::finishApi(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(host::finishApi(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(trace, [&]() { return host::PassThruClose(DeviceID); }, host::finishApi);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruConnect(J2534_ULONG DeviceID,
@@ -191,18 +177,17 @@ extern "C" J2534_LONG J2534_CALL PassThruConnect(J2534_ULONG DeviceID,
         return trace.result(ERR_CONCURRENT_API_CALL);
     }
 
-    try {
-        return trace.result(host::finishApi(host::PassThruConnect(DeviceID,
-                                                                  ProtocolID,
-                                                                  Flags,
-                                                                  BaudRate,
-                                                                  ResourceStruct,
-                                                                  pChannelID)));
-    } catch (const std::exception &error) {
-        return trace.result(host::finishApi(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(host::finishApi(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(
+        trace,
+        [&]() {
+            return host::PassThruConnect(DeviceID,
+                                         ProtocolID,
+                                         Flags,
+                                         BaudRate,
+                                         ResourceStruct,
+                                         pChannelID);
+        },
+        host::finishApi);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruDisconnect(J2534_ULONG ChannelID) {
@@ -217,13 +202,7 @@ extern "C" J2534_LONG J2534_CALL PassThruDisconnect(J2534_ULONG ChannelID) {
         return trace.result(ERR_CONCURRENT_API_CALL);
     }
 
-    try {
-        return trace.result(host::finishApi(host::PassThruDisconnect(ChannelID)));
-    } catch (const std::exception &error) {
-        return trace.result(host::finishApi(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(host::finishApi(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(trace, [&]() { return host::PassThruDisconnect(ChannelID); }, host::finishApi);
 }
 
 static J2534_LONG logicalConnect(J2534_ULONG PhysicalChannelID,
@@ -249,18 +228,17 @@ static J2534_LONG logicalConnect(J2534_ULONG PhysicalChannelID,
         return trace.result(ERR_CONCURRENT_API_CALL);
     }
 
-    try {
-        return trace.result(host::finishApi(host::PassThruLogicalConnect(PhysicalChannelID,
-                                                                         ProtocolID,
-                                                                         Flags,
-                                                                         pChannelDescriptor,
-                                                                         pChannelID,
-                                                                         legacyChannel)));
-    } catch (const std::exception &error) {
-        return trace.result(host::finishApi(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(host::finishApi(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(
+        trace,
+        [&]() {
+            return host::PassThruLogicalConnect(PhysicalChannelID,
+                                                ProtocolID,
+                                                Flags,
+                                                pChannelDescriptor,
+                                                pChannelID,
+                                                legacyChannel);
+        },
+        host::finishApi);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruLogicalConnect(J2534_ULONG physical,
@@ -300,13 +278,10 @@ extern "C" J2534_LONG J2534_CALL PassThruLogicalDisconnect(J2534_ULONG ChannelID
         return trace.result(ERR_CONCURRENT_API_CALL);
     }
 
-    try {
-        return trace.result(host::finishApi(host::PassThruLogicalDisconnect(ChannelID)));
-    } catch (const std::exception &error) {
-        return trace.result(host::finishApi(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(host::finishApi(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(
+        trace,
+        [&]() { return host::PassThruLogicalDisconnect(ChannelID); },
+        host::finishApi);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruSelect(SCHANNELSET *ChannelSetPtr,
@@ -325,14 +300,10 @@ extern "C" J2534_LONG J2534_CALL PassThruSelect(SCHANNELSET *ChannelSetPtr,
         return trace.result(ERR_CONCURRENT_API_CALL);
     }
 
-    try {
-        return trace.result(
-            host::finishApi(host::PassThruSelect(ChannelSetPtr, SelectType, Timeout)));
-    } catch (const std::exception &error) {
-        return trace.result(host::finishApi(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(host::finishApi(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(
+        trace,
+        [&]() { return host::PassThruSelect(ChannelSetPtr, SelectType, Timeout); },
+        host::finishApi);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruReadMsgs(J2534_ULONG ChannelID,
@@ -354,14 +325,10 @@ extern "C" J2534_LONG J2534_CALL PassThruReadMsgs(J2534_ULONG ChannelID,
         return trace.result(ERR_CONCURRENT_API_CALL);
     }
 
-    try {
-        return trace.result(
-            host::finishApi(host::PassThruReadMsgs(ChannelID, pMsg, pNumMsgs, Timeout)));
-    } catch (const std::exception &error) {
-        return trace.result(host::finishApi(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(host::finishApi(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(
+        trace,
+        [&]() { return host::PassThruReadMsgs(ChannelID, pMsg, pNumMsgs, Timeout); },
+        host::finishApi);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruQueueMsgs(J2534_ULONG ChannelID,
@@ -381,13 +348,10 @@ extern "C" J2534_LONG J2534_CALL PassThruQueueMsgs(J2534_ULONG ChannelID,
         return trace.result(ERR_CONCURRENT_API_CALL);
     }
 
-    try {
-        return trace.result(host::finishApi(host::PassThruQueueMsgs(ChannelID, pMsg, pNumMsgs)));
-    } catch (const std::exception &error) {
-        return trace.result(host::finishApi(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(host::finishApi(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(
+        trace,
+        [&]() { return host::PassThruQueueMsgs(ChannelID, pMsg, pNumMsgs); },
+        host::finishApi);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruStartPeriodicMsg(J2534_ULONG ChannelID,
@@ -408,14 +372,10 @@ extern "C" J2534_LONG J2534_CALL PassThruStartPeriodicMsg(J2534_ULONG ChannelID,
         return trace.result(ERR_CONCURRENT_API_CALL);
     }
 
-    try {
-        return trace.result(
-            host::finishApi(host::PassThruStartPeriodicMsg(ChannelID, pMsg, pMsgID, TimeInterval)));
-    } catch (const std::exception &error) {
-        return trace.result(host::finishApi(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(host::finishApi(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(
+        trace,
+        [&]() { return host::PassThruStartPeriodicMsg(ChannelID, pMsg, pMsgID, TimeInterval); },
+        host::finishApi);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruStopPeriodicMsg(J2534_ULONG ChannelID, J2534_ULONG MsgID) {
@@ -431,13 +391,10 @@ extern "C" J2534_LONG J2534_CALL PassThruStopPeriodicMsg(J2534_ULONG ChannelID, 
         return trace.result(ERR_CONCURRENT_API_CALL);
     }
 
-    try {
-        return trace.result(host::finishApi(host::PassThruStopPeriodicMsg(ChannelID, MsgID)));
-    } catch (const std::exception &error) {
-        return trace.result(host::finishApi(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(host::finishApi(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(
+        trace,
+        [&]() { return host::PassThruStopPeriodicMsg(ChannelID, MsgID); },
+        host::finishApi);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruStartMsgFilter(J2534_ULONG ChannelID,
@@ -461,14 +418,16 @@ extern "C" J2534_LONG J2534_CALL PassThruStartMsgFilter(J2534_ULONG ChannelID,
         return trace.result(ERR_CONCURRENT_API_CALL);
     }
 
-    try {
-        return trace.result(host::finishApi(
-            host::PassThruStartMsgFilter(ChannelID, FilterType, pMaskMsg, pPatternMsg, pFilterID)));
-    } catch (const std::exception &error) {
-        return trace.result(host::finishApi(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(host::finishApi(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(
+        trace,
+        [&]() {
+            return host::PassThruStartMsgFilter(ChannelID,
+                                                FilterType,
+                                                pMaskMsg,
+                                                pPatternMsg,
+                                                pFilterID);
+        },
+        host::finishApi);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruStopMsgFilter(J2534_ULONG ChannelID,
@@ -485,13 +444,10 @@ extern "C" J2534_LONG J2534_CALL PassThruStopMsgFilter(J2534_ULONG ChannelID,
         return trace.result(ERR_CONCURRENT_API_CALL);
     }
 
-    try {
-        return trace.result(host::finishApi(host::PassThruStopMsgFilter(ChannelID, FilterID)));
-    } catch (const std::exception &error) {
-        return trace.result(host::finishApi(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(host::finishApi(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(
+        trace,
+        [&]() { return host::PassThruStopMsgFilter(ChannelID, FilterID); },
+        host::finishApi);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruSetProgrammingVoltage(J2534_ULONG DeviceID,
@@ -513,14 +469,10 @@ extern "C" J2534_LONG J2534_CALL PassThruSetProgrammingVoltage(J2534_ULONG Devic
         return trace.result(ERR_CONCURRENT_API_CALL);
     }
 
-    try {
-        return trace.result(host::finishApi(
-            host::PassThruSetProgrammingVoltage(DeviceID, ResourceStruct, Voltage)));
-    } catch (const std::exception &error) {
-        return trace.result(host::finishApi(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(host::finishApi(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(
+        trace,
+        [&]() { return host::PassThruSetProgrammingVoltage(DeviceID, ResourceStruct, Voltage); },
+        host::finishApi);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruReadVersion(J2534_ULONG DeviceID,
@@ -538,14 +490,12 @@ extern "C" J2534_LONG J2534_CALL PassThruReadVersion(J2534_ULONG DeviceID,
         return trace.result(ERR_CONCURRENT_API_CALL);
     }
 
-    try {
-        return trace.result(host::finishApi(
-            host::PassThruReadVersion(DeviceID, pFirmwareVersion, pDllVersion, pApiVersion)));
-    } catch (const std::exception &error) {
-        return trace.result(host::finishApi(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(host::finishApi(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(
+        trace,
+        [&]() {
+            return host::PassThruReadVersion(DeviceID, pFirmwareVersion, pDllVersion, pApiVersion);
+        },
+        host::finishApi);
 }
 
 extern "C" J2534_LONG J2534_CALL PassThruGetLastError(char *pErrorDescription) {
@@ -588,12 +538,8 @@ extern "C" J2534_LONG J2534_CALL PassThruIoctl(J2534_ULONG ControlTarget,
         return trace.result(ERR_CONCURRENT_API_CALL);
     }
 
-    try {
-        return trace.result(
-            host::finishApi(host::PassThruIoctl(ControlTarget, IoctlID, InputPtr, OutputPtr)));
-    } catch (const std::exception &error) {
-        return trace.result(host::finishApi(ERR_FAILED, error.what()));
-    } catch (...) {
-        return trace.result(host::finishApi(ERR_FAILED, "Unexpected host exception"));
-    }
+    return runExport(
+        trace,
+        [&]() { return host::PassThruIoctl(ControlTarget, IoctlID, InputPtr, OutputPtr); },
+        host::finishApi);
 }

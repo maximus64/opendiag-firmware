@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 #include "../platform/platform.h"
+#include "port_classify.h"
 #include <string>
 #include <vector>
 #include <windows.h>
@@ -25,6 +26,10 @@ unsigned parseNumber(const std::string &text,
                      const char *label,
                      unsigned minimum,
                      unsigned maximum);
+// SERIALCOMM ports for the dropdown. A port used by an OpenDIAG USB interface is
+// labelled, for example "COM10 (data port)"; see port_classify.h.
 std::vector<std::string> availableComPorts();
+// Role of a COM name that is present now, PORT_OTHER otherwise.
+PortRole comPortRole(const std::string &com);
 std::string checkConnection(const std::string &directory, const AdapterSettings &settings);
 std::string driverVersions(const std::string &directory);
