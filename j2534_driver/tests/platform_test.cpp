@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "../common/api_trace.h"
 #include "../platform/platform.h"
+#include "../platform/posix.h"
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -327,6 +328,39 @@ static void testClosedStream() {
     check(closed, "Writing to a closed transport is reported");
 }
 
+static void testSerialConfigurationFailure() {
+    // Descriptor -1 is never open, so tcsetattr fails and the failure must reach the caller.
+    termios settings = {};
+    bool rejected = false;
+    try {
+        platform::configureSerial(-1, settings, 115200);
+    } catch (const std::runtime_error &error) {
+        rejected = !strcmp(error.what(), "Serial configuration failed");
+    }
+    check(rejected, "A serial device that cannot be configured is reported");
+}
+
+static void testRemovedWorkingDirectory() {
+    // With the working directory removed, getcwd fails and a relative path cannot be made absolute.
+    const std::string directory = platform::moduleDirectory(&moduleAnchor);
+    const std::string temporary = directory + "cwd-test-" + std::to_string(getpid()) + "/";
+    check(platform::createDirectories(temporary), "Create working directory test folder");
+    const int original = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    check(original >= 0, "Open the test working directory");
+    check(!chdir(temporary.c_str()), "Enter the working directory test folder");
+    check(!rmdir(temporary.c_str()), "Remove the working directory under the test");
+    bool rejected = false;
+    try {
+        platform::absolutePath("config.ini");
+    } catch (const std::runtime_error &error) {
+        rejected = !strcmp(error.what(), "Cannot resolve the configuration path");
+    }
+    const bool restored = !fchdir(original);
+    ::close(original);
+    check(restored, "Return to the test working directory");
+    check(rejected, "A relative path without a working directory is reported");
+}
+
 static std::string readWholeFile(const std::string &path) {
     std::ifstream file(path.c_str());
     return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
@@ -374,6 +408,8 @@ static void testIniFiles() {
 int main() {
     try {
         testSerial();
+        testSerialConfigurationFailure();
+        testRemovedWorkingDirectory();
         testLease();
         testPaths();
         testIniFiles();
