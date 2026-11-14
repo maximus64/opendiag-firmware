@@ -39,131 +39,67 @@ jobs:
       - name: Build
         run: mkdocs build --strict -d site
 
-      # The update page offers the newest 5 stable and the newest 5 pre-release firmware releases, so an
-      # older build can still be flashed. Each board's release ZIP is unpacked as-is into
-      # update/firmware/<tag>/<board>/, since its manifest.json is already in ESP Web Tools format.
-      # releases.json indexes them, newest release first; within a release the default board comes
-      # first, then the rest by board id. The update page reads only releases.json.
-      #
-      # Board ids come from the ZIP names (opendiag-firmware-<board>.zip). A release that has only the
-      # legacy opendiag-firmware.zip is mapped to opendiag_hw_v1. The source at tag v1.0.3 has
-      # main/pinout.h and no boards/ directory, so that firmware had one pinout, and the ZIP does not
-      # name a board. A release that has per-board ZIPs uses them, and ignores a legacy ZIP beside them.
-      - name: Add firmware releases to the update page
+      # The web installer on update/ flashes whatever is in update/firmware/<board>/. Each release
+      # ZIP's manifest.json is already in ESP Web Tools format, so every board's release ZIP is
+      # unpacked as-is into its own folder.
+      - name: Add latest firmware release to the update page
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          set -euo pipefail
-          work=$(mktemp -d)
-          trap 'rm -rf -- "$work"' EXIT
+          packages_dir=$(mktemp -d)
+          trap 'rm -rf -- "$packages_dir"' EXIT
+          gh release download --pattern 'opendiag-firmware-*.zip' --dir "$packages_dir"
+          shopt -s nullglob
+          packages=("$packages_dir"/opendiag-firmware-*.zip)
+          if (( ${#packages[@]} == 0 )); then
+            echo "The latest release has no opendiag-firmware-<board>.zip" >&2
+            exit 1
+          fi
+          for package in "${packages[@]}"; do
+            board=$(basename "$package" .zip)
+            board=${board#opendiag-firmware-}
+            mkdir -p "site/update/firmware/$board"
+            unzip "$package" -d "site/update/firmware/$board"
+            (cd "site/update/firmware/$board" && sha256sum --check SHA256SUMS)
+          done
 
-          gh release list --repo "$GH_REPO" --limit 100 --json tagName,isPrerelease,publishedAt > "$work/releases.json"
-
-          # Writes "<tag><TAB><prerelease>" for each selected release, newest first.
-          python3 -I - "$work/releases.json" > "$work/tags.tsv" <<'PY'
-          import json
-          import sys
-          from datetime import datetime
-          from pathlib import Path
-
-          def published(release):
-              return datetime.fromisoformat(release["publishedAt"].replace("Z", "+00:00"))
-
-          releases = sorted(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")), key=published, reverse=True)
-          stable = [release for release in releases if release["isPrerelease"] is False][:5]
-          prerelease = [release for release in releases if release["isPrerelease"] is True][:5]
-          if not stable:
-              raise SystemExit("No stable release found")
-          for release in sorted(stable + prerelease, key=published, reverse=True):
-              flag = "true" if release["isPrerelease"] else "false"
-              print(f"{release['tagName']}\t{flag}")
-          PY
-
-          while IFS=$'\t' read -r tag _; do
-            mkdir -p "$work/downloads/$tag"
-            gh release download "$tag" --repo "$GH_REPO" --pattern 'opendiag-firmware*.zip' --dir "$work/downloads/$tag" \
-              || { echo "Could not download the firmware ZIPs of release $tag" >&2; exit 1; }
-          done < "$work/tags.tsv"
-
-          # Checks the board.json files and the release assets, writes releases.json, and writes one
-          # "<tag><TAB><board><TAB><zip>" line per board to unpack.
-          python3 -I - "$work/downloads" "$work/tags.tsv" site/update/firmware > "$work/plan.tsv" <<'PY'
+      # boards.json is the board list the update page offers. It must match the boards in the
+      # checkout and the ZIPs just unpacked, so a board missing from either side fails the build.
+      # "default" comes from each board.json, and exactly one board must set it. The default entry
+      # is listed first, then the rest in board id order. The update page starts on the first entry.
+      - name: Write the update page board list
+        run: |
+          python3 -I - site/update/firmware <<'PY'
           import json
           import sys
           from pathlib import Path
-
-          board_prefix = "opendiag-firmware-"
-          legacy_zip = "opendiag-firmware.zip"
-          legacy_board = "opendiag_hw_v1"
-
-          downloads = Path(sys.argv[1])
-          tags_file = Path(sys.argv[2])
-          firmware = Path(sys.argv[3])
-
+          firmware = Path(sys.argv[1])
+          published = {path.name for path in firmware.iterdir() if path.is_dir()}
           boards = {
-              path.parent.name: json.loads(path.read_text(encoding="utf-8"))
-              for path in sorted(Path("boards").glob("*/board.json"))
+              path.parent.name: json.loads(path.read_text())
+              for path in Path("boards").glob("*/board.json")
           }
-          releases = []
-          plan = []
-          for line in tags_file.read_text(encoding="utf-8").splitlines():
-              tag, prerelease = line.split("\t")
-              folder = downloads / tag
-              names = sorted(path.name for path in folder.glob("*.zip")) if folder.is_dir() else []
-              board_zips = {
-                  name[len(board_prefix):-len(".zip")]: name
-                  for name in names
-                  if name.startswith(board_prefix)
-              }
-              has_legacy = legacy_zip in names
-              # Per-board ZIPs win. A legacy ZIP beside them is ignored.
-              if board_zips:
-                  assets = board_zips
-              elif has_legacy:
-                  assets = {legacy_board: legacy_zip}
-              else:
-                  raise SystemExit(f"Release {tag} has no {board_prefix}<board>.zip or {legacy_zip}")
-              for board in assets:
-                  if board not in boards:
-                      raise SystemExit(f"Release {tag} has a ZIP for {board!r}, but boards/{board}/board.json is missing")
-              ordered = sorted(assets, key=lambda board: (boards[board].get("default") is not True, board))
-              releases.append({
-                  "tag": tag,
-                  "prerelease": prerelease == "true",
-                  "boards": [
-                      {
-                          "id": board,
-                          "name": boards[board]["name"],
-                          "default": boards[board].get("default") is True,
-                          "manifest": f"firmware/{tag}/{board}/manifest.json",
-                      }
-                      for board in ordered
-                  ],
-              })
-              plan.extend(f"{tag}\t{board}\t{assets[board]}" for board in ordered)
-
-          defaults = sorted(board for board, info in boards.items() if info.get("default") is True)
+          without_zip = sorted(set(boards) - published)
+          without_board = sorted(published - set(boards))
+          if without_zip or without_board:
+              raise SystemExit(
+                  f"Boards without a release ZIP: {without_zip}; "
+                  f"release ZIPs without a board: {without_board}"
+              )
+          defaults = sorted(board for board, info in boards.items() if info["default"] is True)
           if len(defaults) != 1:
               raise SystemExit(f"Exactly one board.json must have \"default\": true, found {defaults}")
-
-          firmware.mkdir(parents=True, exist_ok=True)
-          (firmware / "releases.json").write_text(json.dumps({"releases": releases}, indent=2) + "\n", encoding="utf-8")
-          sys.stdout.write("".join(line + "\n" for line in plan))
+          entries = [
+              {
+                  "name": info["name"],
+                  "default": info["default"],
+                  "manifest": f"firmware/{board}/manifest.json",
+              }
+              for board, info in sorted(boards.items(), key=lambda item: (not item[1]["default"], item[0]))
+          ]
+          (firmware / "boards.json").write_text(json.dumps(entries, indent=2) + "\n")
           PY
-
-          # The web installer on update/ flashes the images in update/firmware/<tag>/<board>/. Each
-          # ZIP's SHA256SUMS must verify before the board is published.
-          while IFS=$'\t' read -r tag board zip; do
-            dir="site/update/firmware/$tag/$board"
-            mkdir -p "$dir"
-            unzip "$work/downloads/$tag/$zip" -d "$dir"
-            if [[ ! -f "$dir/manifest.json" ]]; then
-              echo "The $zip of release $tag has no manifest.json" >&2
-              exit 1
-            fi
-            (cd "$dir" && sha256sum --check SHA256SUMS)
-          done < "$work/plan.tsv"
 
       - uses: actions/upload-pages-artifact@v4
         with:

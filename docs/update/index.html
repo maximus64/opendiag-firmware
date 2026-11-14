@@ -335,7 +335,7 @@
             <p class="tagline">Flash your OpenDiag adapter straight from this page — no drivers, no toolchain.</p>
             <div class="version">
                 <span class="dot" aria-hidden="true"></span>
-                <span class="label">Selected release</span>
+                <span class="label">Latest release</span>
                 <span id="fw-version">checking…</span>
             </div>
         </header>
@@ -371,19 +371,6 @@
                                 <label for="board">Board</label>
                                 <select id="board"></select>
                             </p>
-                            <p id="version-row" hidden>
-                                <label for="version">Version</label>
-                                <select id="version"></select>
-                            </p>
-                            <p id="prerelease-row" hidden>
-                                <label>
-                                    <input type="checkbox" id="include-prerelease" autocomplete="off">
-                                    Show pre-release versions (not hardware-verified)
-                                </label>
-                            </p>
-                            <p id="release-note" class="warn" hidden></p>
-                            <p id="no-releases" class="note" hidden>No firmware releases are published yet.
-                                You can still flash a folder you've already downloaded.</p>
                             <label for="local-folder">Or flash firmware you've already downloaded. Choose the unzipped
                                 release folder, the one that holds <code>manifest.json</code>:</label>
                             <input type="file" id="local-folder" webkitdirectory>
@@ -409,75 +396,18 @@
     </div>
 
     <script>
-        // The release list (firmware/releases.json) is newest first. Each release lists its boards,
-        // and the default board comes first in each one. These helpers take the list as an argument.
-        function boardIn(release, id) {
-            return release.boards.find((board) => board.id === id);
-        }
-
-        // Every board id in the releases, once each. The default board comes first. The default is
-        // the first board marked "default" in the newest release that marks one.
-        function listBoards(releases) {
-            const boards = new Map();
-            for (const release of releases) {
-                for (const board of release.boards) {
-                    if (!boards.has(board.id)) boards.set(board.id, board);
-                }
-            }
-            const defaultId = releases.flatMap((release) => release.boards)
-                .find((board) => board.default === true)?.id;
-            return [...boards.values()].sort((a, b) => Number(b.id === defaultId) - Number(a.id === defaultId));
-        }
-
-        // Releases that carry the board. Pre-releases are left out unless showPre is set.
-        function releasesFor(releases, id, showPre) {
-            return releases.filter((release) => boardIn(release, id) && (showPre || !release.prerelease));
-        }
-
-        // The newest stable release for the board, or failing that the first one listed for it.
-        function defaultTag(releases, id, showPre) {
-            const stable = releases.find((release) => !release.prerelease && boardIn(release, id));
-            return (stable || releasesFor(releases, id, showPre)[0] || { tag: "" }).tag;
-        }
-
-        // The note under the selectors. It is empty for the latest stable release.
-        function warningFor(releases, id, tag) {
-            const release = releases.find((item) => item.tag === tag);
-            if (!release) {
-                return releases.some((item) => boardIn(item, id))
-                    ? 'Only pre-releases exist for this board. Tick "Show pre-release versions" to list them.'
-                    : "";
-            }
-            const latest = releases.find((item) => !item.prerelease && boardIn(item, id));
-            const messages = [];
-            if (release.prerelease) messages.push(`${release.tag} is a pre-release and is not hardware-verified.`);
-            if (latest && releases.indexOf(release) > releases.indexOf(latest)) {
-                messages.push(`Downgrade: ${release.tag} is older than ${latest.tag}, the latest stable release ` +
-                    "for this board. Installing it replaces newer firmware with older firmware.");
-            }
-            return messages.join(" ");
-        }
-
         // The install button reads its manifest attribute when it is clicked, so the page chooses
-        // the manifest here. The board and version selectors pick one release and board. A local
-        // folder replaces that choice. Nothing is flashed until the user clicks the install button.
+        // the manifest here. The board list (firmware/boards.json) fills the selector, and the board
+        // marked "default" in it is selected at start. A local folder replaces the selection. Nothing
+        // is flashed until the user clicks the install button.
         const installButton = document.querySelector("esp-web-install-button");
         const boardRow = document.getElementById("board-row");
         const boardSelect = document.getElementById("board");
-        const versionRow = document.getElementById("version-row");
-        const versionSelect = document.getElementById("version");
-        const prereleaseRow = document.getElementById("prerelease-row");
-        const prereleaseBox = document.getElementById("include-prerelease");
-        const releaseNote = document.getElementById("release-note");
-        const noReleases = document.getElementById("no-releases");
         const localPicker = document.getElementById("local-folder");
         const localStatus = document.getElementById("local-status");
         const versionText = document.getElementById("fw-version");
         const localUrls = [];
-        let releases = [];
-        let boardId = "";
-        let tag = "";
-        let localManifest = "";
+        let versionRequest = 0;
 
         // The button stays hidden until there is a manifest to flash.
         function selectManifest(url) {
@@ -486,51 +416,24 @@
             else installButton.removeAttribute("manifest");
         }
 
-        function resetLocal() {
+        function resetManifest() {
             for (const url of localUrls.splice(0)) URL.revokeObjectURL(url);
-            localManifest = "";
+            selectManifest(boardSelect.value);
         }
 
-        // Choosing a release or board replaces any local folder.
-        function dropLocal() {
-            localPicker.value = "";
-            localStatus.textContent = "";
-            resetLocal();
-        }
-
-        function rebuildVersions(keep) {
-            const showPre = prereleaseBox.checked;
-            const list = releasesFor(releases, boardId, showPre);
-            versionSelect.replaceChildren(...list.map((release) => new Option(
-                release.prerelease ? `${release.tag} (pre-release)` : release.tag, release.tag)));
-            // Keep the chosen tag if it is still listed, otherwise fall back to the default release.
-            tag = list.some((release) => release.tag === keep) ? keep : defaultTag(releases, boardId, showPre);
-        }
-
-        // While a local folder is in use, both selectors show it as the choice.
-        function syncChoices() {
-            const local = Boolean(localManifest);
-            for (const [select, value] of [[boardSelect, boardId], [versionSelect, tag]]) {
-                select.querySelector('option[value="local"]')?.remove();
-                if (local) select.prepend(new Option("Local folder", "local"));
-                select.value = local ? "local" : value;
+        // Show the version from the selected board's manifest, the same file the install button
+        // flashes, so this line can't go stale when new firmware is synced.
+        async function showVersion(url) {
+            const request = ++versionRequest;
+            versionText.textContent = "checking…";
+            try {
+                const response = await fetch(url, { cache: "no-store" });
+                if (!response.ok) throw new Error(response.statusText);
+                const manifest = await response.json();
+                if (request === versionRequest) versionText.textContent = manifest.version || "unknown";
+            } catch {
+                if (request === versionRequest) versionText.textContent = "unavailable";
             }
-        }
-
-        // Point the install button at the chosen manifest and show the chosen release.
-        function applySelection() {
-            if (localManifest) {
-                selectManifest(localManifest);
-                releaseNote.hidden = true;
-            } else {
-                const release = releases.find((item) => item.tag === tag);
-                const board = release && boardIn(release, boardId);
-                selectManifest(board ? board.manifest : "");
-                versionText.textContent = release ? release.tag : "none";
-                releaseNote.textContent = warningFor(releases, boardId, tag);
-                releaseNote.hidden = !releaseNote.textContent;
-            }
-            syncChoices();
         }
 
         async function sha256Hex(file) {
@@ -549,11 +452,10 @@
         }
 
         async function useLocalFolder() {
-            resetLocal();
+            resetManifest();
             const files = new Map([...localPicker.files].map((file) => [file.name, file]));
             if (!files.size) {
                 localStatus.textContent = "";
-                applySelection();
                 return;
             }
             try {
@@ -590,66 +492,48 @@
                     builds.push({ ...build, parts });
                 }
 
-                const manifestUrl = URL.createObjectURL(
+                const localManifest = URL.createObjectURL(
                     new Blob([JSON.stringify({ ...manifest, builds })], { type: "application/json" })
                 );
-                localUrls.push(manifestUrl);
-                localManifest = manifestUrl;
-                applySelection();
-                versionText.textContent = manifest.version || "unknown";
+                localUrls.push(localManifest);
+                selectManifest(localManifest);
                 localStatus.textContent = `Ready to flash local firmware ${manifest.version || "unknown"}` +
                     (sums ? ", checksums match." : ". No SHA256SUMS was found, so checksums were not checked.");
             } catch (error) {
-                resetLocal();
-                applySelection();
+                resetManifest();
                 localStatus.textContent = `Can't use that folder: ${error.message}.`;
             }
         }
 
-        async function loadReleases() {
+        async function loadBoards() {
             try {
-                const response = await fetch("firmware/releases.json", { cache: "no-store" });
-                if (!response.ok) throw new Error("no release list");
-                const index = await response.json();
-                releases = Array.isArray(index.releases) ? index.releases : [];
+                const response = await fetch("firmware/boards.json", { cache: "no-store" });
+                if (!response.ok) throw new Error("no board list");
+                const boards = await response.json();
+                if (!Array.isArray(boards) || !boards.length) throw new Error("empty board list");
+                for (const board of boards) {
+                    boardSelect.add(new Option(board.name, board.manifest));
+                }
+                // Start on the board marked "default". Fall back to the first entry only if none is marked.
+                const defaultIndex = boards.findIndex((board) => board.default === true);
+                boardSelect.selectedIndex = defaultIndex >= 0 ? defaultIndex : 0;
+                boardRow.hidden = false;
+                resetManifest();
+                showVersion(boardSelect.value);
             } catch {
-                // No release list is published (for example, a local preview). Only a local folder can be flashed.
-                releases = [];
+                // No board list is published (for example, a local preview). Only a local folder can be flashed.
+                versionText.textContent = "unavailable";
             }
-            const boards = listBoards(releases);
-            if (!boards.length) {
-                noReleases.hidden = false;
-                applySelection();
-                return;
-            }
-            boardRow.hidden = false;
-            versionRow.hidden = false;
-            prereleaseRow.hidden = false;
-            boardSelect.replaceChildren(...boards.map((board) => new Option(board.name, board.id)));
-            // The default board comes first, so it is the one chosen at start.
-            boardId = boards[0].id;
-            rebuildVersions("");
-            applySelection();
         }
 
         boardSelect.addEventListener("change", () => {
-            dropLocal();
-            boardId = boardSelect.value;
-            rebuildVersions(tag);
-            applySelection();
-        });
-        versionSelect.addEventListener("change", () => {
-            dropLocal();
-            tag = versionSelect.value;
-            applySelection();
-        });
-        // Ticking the box only changes which versions are listed. A local folder stays in use.
-        prereleaseBox.addEventListener("change", () => {
-            rebuildVersions(tag);
-            applySelection();
+            localPicker.value = "";
+            localStatus.textContent = "";
+            resetManifest();
+            showVersion(boardSelect.value);
         });
         localPicker.addEventListener("change", useLocalFolder);
-        loadReleases();
+        loadBoards();
     </script>
 </body>
 
