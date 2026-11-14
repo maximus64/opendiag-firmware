@@ -276,7 +276,6 @@ static void hs_release_locked(void) {
     }
 
     board_set_hs_state((enum hs_pin)g.hs_pin, 0);
-    board_set_hs_boost_en(0);
     board_set_hs_voltage(0);
 
     g.hs_pin = -1;
@@ -1239,7 +1238,6 @@ esp_err_t vif_pin_set(vif_owner_t owner, int obd_pin, vif_pin_mode_t m,
         }
 
         board_set_hs_voltage(mv);
-        board_set_hs_boost_en(1);
         board_set_hs_state((enum hs_pin)obd_pin, 1);
         g.hs_pin = (int8_t)obd_pin;
         g.hs_owner = owner;

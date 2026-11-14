@@ -731,7 +731,7 @@ TEST(a_high_side_pin_is_driven_and_released) {
     TEST_ASSERT_EQUAL_INT(
         ESP_OK, vif_pin_set(VIF_OWNER_LINK, OBD_PIN_HS, VIF_PIN_OFF, 0));
     TEST_ASSERT_EQUAL_INT(0, fake_board_hs_state(OBD_PIN_HS));
-    TEST_ASSERT_EQUAL_INT(0, fake_board_hs_boost_en());
+    TEST_ASSERT_EQUAL_INT(1, fake_board_hs_boost_en());
     TEST_ASSERT_FALSE(vif_any_pin_active());
 }
 

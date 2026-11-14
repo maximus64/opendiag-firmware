@@ -29,6 +29,8 @@ void fake_board_reset(void) {
         g.ls_state[i] = -1;
     }
 
+    g.hs_boost_en = 1; /* kept enabled; see board_hs_ls_reset_state() */
+
     /* A plausible healthy vehicle, so tests that do not care read something
      * sensible rather than 0.0V. */
     g.vbatt_mv = 12600;
@@ -85,11 +87,10 @@ void board_hs_ls_reset_state(void) {
         g.ls_state[i] = -1;
     }
 
-    g.hs_boost_en = 0;
+    /* The boost converter stays enabled across resets (5 ms soft start). */
+    g.hs_boost_en = 1;
     g.hs_voltage_mv = 0;
 }
-
-void board_set_hs_boost_en(int state) { g.hs_boost_en = state; }
 
 void board_set_hs_voltage(uint32_t mvolt) { g.hs_voltage_mv = mvolt; }
 

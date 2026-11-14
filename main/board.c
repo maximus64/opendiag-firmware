@@ -455,10 +455,6 @@ int32_t board_get_hs_vsense(void) {
 }
 
 #if OPENDIAG_HAS_OBD_HS
-void board_set_hs_boost_en(int state) {
-    gpio_set_level(PIN_HS_BOOST_EN, state);
-}
-
 static void board_set_hs_duty(uint32_t duty) {
     ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty));
     // Update duty to apply the new value
@@ -580,8 +576,15 @@ void board_set_ls_state(enum ls_pin pin, int state) {
 
 void board_hs_ls_reset_state(void) {
 #if OPENDIAG_HAS_OBD_HS
-    board_set_hs_boost_en(0);
     board_set_hs_duty(0);
+
+    /*
+     * On Rev1 board, the TLV61046ADB boost controller have 5ms soft start time
+     * To meet J2534 settle timing requierment, we keep the boost convert
+     * enable and only switch the high side drivers.
+     */
+    gpio_set_level(PIN_HS_BOOST_EN, 1);
+
     gpio_set_level(PIN_HS_OBD_6, 0);
     gpio_set_level(PIN_HS_OBD_9, 0);
     gpio_set_level(PIN_HS_OBD_11, 0);
@@ -590,6 +593,7 @@ void board_hs_ls_reset_state(void) {
     gpio_set_level(PIN_HS_OBD_14, 0);
 #endif
 #if OPENDIAG_HAS_OBD_LS
+
 #if OPENDIAG_HW_LS_OBD_9
     gpio_set_level(PIN_LS_OBD_9, 0);
 #endif
@@ -611,7 +615,6 @@ void board_calibrate_hs(void) {
 
     printf("Set HS duty cycle to %d\n", HS_CAL_LOW_DUTY);
     board_set_hs_duty(HS_CAL_LOW_DUTY);
-    board_set_hs_boost_en(1);
     board_set_hs_state(HS_OBD_PIN_12, 1);
 
     printf("Wait for voltage to settle\n");

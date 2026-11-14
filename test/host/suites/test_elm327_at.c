@@ -186,7 +186,7 @@ TEST(at_z_releases_only_the_pins_this_client_holds) {
     elm_ask("ATZ\r");
 
     TEST_ASSERT_EQUAL_INT(0, fake_board_hs_state(6));
-    TEST_ASSERT_EQUAL_INT(0, fake_board_hs_boost_en());
+    TEST_ASSERT_EQUAL_INT(1, fake_board_hs_boost_en());
     TEST_ASSERT_FALSE(vif_any_pin_active());
 
     /* A reset here used to call board_hs_ls_reset_state(), which cut the
@@ -536,7 +536,7 @@ TEST(at_progv_switches_a_high_side_pin_back_off) {
     elm_ok("ATPROGV6FFFFFFFF\r");
 
     TEST_ASSERT_EQUAL_INT(0, fake_board_hs_state(6));
-    TEST_ASSERT_EQUAL_INT(0, fake_board_hs_boost_en());
+    TEST_ASSERT_EQUAL_INT(1, fake_board_hs_boost_en());
     TEST_ASSERT_EQUAL_INT(0, fake_board_hs_voltage_mv());
 }
 

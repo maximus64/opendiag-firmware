@@ -24,7 +24,6 @@ enum ls_pin {
 void board_setup(void);
 
 void board_hs_ls_reset_state(void);
-void board_set_hs_boost_en(int state);
 void board_set_hs_voltage(uint32_t mvolt);
 void board_set_hs_state(enum hs_pin pin, int state);
 void board_set_ls_state(enum ls_pin pin, int state);
