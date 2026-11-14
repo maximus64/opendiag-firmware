@@ -137,6 +137,35 @@
             color: var(--ink-dim);
         }
 
+        /* The board selector is a second pill under the release pill, with the same look. */
+        .board-picker {
+            display: flex;
+            width: fit-content;
+            margin: 10px auto 0;
+        }
+
+        .board-picker[hidden] { display: none; }
+
+        .board-picker select {
+            font: inherit;
+            font-size: 13.5px;
+            color: var(--ink);
+            background: transparent;
+            border: none;
+            padding: 0;
+            cursor: pointer;
+        }
+
+        .board-picker select option {
+            background: var(--card);
+            color: var(--ink);
+        }
+
+        .board-picker select:focus-visible {
+            outline: 2px solid var(--ink);
+            outline-offset: 3px;
+        }
+
         /* ---------- steps ---------- */
 
         .card {
@@ -338,6 +367,10 @@
                 <span class="label">Latest release</span>
                 <span id="fw-version">checking…</span>
             </div>
+            <div class="version board-picker" id="board-row" hidden>
+                <label class="label" for="board">Board</label>
+                <select id="board"></select>
+            </div>
         </header>
 
         <div class="card">
@@ -359,6 +392,12 @@
                         <li>If it isn't listed, unplug the device and repeat steps 1 and 2.</li>
                     </ul>
                     <div class="install">
+					    <div class="local">
+                            <label for="local-folder">Or flash firmware you've already downloaded. Choose the unzipped
+                                release folder, the one that holds <code>manifest.json</code>:</label>
+                            <input type="file" id="local-folder" webkitdirectory>
+                            <p id="local-status" class="note" aria-live="polite"></p>
+                        </div>
                         <esp-web-install-button hidden>
                             <button slot="activate">Begin Firmware Update</button>
                             <p slot="unsupported" class="warn">Your browser can't talk to serial devices. Use
@@ -366,16 +405,6 @@
                             <p slot="not-allowed" class="warn">This page must be served over HTTPS (or from
                                 <code>localhost</code>) to flash firmware.</p>
                         </esp-web-install-button>
-                        <div class="local">
-                            <p id="board-row" hidden>
-                                <label for="board">Board</label>
-                                <select id="board"></select>
-                            </p>
-                            <label for="local-folder">Or flash firmware you've already downloaded. Choose the unzipped
-                                release folder, the one that holds <code>manifest.json</code>:</label>
-                            <input type="file" id="local-folder" webkitdirectory>
-                            <p id="local-status" class="note" aria-live="polite"></p>
-                        </div>
                         <p class="note">When the update finishes, unplug OpenDiag and plug it back in normally.</p>
                     </div>
                 </li>
