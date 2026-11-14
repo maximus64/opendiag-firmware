@@ -436,11 +436,16 @@ Keep in mind:
 - **Switching modes is a fresh start.** Every bus and pin the link holds is released on the way
   through. Set up programming voltages *after* you switch, from the mode that will use them.
 - **The mode reverts when the client disconnects.** Closing the data port or dropping the BLE
-  connection puts the link back in ELM327 mode. That keeps an ordinary OBD app working next time
-  without anyone switching it back.
+  connection puts the link back in its default mode, which is ELM327 unless you have saved another.
+  That keeps an ordinary OBD app working next time without anyone switching it back.
 - **Switch before you open the port.** Opening the port doesn't reset the mode. `mode slcan`
   followed by starting `slcand` works as expected.
-- **The mode doesn't survive a power cycle.** After a reboot, the link starts in ELM327 mode.
+- **The mode doesn't survive a power cycle unless you save it.** After a reboot, the link starts in
+  its saved default, which is ELM327 unless you have changed it. `mode default slcan` saves SLCAN
+  and switches to it now. Saving is only possible from the debug shell, so a BLE client cannot
+  change what the adapter boots into.
+- **To go back to the factory default,** run `mode default elm327`. A saved mode that this firmware
+  does not have also falls back to ELM327 at boot.
 
 ---
 
@@ -482,6 +487,7 @@ for the list of commands.
 | `link usb` / `link ble` / `link drop` | Hand the data link to USB or Bluetooth, or let go of it |
 | `mode` | Show the current mode, the default, and every available mode |
 | `mode <name>` | Switch mode, for example `mode slcan` |
+| `mode default <name>` | Save a mode as the default the adapter boots into, and switch to it now. Changes what the link returns to after a reset or a client disconnects |
 | `elmtrace on` / `elmtrace off` | Copy every ELM327 request (`ELMTRC: >`) and reply (`ELMTRC: <`) to this console, whether the link is on USB or Bluetooth. Closing the console turns it off |
 | `ctrl <command>` | Run a [control command](#control-commands) |
 | `canport obd` / `canport aux` | Choose where the next CAN open goes: the OBD socket (pins 6/14, default) or the AUX_CAN header J3 (pin 1 CAN-H, pin 2 CAN-L, pin 3 GND, no termination). `aux` is always listen-only, so a tapped bus is never driven. Only one CAN at a time. A reset goes back to `obd` |
@@ -577,7 +583,7 @@ Updating keeps your paired phones and the unit's voltage calibration.
 | App connects but says "unable to connect to ECU" / `NO DATA` | Is the ignition on? Try setting the protocol by hand with `AT SP`. |
 | App reports `?` after selecting a protocol | The bus is held by the debug shell. Run `ctrl BUS` or `vif` in the shell to check. |
 | **Save & Test** fails in `opendiag_config.exe` | Check you picked the **data** COM port, not the debug port, and that no other program has it open. |
-| SLCAN tool gets ELM327 replies | The link reverted when the port was last closed. Run `mode slcan` again before opening it. |
+| SLCAN tool gets ELM327 replies | The link reverted when the port was last closed. Run `mode slcan` again before opening it, or save it once with `mode default slcan` so every boot starts in SLCAN. |
 | Connecting takes a long time on a K-Line vehicle | The automatic search tries every CAN protocol first. Set the protocol by hand, `AT SP 5` for KWP fast init or `AT SP 3` / `4` for a 5-baud init, to go straight to K-Line. |
 | LED pulsing amber unexpectedly | A pin is still energised. Type `vif` in the shell to see who holds it, then `pinoff` if it's the shell. |
 | Shell port prints but doesn't accept typing | Make sure you opened the **DEBUG** port, and that your terminal sends a carriage return (Enter). |

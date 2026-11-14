@@ -39,6 +39,20 @@ static const vif_frontend_t frontend_b = {.name = "slcan"};
 
 static char g_out[VIF_CTRL_REPLY_MAX];
 
+/* The stand-in for flash: what was asked to be stored, and whether it stuck. */
+static int saves;
+static bool saved_ok;
+static char saved_name[16];
+
+static bool fake_save(const char *name) {
+    saves++;
+    if (!saved_ok) {
+        return false;
+    }
+    strncpy(saved_name, name, sizeof(saved_name) - 1);
+    return true;
+}
+
 /** Runs one control command and lets the link task apply what it asked for. */
 static const char *ctrl(const char *cmd) {
     memset(g_out, 0, sizeof(g_out));
@@ -85,6 +99,11 @@ void td_setup(void) {
 
     vif_frontend_register(&frontend_a);
     vif_frontend_register(&frontend_b);
+
+    saves = 0;
+    saved_ok = true;
+    memset(saved_name, 0, sizeof(saved_name));
+    vif_ctrl_set_default_saver(fake_save);
 
     /* This thread is the link task, and the shell's, so a claim taken on
      * either owner's behalf reaches the driver. */
@@ -284,4 +303,66 @@ TEST(reset_reports_failed_cleanup_and_preserves_claim_for_retry) {
     TEST_ASSERT_EQUAL_STRING("RESET elm327", g_out);
     TEST_ASSERT_EQUAL_INT(VIF_BUS_NONE,
                           vif_bus_current(VIF_OWNER_LINK, VIF_BUS_J1850_PWM));
+}
+
+/* ------------------------------------------------------------------ *
+ * Default grammar
+ * ------------------------------------------------------------------ */
+
+static bool set_default_ok(const char *name) {
+    bool ok;
+
+    memset(g_out, 0, sizeof(g_out));
+    ok = vif_ctrl_set_default(name, g_out, sizeof(g_out));
+    vif_link_service();
+
+    return ok;
+}
+
+TEST(a_default_is_stored_under_its_own_name_and_switches_the_link) {
+    TEST_ASSERT_TRUE(set_default_ok("SLCAN"));
+    TEST_ASSERT_EQUAL_STRING("DEFAULT slcan", g_out);
+    TEST_ASSERT_EQUAL_INT(1, saves);
+    TEST_ASSERT_EQUAL_STRING("slcan", saved_name);
+    TEST_ASSERT_EQUAL_STRING("slcan", vif_link_frontend_name());
+    TEST_ASSERT_EQUAL_STRING("slcan", vif_link_default_frontend()->name);
+}
+
+TEST(reset_returns_to_the_stored_default_not_the_build_default) {
+    TEST_ASSERT_TRUE(set_default_ok("slcan"));
+    ctrl_ok("MODE=elm327");
+
+    TEST_ASSERT_EQUAL_STRING("RESET slcan", ctrl("RESET"));
+    TEST_ASSERT_EQUAL_STRING("slcan", vif_link_frontend_name());
+}
+
+TEST(a_default_the_store_refuses_changes_nothing) {
+    saved_ok = false;
+
+    TEST_ASSERT_FALSE(set_default_ok("slcan"));
+    TEST_ASSERT_EQUAL_STRING("ERR could not store default slcan", g_out);
+    TEST_ASSERT_EQUAL_INT(1, saves);
+    TEST_ASSERT_EQUAL_STRING("elm327", vif_link_default_frontend()->name);
+    TEST_ASSERT_EQUAL_STRING("elm327", vif_link_frontend_name());
+}
+
+TEST(a_default_is_refused_when_nothing_is_there_to_store_it) {
+    vif_ctrl_set_default_saver(NULL);
+
+    TEST_ASSERT_FALSE(set_default_ok("slcan"));
+    TEST_ASSERT_EQUAL_STRING("ERR could not store default slcan", g_out);
+    TEST_ASSERT_EQUAL_STRING("elm327", vif_link_default_frontend()->name);
+}
+
+TEST(an_unknown_default_is_refused_before_anything_is_stored) {
+    TEST_ASSERT_FALSE(set_default_ok("nope"));
+    TEST_ASSERT_EQUAL_INT(0, strncmp(g_out, "ERR no mode 'nope'", 18));
+    TEST_ASSERT_EQUAL_INT(0, saves);
+    TEST_ASSERT_EQUAL_STRING("elm327", vif_link_default_frontend()->name);
+}
+
+TEST(a_plain_mode_switch_stores_nothing) {
+    TEST_ASSERT_TRUE(ctrl_ok("MODE=slcan"));
+    TEST_ASSERT_EQUAL_INT(0, saves);
+    TEST_ASSERT_EQUAL_STRING("elm327", vif_link_default_frontend()->name);
 }

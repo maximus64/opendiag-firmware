@@ -204,6 +204,13 @@ const char *vif_link_frontend_name(void);
 /** @brief The front-end the link reverts to. Set by vif_link_start(). */
 const vif_frontend_t *vif_link_default_frontend(void);
 
+/**
+ * @brief Make @p fe the front-end the link reverts to from now on.
+ *
+ * Does not switch the link. Pair it with vif_link_set_frontend() to do that.
+ */
+void vif_link_set_default(const vif_frontend_t *fe);
+
 /** @brief The transport the link speaks on, or COMM_INVALID_PORT_ID. */
 comm_port_id_t vif_link_port(void);
 

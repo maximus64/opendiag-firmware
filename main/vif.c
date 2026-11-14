@@ -649,6 +649,12 @@ const vif_frontend_t *vif_link_default_frontend(void) {
     return g.link.fe_default;
 }
 
+void vif_link_set_default(const vif_frontend_t *fe) {
+    LOCK();
+    g.link.fe_default = fe;
+    UNLOCK();
+}
+
 void vif_link_down(void) {
     const vif_frontend_t *want = g.link.fe_default;
 

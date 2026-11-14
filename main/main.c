@@ -298,12 +298,71 @@ static void ble_ctrl_command(const char *cmd, size_t len) {
     ble_uart_ctrl_reply(out);
 }
 
+/* The namespace and key the link's default grammar is kept under. */
+#define LINK_NVS_NAMESPACE "vif"
+#define LINK_NVS_DEFAULT_MODE "default_mode"
+
+/**
+ * @brief The grammar the link boots into, as the shell last saved it.
+ *
+ * Read after the front-ends are registered, so a saved name that this build
+ * does not have falls back to ELM327 rather than leaving the link with none.
+ * ELM327 is also the factory default, so a unit with nothing saved behaves as
+ * it always has.
+ */
+static const vif_frontend_t *saved_default_frontend(void) {
+    char name[16];
+    size_t len = sizeof(name);
+    nvs_handle_t handle;
+    const vif_frontend_t *fe = NULL;
+
+    if (nvs_open(LINK_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) {
+        return &elm327_frontend;
+    }
+    if (nvs_get_str(handle, LINK_NVS_DEFAULT_MODE, name, &len) == ESP_OK) {
+        fe = vif_frontend_find(name);
+        if (!fe) {
+            ESP_LOGW(TAG, "saved default mode '%s' is not in this build", name);
+        }
+    }
+    nvs_close(handle);
+
+    return fe ? fe : &elm327_frontend;
+}
+
+/**
+ * @brief Store the default grammar. Called only when the shell is told to, so
+ * booting never wears the flash.
+ */
+static bool save_default_frontend(const char *name) {
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(LINK_NVS_NAMESPACE, NVS_READWRITE, &handle);
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "failed to open nvs for the default mode: %s",
+                 esp_err_to_name(err));
+        return false;
+    }
+    err = nvs_set_str(handle, LINK_NVS_DEFAULT_MODE, name);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "failed to store the default mode: %s",
+                 esp_err_to_name(err));
+    }
+    return err == ESP_OK;
+}
+
 static void links_setup(void) {
     elm327_register();
     slcan_register();
     j2534_register();
 
-    if (vif_link_start(&elm327_frontend) != ESP_OK) {
+    vif_ctrl_set_default_saver(save_default_frontend);
+    if (vif_link_start(saved_default_frontend()) != ESP_OK) {
         ESP_LOGE(TAG, "failed to start the data link");
         return;
     }

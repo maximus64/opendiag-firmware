@@ -25,6 +25,8 @@
  *   MODE=<name>   switch to it, releasing every claim the link held
  *   BUS           which buses are live, how fast, and who holds each
  *   RESET         release the link's claims and go back to its default
+ *
+ * The default is set from the shell only (vif_ctrl_set_default()), never here.
  */
 
 #include <stdbool.h>
@@ -45,3 +47,20 @@
  *         @p out with something worth showing the client.
  */
 bool vif_ctrl_exec(const char *cmd, size_t len, char *out, size_t cap);
+
+/**
+ * @brief Make @p name the link's default grammar, keep it across a reboot, and
+ * switch the link to it.
+ *
+ * Only the shell calls this. The answer is "DEFAULT <name>" or an error.
+ */
+bool vif_ctrl_set_default(const char *name, char *out, size_t cap);
+
+/**
+ * @brief Set where vif_ctrl_set_default() keeps a default.
+ *
+ * With no saver the default is refused, since a default that is not stored
+ * would look set and then vanish at the next reboot. @p save returns true once
+ * the name is on flash.
+ */
+void vif_ctrl_set_default_saver(bool (*save)(const char *name));

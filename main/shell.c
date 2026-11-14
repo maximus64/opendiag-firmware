@@ -1393,9 +1393,12 @@ static void link_command(int argc, char **argv) {
  *
  *   mode          what it is running, what it falls back to, what it could run
  *   mode <name>   switch it, releasing every claim it held
+ *   mode default <name>
+ *                 the same, and make it the default across a reboot
  *
  * The switch itself is vif_ctrl_exec(), so the shell and a BLE client cannot
- * disagree about what a mode change does.
+ * disagree about what a mode change does. Only the shell can make a default
+ * stick, so a BLE client cannot change what the unit boots into.
  */
 static void mode_command(int argc, char **argv) {
     char out[VIF_CTRL_REPLY_MAX];
@@ -1415,8 +1418,14 @@ static void mode_command(int argc, char **argv) {
         return;
     }
 
+    if (argc == 3 && strcmp(argv[1], "default") == 0) {
+        vif_ctrl_set_default(argv[2], out, sizeof(out));
+        printf("%s\n", out);
+        return;
+    }
+
     if (argc != 2) {
-        printf("Usage: mode [<name>]\n");
+        printf("Usage: mode [<name> | default <name>]\n");
         return;
     }
 
@@ -1555,7 +1564,7 @@ const shell_command_t commands[] = {
     {"link", link_command,
      "Which transport carries the data link. Usage: link [drop|usb|ble]"},
     {"mode", mode_command,
-     "Show or switch the link's grammar. Usage: mode [<name>]"},
+     "Show or switch the link's grammar. Usage: mode [<name> | default <name>]"},
     {"elmtrace", elmtrace_command,
      "Copy ELM327 requests/replies to this console. Usage: elmtrace [on|off]"},
     {"ctrl", ctrl_command, "Run a control command. Usage: ctrl <command>"},

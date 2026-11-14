@@ -203,6 +203,48 @@ static bool cmd_reset(char *out, size_t cap) {
     return true;
 }
 
+/* Stores a default across a reboot. The firmware sets it; a host build does
+ * not, so a default cannot be set there. */
+static bool (*g_default_saver)(const char *name);
+
+void vif_ctrl_set_default_saver(bool (*save)(const char *name)) {
+    g_default_saver = save;
+}
+
+/**
+ * @brief Make a grammar the default, keep it across a reboot, and switch to it.
+ *
+ * Shell only, and deliberately not a word in vif_ctrl_exec(): a BLE client may
+ * switch the grammar, but it must not be able to change what the unit boots
+ * into.
+ *
+ * The default is stored before anything changes, so a store that fails leaves
+ * both the default and the link where they were.
+ */
+bool vif_ctrl_set_default(const char *name, char *out, size_t cap) {
+    const vif_frontend_t *fe = vif_frontend_find(name);
+    char modes[64];
+
+    if (!fe) {
+        mode_list(modes, sizeof(modes));
+        reply(out, cap, "ERR no mode '%s'; have %s", name ? name : "", modes);
+        return false;
+    }
+
+    if (!g_default_saver || !g_default_saver(fe->name)) {
+        reply(out, cap, "ERR could not store default %s", fe->name);
+        return false;
+    }
+
+    vif_link_set_default(fe);
+    vif_link_set_frontend(fe);
+
+    ESP_LOGI(TAG, "link: default mode %s", fe->name);
+
+    reply(out, cap, "DEFAULT %s", fe->name);
+    return true;
+}
+
 bool vif_ctrl_exec(const char *cmd, size_t len, char *out, size_t cap) {
     char buf[CTRL_CMD_MAX];
 
