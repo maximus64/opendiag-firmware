@@ -39,9 +39,11 @@ jobs:
       - name: Build
         run: mkdocs build --strict -d site
 
-      # The web installer on update/ flashes whatever is in update/firmware/<board>/. Each release
-      # ZIP's manifest.json is already in ESP Web Tools format, so every board's release ZIP is
-      # unpacked as-is into its own folder.
+      # The update page reads firmware/boards.json and firmware/<board>/. A release that predates
+      # per-board ZIPs has only opendiag-firmware.zip. That image is OpenDIAG hardware v1: the v1.0.3
+      # source has main/pinout.h and no boards/ directory, and the ZIP does not name a board. It is
+      # mapped to opendiag_hw_v1 only when the release has no per-board ZIP for that board.
+      # Each release ZIP's manifest.json is already in ESP Web Tools format, so it is unpacked as-is.
       - name: Add latest firmware release to the update page
         env:
           GH_TOKEN: ${{ github.token }}
@@ -49,24 +51,31 @@ jobs:
         run: |
           packages_dir=$(mktemp -d)
           trap 'rm -rf -- "$packages_dir"' EXIT
-          gh release download --pattern 'opendiag-firmware-*.zip' --dir "$packages_dir"
+          gh release download --pattern 'opendiag-firmware*.zip' --dir "$packages_dir"
           shopt -s nullglob
           packages=("$packages_dir"/opendiag-firmware-*.zip)
           if (( ${#packages[@]} == 0 )); then
-            echo "The latest release has no opendiag-firmware-<board>.zip" >&2
+            packages=("$packages_dir"/opendiag-firmware.zip)
+          fi
+          if [[ ! -f "${packages[0]}" ]]; then
+            echo "The latest release has no firmware ZIP" >&2
             exit 1
           fi
           for package in "${packages[@]}"; do
-            board=$(basename "$package" .zip)
-            board=${board#opendiag-firmware-}
+            if [[ $(basename "$package") == opendiag-firmware.zip ]]; then
+              board=opendiag_hw_v1
+            else
+              board=$(basename "$package" .zip)
+              board=${board#opendiag-firmware-}
+            fi
             mkdir -p "site/update/firmware/$board"
             unzip "$package" -d "site/update/firmware/$board"
             (cd "site/update/firmware/$board" && sha256sum --check SHA256SUMS)
           done
 
-      # boards.json is the board list the update page offers. It must match the boards in the
-      # checkout and the ZIPs just unpacked, so a board missing from either side fails the build.
-      # "default" comes from each board.json, and exactly one board must set it. The default entry
+      # boards.json is the board list the update page offers. A release ZIP for a board that is not
+      # in boards/ fails the build. A board with no ZIP in the latest release is left off the list,
+      # but the default board must have one. "default" comes from each board.json. The default entry
       # is listed first, then the rest in board id order. The update page starts on the first entry.
       - name: Write the update page board list
         run: |
@@ -80,23 +89,24 @@ jobs:
               path.parent.name: json.loads(path.read_text())
               for path in Path("boards").glob("*/board.json")
           }
-          without_zip = sorted(set(boards) - published)
-          without_board = sorted(published - set(boards))
-          if without_zip or without_board:
-              raise SystemExit(
-                  f"Boards without a release ZIP: {without_zip}; "
-                  f"release ZIPs without a board: {without_board}"
-              )
+          unknown = sorted(published - set(boards))
+          if unknown:
+              raise SystemExit(f"Release ZIPs without a board in boards/: {unknown}")
+          listed = {board: info for board, info in boards.items() if board in published}
+          if not listed:
+              raise SystemExit("The latest release has no ZIP for any board in boards/")
           defaults = sorted(board for board, info in boards.items() if info["default"] is True)
           if len(defaults) != 1:
               raise SystemExit(f"Exactly one board.json must have \"default\": true, found {defaults}")
+          if defaults[0] not in listed:
+              raise SystemExit(f"The default board {defaults[0]} has no ZIP in the latest release")
           entries = [
               {
                   "name": info["name"],
                   "default": info["default"],
                   "manifest": f"firmware/{board}/manifest.json",
               }
-              for board, info in sorted(boards.items(), key=lambda item: (not item[1]["default"], item[0]))
+              for board, info in sorted(listed.items(), key=lambda item: (not item[1]["default"], item[0]))
           ]
           (firmware / "boards.json").write_text(json.dumps(entries, indent=2) + "\n")
           PY
