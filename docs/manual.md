@@ -535,7 +535,11 @@ pin.
 ## Updating the firmware
 
 To update the firmware, go to **[the OpenDIAG firmware update page](update/index.html)**
-and follow the instructions there.
+and follow the instructions there. Pick your board, then a version from the version list. The page
+selects the newest stable release for your board, and older versions stay available in the list.
+Installing an older version is a downgrade, and the page warns you before you flash it.
+Pre-release versions are hidden until you tick **Show pre-release versions**. They have not been
+hardware-verified.
 
 ### Updating manually
 
