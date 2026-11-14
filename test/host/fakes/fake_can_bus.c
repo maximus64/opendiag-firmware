@@ -30,6 +30,8 @@ typedef struct {
 static struct {
     bool up;
     bool listen_only; /* most recent open asked for listen-only */
+    bool listen_first; /* most recent open asked to listen first */
+    bool foreign_rate; /* a bus at another bit rate is running */
     uint32_t rx_timestamp_us;
     uint32_t rx_sequence;
     int baud;
@@ -127,6 +129,8 @@ int fake_can_teardown_count(void) { return g.teardown_count; }
 int fake_can_last_baud(void) { return g.baud; }
 bool fake_can_is_up(void) { return g.up; }
 bool fake_can_last_listen_only(void) { return g.listen_only; }
+bool fake_can_last_listen_first(void) { return g.listen_first; }
+void fake_can_set_foreign_rate(bool on) { g.foreign_rate = on; }
 int fake_can_sent_count(void) { return g.sent_count; }
 
 void fake_can_fail_confirmed_send(void) {
@@ -276,6 +280,10 @@ static esp_err_t can_ops_open(const bus_cfg_t *cfg) {
     }
 
     g.listen_only = cfg->listen_only;
+    g.listen_first = cfg->listen_first;
+    /* What the driver's listen-first check concludes on such a bus. */
+    if (cfg->listen_first && !cfg->listen_only && g.foreign_rate)
+        return ESP_ERR_INVALID_STATE;
     return can_bus_setup((int)cfg->bitrate);
 }
 

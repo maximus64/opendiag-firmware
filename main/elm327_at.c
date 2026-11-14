@@ -697,6 +697,11 @@ static vif_bus_t elm327_bus(const elm327_ctx_t *e) {
  * @return 0, or -1 when the bus could not be opened, which now includes
  *         another session already holding it.
  */
+static volatile bool can_guard = true;
+
+void elm327_can_guard_set(bool on) { can_guard = on; }
+bool elm327_can_guard_get(void) { return can_guard; }
+
 static int elm327_set_protocol(elm327_ctx_t *e, int proto) {
     vif_bus_cfg_t cfg = {0};
     vif_bus_t bus = VIF_BUS_NONE;
@@ -765,6 +770,11 @@ static int elm327_set_protocol(elm327_ctx_t *e, int proto) {
 
     if (vif_bus_release_all(VIF_OWNER_LINK) != ESP_OK)
         return -1;
+
+    /* Leave alone a bus that runs at another bit rate: transmitting into it
+     * floods every node there with error frames (see bus_cfg_t). */
+    if (bus == VIF_BUS_CAN)
+        cfg.listen_first = can_guard;
 
     if (vif_bus_open(VIF_OWNER_LINK, bus, &cfg) != ESP_OK) {
         /* Startup failed; VIF may retain a claim until cleanup succeeds. */
