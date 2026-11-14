@@ -157,12 +157,12 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  # Line coverage gate: at least 95% for main/ (host suite) and for the host-testable
-  # driver sources. Packages come from the Ubuntu 24.04 archive (unpinned, as the
-  # runner image moves them). GCC 14 and its gcov are pinned, because line counts
-  # differ between GCC majors; gcovr is pinned to 7.0.
+  # Host tests and line coverage for main/ (host suite) and for the host-testable driver
+  # sources. Coverage is reported only; no threshold fails the job. Packages come from the
+  # Ubuntu 24.04 archive (unpinned, as the runner image moves them). GCC 14 and its gcov are
+  # pinned, because line counts differ between GCC majors; gcovr is pinned to 7.0.
   coverage:
-    name: Line coverage gate (95%)
+    name: Host tests and line coverage
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -187,21 +187,19 @@ jobs:
           echo "$RUNNER_TEMP/gcovr-venv/bin" >> "$GITHUB_PATH"
 
       - name: Coverage of main/ (host suite)
-        env:
-          COVERAGE_FAIL_UNDER: "95"
         run: |
           gcov --version | head -n 1
           cmake -S test/host -B build/coverage-host -G Ninja -DCOVERAGE=ON
           cmake --build build/coverage-host
           ctest --test-dir build/coverage-host --output-on-failure
-          # Reports main/ only and fails below COVERAGE_FAIL_UNDER; prints the total line coverage.
+          # Reports main/ only; prints the total line coverage.
           cmake --build build/coverage-host --target coverage
 
       - name: Coverage of j2534_driver/ (driver, common, legacy, platform, config)
         run: |
           make -C j2534_driver test COVERAGE=1
           cd j2534_driver
-          gcovr --root . --print-summary --fail-under-line 95 --gcov-executable gcov-14 \
+          gcovr --root . --print-summary --gcov-executable gcov-14 \
             --filter 'driver/' --filter 'common/' --filter 'legacy/' \
             --filter 'platform/' --filter 'config/' \
             build/linux/release

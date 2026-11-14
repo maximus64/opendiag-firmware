@@ -42,7 +42,7 @@ jobs:
       # The update page reads firmware/boards.json and firmware/<board>/. A release that predates
       # per-board ZIPs has only opendiag-firmware.zip. That image is OpenDIAG hardware v1: the v1.0.3
       # source has main/pinout.h and no boards/ directory, and the ZIP does not name a board. It is
-      # mapped to opendiag_hw_v1 only when the release has no per-board ZIP for that board.
+      # mapped to opendiag only when the release has no per-board ZIP for that board.
       # Each release ZIP's manifest.json is already in ESP Web Tools format, so it is unpacked as-is.
       - name: Add latest firmware release to the update page
         env:
@@ -63,7 +63,7 @@ jobs:
           fi
           for package in "${packages[@]}"; do
             if [[ $(basename "$package") == opendiag-firmware.zip ]]; then
-              board=opendiag_hw_v1
+              board=opendiag
             else
               board=$(basename "$package" .zip)
               board=${board#opendiag-firmware-}

@@ -23,7 +23,7 @@ set(FW_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../main)
 
 # Board pin map, the same selection as the firmware build:
 # -DOPENDIAG_BOARD=<name>. The default is the OpenDIAG hardware v1 board.
-set(OPENDIAG_BOARD "opendiag_hw_v1" CACHE STRING "Board pin map for the host build")
+set(OPENDIAG_BOARD "opendiag" CACHE STRING "Board pin map for the host build")
 set(BOARD_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../boards/${OPENDIAG_BOARD})
 if(NOT EXISTS "${BOARD_DIR}/pinout.h")
     message(FATAL_ERROR "Unknown board '${OPENDIAG_BOARD}': no boards/${OPENDIAG_BOARD}/pinout.h")

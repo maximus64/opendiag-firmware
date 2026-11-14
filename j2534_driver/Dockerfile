@@ -1,8 +1,10 @@
-# Two stages. The host tests run on Ubuntu 24.04 with GCC 14 and gcovr 7.0, the toolchain the CI
-# coverage gate uses. The Windows package stays on Debian Bookworm's MSVCRT MinGW toolchain, so the
-# DLLs are built with the same compiler and SDK as before. Keep the pins in both stages.
+# Two stages, both on the same Debian Bookworm base. The host tests run in the test stage with
+# Bookworm's default GCC 12 and gcovr 7.0; GCC 14 is not in Bookworm's repositories, so this stage
+# no longer matches the Ubuntu 24.04 GCC 14 toolchain the CI coverage job uses. The Windows package
+# stays on Bookworm's MSVCRT MinGW toolchain, so the DLLs are built with the same compiler and SDK as
+# before. Keep the base digest and the pins identical in both stages.
 
-FROM ubuntu:24.04@sha256:2198e4c65076e9cb0b3d695219df667c0e3b0072da64ca3c2648aca17dcecaf5 AS test
+FROM debian:bookworm-slim@sha256:5ae3c39ebd15e229dcedd5cee596b2497182493d41ff162e824ba13fc1b2b867 AS test
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -12,12 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-protobuf \
     python3-venv \
     protobuf-compiler \
-    gcc-14 \
-    g++-14 \
     && rm -rf /var/lib/apt/lists/* \
-    && update-alternatives --install /usr/bin/cc cc /usr/bin/gcc-14 140 \
-    && update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-14 140 \
-    && update-alternatives --install /usr/bin/gcov gcov /usr/bin/gcov-14 140 \
     && python3 -m venv --system-site-packages /opt/gcovr \
     && /opt/gcovr/bin/pip install --no-cache-dir gcovr==7.0
 
