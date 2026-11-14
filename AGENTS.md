@@ -54,6 +54,11 @@ Options: `-DHW_LS_OBD_9=ON` builds for boards with the pin 9 low-side rework (`O
 `-DCOVERAGE=ON` then `cmake --build test/host/build --target coverage` reports line coverage of
 `main/` only (llvm-cov or gcov).
 
+Line coverage of `main/` must be at least 95%. CI enforces it: the coverage job runs the target with
+`COVERAGE_FAIL_UNDER=95`, which fails below 95% on the GCC/gcovr path. Without that variable the target
+only reports. To check locally, run `COVERAGE_FAIL_UNDER=95 cmake --build test/host/build --target coverage`
+with GCC and gcovr. The Clang path does not apply the threshold, so it only reports.
+
 ### J2534 driver (from repo root)
 
 ```bash
@@ -65,8 +70,9 @@ docker compose run --rm --build j2534-driver   # Windows i686 MinGW DLLs + confi
 ```
 
 Requires GNU Make ≥ 4.3, Python 3 with `protobuf`, and `protoc` (`PYTHON=` to pick the
-interpreter). The driver's local build script enforces ≥ 95% line coverage over `driver/`,
-`common/`, `legacy/`, `platform/`, `config/`. Builds use `-Werror`. Windows builds target XP SP3
+interpreter). CI enforces ≥ 95% line coverage over `driver/`, `common/`, `legacy/`, `platform/`,
+`config/` with `gcovr --fail-under-line 95`. `make -C j2534_driver test COVERAGE=1` only reports, so check
+its total against 95% before you push. Builds use `-Werror`. Windows builds target XP SP3
 (`_WIN32_WINNT=0x0501`), checked by `tools/check_wincompat.py` against `tools/xp-imports.json`.
 
 ### Protocol / generated code

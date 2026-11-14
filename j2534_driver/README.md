@@ -23,7 +23,8 @@ make -C j2534_driver test COVERAGE=1
 ```
 
 The target is at least 95% total line coverage over the host-testable sources (`driver/`, `common/`,
-`legacy/`, `platform/`, `config/`). The local build script fails below that.
+`legacy/`, `platform/`, `config/`). CI enforces that threshold with `gcovr --fail-under-line 95`. The local
+command only reports the total, so compare it with 95% before you push.
 
 Build the Windows DLLs and configuration utility through Docker:
 
