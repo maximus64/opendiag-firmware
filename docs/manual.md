@@ -54,7 +54,7 @@ This manual covers setting up and using the OpenDIAG adapter.
 | --- | --- |
 | Hold for about 2 seconds | Opens the **Bluetooth pairing window** for 60 seconds (LED blinks blue) |
 | Keep holding, to about 10 seconds | **Forgets every paired phone**, and leaves the pairing window open |
-| Hold while plugging in USB (OpenDIAG) | Starts **firmware-download mode** (see [Updating the firmware](#updating-the-firmware)). On RejsaCAN v3.4 the PROG button does this instead |
+| Hold while plugging in USB | Starts **firmware-download mode** (see [Updating the firmware](#updating-the-firmware)) |
 
 ### Connectors
 
@@ -484,117 +484,4 @@ for the list of commands.
 | `mode <name>` | Switch mode, for example `mode slcan` |
 | `elmtrace on` / `elmtrace off` | Copy every ELM327 request (`ELMTRC: >`) and reply (`ELMTRC: <`) to this console, whether the link is on USB or Bluetooth. Closing the console turns it off |
 | `ctrl <command>` | Run a [control command](#control-commands) |
-| `canport obd` / `canport aux` | Choose where the next CAN open goes: the OBD socket (pins 6/14, default) or the AUX_CAN header J3 (pin 1 CAN-H, pin 2 CAN-L, pin 3 GND, no termination). `aux` is always listen-only, so a tapped bus is never driven. Only one CAN at a time. A reset goes back to `obd` |
-| `ble` | Show pairing status |
-| `ble pair` | Open the Bluetooth pairing window |
-| `ble forget` | Forget every paired phone |
-| `vif` | Show open buses, energised pins, and who holds each |
-| `vbatt` | Show the vehicle battery voltage |
-| `reboot` | Restart the adapter |
-| `reboot dl` | Restart into firmware-download mode |
-
-### Hardware and bring-up commands
-
-> [!CAUTION]
-> These commands drive the connector directly. Check which pins your vehicle uses before you
-> energise anything.
-
-| Command | Description |
-| --- | --- |
-| `hsset <pin> <mV>` | Drive high-side OBD pin 6, 9, 11, 12, 13 or 14 at 5000–20000 mV. `0` turns it off. |
-| `lsset <pin> <1\|0>` | Ground (`1`) or release (`0`) a low-side pin: 15 |
-| `pinoff` | Release every pin the shell holds |
-| `hsvsense` | Show the measured high-side output voltage |
-| `kline …`, `j1850 …`, `vpw …`, `can …` | Per-bus test tools. Run one with no arguments, or see `help`, for its options. |
-| `comm`, `heap`, `tasks` | Internal diagnostics |
-| `hscal`, `vbattcal`, `calset` | Factory voltage calibration. **Don't run these unless you're recalibrating the unit**, because they overwrite its stored calibration. |
-
-The adapter allows only one high-side pin and one low-side pin at a time, as SAE J2534
-specifies. It refuses a request that would break this rule, or one that would take over a pin
-someone else holds. Pin 15 is also refused while a K-Line session is using it as the L-Line.
-
----
-
-## Releasing pins and buses
-
-What the data link holds is released automatically:
-
-- when the client **disconnects** (closes the port or drops Bluetooth)
-- when the link **switches mode**
-- on **`RESET`**, the [control command](#control-commands)
-- on **`AT Z`** in ELM327 mode, or when the J2534 application closes the device
-
-What the **debug shell** holds stays on until you release it there with `pinoff` (or `hsset <pin>
-0` / `lsset <pin> 0`), or until you power-cycle the adapter.
-
-If the LED is pulsing amber and you don't know why, type `vif` in the shell to see who holds the
-pin.
-
----
-
-## Updating the firmware
-
-To update the firmware, go to **[the OpenDIAG firmware update page](update/index.html)**
-and follow the instructions there.
-
-### Updating manually
-
-If you'd rather flash the firmware yourself, each release publishes one ZIP per board on the
-[releases page](https://github.com/maximus64/opendiag-firmware/releases), named
-`opendiag-firmware-<board>.zip`. Download the ZIP for your board and unzip it. It holds the flash
-images, a `manifest.json` that lists the address for each one, and `SHA256SUMS`. Use the
-`manifest.json` from the same ZIP as the images you flash.
-
-1. Unplug the adapter from the vehicle.
-2. Put the board in firmware-download mode:
-   - **OpenDIAG:** hold the button while you plug in the USB cable, then release it. You can also
-     type `reboot dl` in the debug shell. The LED stays off, and the adapter appears as a single
-     **USB JTAG/serial debug unit** port.
-   - **RejsaCAN v3.4:** while holding the PROG button, plug in the USB cable. Still holding PROG,
-     press and release RESET, then release PROG. The board appears as a single
-     **USB JTAG/serial debug unit** port.
-3. Flash each image at the address `manifest.json` gives for it, with
-   [esptool](https://docs.espressif.com/projects/esptool/):
-
-   ```bash
-   esptool --chip esp32s3 -p /dev/ttyACM0 write-flash \
-       0x0 bootloader.bin 0x8000 partition-table.bin 0x10000 <app>.bin
-   ```
-
-   Replace `<app>.bin` with the application image named in your `manifest.json`. The file names and
-   addresses above are an example. Use the ones in your `manifest.json`, whose `parts` list each
-   image's path and address. From a source checkout, `idf.py -p /dev/ttyACM0 flash` does the same.
-
-4. Unplug and reconnect USB to start the new firmware.
-
-Updating keeps your paired phones and the unit's voltage calibration.
-
----
-
-## Troubleshooting
-
-| Symptom | What to check |
-| --- | --- |
-| Phone can't find **OpenDIAG** | A new or reset unit doesn't advertise until you open the pairing window. Hold the button for 2 s (LED blinks blue), then connect within 60 s. |
-| Phone used to connect, now can't | The phone and adapter no longer share a key. Remove the adapter from the phone's Bluetooth settings, hold the button for 10 s, and pair again. |
-| Phone connects but gets no answer | USB holds the data link. Close the program using the data port, or type `link ble` in the shell. |
-| App connects but says "unable to connect to ECU" / `NO DATA` | Is the ignition on? Try setting the protocol by hand with `AT SP`. |
-| App reports `?` after selecting a protocol | The bus is held by the debug shell. Run `ctrl BUS` or `vif` in the shell to check. |
-| **Save & Test** fails in `opendiag_config.exe` | Check you picked the **data** COM port, not the debug port, and that no other program has it open. |
-| SLCAN tool gets ELM327 replies | The link reverted when the port was last closed. Run `mode slcan` again before opening it. |
-| Connecting takes a long time on a K-Line vehicle | The automatic search tries every CAN protocol first. Set the protocol by hand, `AT SP 5` for KWP fast init or `AT SP 3` / `4` for a 5-baud init, to go straight to K-Line. |
-| LED pulsing amber unexpectedly | A pin is still energised. Type `vif` in the shell to see who holds it, then `pinoff` if it's the shell. |
-| Shell port prints but doesn't accept typing | Make sure you opened the **DEBUG** port, and that your terminal sends a carriage return (Enter). |
-| Nothing enumerates on USB | Try another cable (some are charge-only) and another USB port. |
-| Adapter restarts or disconnects when the engine starts | Type `version` in the shell. `reset: brownout` means cranking pulled the supply down (see [Power](#power)). Plug the adapter in, or reconnect your app, once the engine is running. Any other reason is worth reporting. |
-
----
-
-## Disclaimer and license
-
-OpenDIAG firmware is free software under the **GNU General Public License, version 3**. It is
-provided **as-is, without warranty of any kind**. Neither the authors nor contributors are liable
-for any damage arising from its use, including a bricked module, an immobilised vehicle, or repair
-costs. You are responsible for everything you send to a vehicle. See the repository
-[README](https://github.com/maximus64/opendiag-firmware/blob/main/README.md) and
-[LICENSE](https://github.com/maximus64/opendiag-firmware/blob/main/LICENSE) for the full terms.
+| `canport obd` / `canport aux` | Choose where the next CAN open goes: t
