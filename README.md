@@ -46,6 +46,24 @@ idf.py -p /dev/ttyACM1 monitor   # the console is the SECOND port
 
 The first port carries protocol traffic, not the console.
 
+### Boards
+
+Each board is a directory under `boards/` with a `pinout.h` that maps its pins, and a `board.json`
+that names it for the update page. The default is `opendiag`. Select another board at configure time:
+
+```bash
+idf.py -DOPENDIAG_BOARD=rejsacan_v34 build
+```
+
+The host test build takes the same option. To build every board and export one release ZIP per board
+through Docker, run the release builder from a full clone with submodules:
+
+```bash
+mkdir -p build/docker
+docker compose run --rm --build firmware            # every board under boards/
+docker compose run --rm --build firmware --board opendiag
+```
+
 Run test suite:
 
 ```bash
@@ -69,6 +87,10 @@ ports, and advertises over BLE as **OpenDIAG**.
 Both data links start on **ELM327** and go back to it when their client disconnects, so any
 existing ELM327 app works without being told anything.
 
+To change what a link boots into and returns to, save a default from the debug shell with
+`mode default <name>`, for example `mode default slcan`. `mode default elm327` restores the factory
+default. Only the shell can save a default. See [docs/manual.md](docs/manual.md) for details.
+
 
 ## Current status
 
@@ -79,14 +101,13 @@ Implemented and working:
 - ELM327 over USB CDC port 0 and BLE, independently on each
 - SLCAN (LAWICEL) on either link, for `slcand` and ECU reflashing
 - Switching a link between the two without dropping its bus or programming voltage
+- A saved default mode per link (`mode default <name>`), kept across power cycles
 - Board control: high-side/low-side drivers, boost converter, voltage sense, calibration
 
 Not yet implemented:
 
 - Protocols 10–12 (SAE J1939, USER1, USER2)
 - The second CAN transceiver
-- A persistent per-link default, so a bench unit has to be told `mode usb slcan` after each
-  power cycle
 
 Much of the ELM327 command set also remains unimplemented; `docs/at_commands.md` marks what is
 supported today.
