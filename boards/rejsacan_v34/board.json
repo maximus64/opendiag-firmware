@@ -1,6 +1,16 @@
 {
     "name": "RejsaCAN v3.4",
     "default": false,
+    "download_steps": [
+        {
+            "title": "Hold the PROG button",
+            "text": "While holding the PROG button, plug in the USB cable."
+        },
+        {
+            "title": "Press RESET",
+            "text": "While still holding PROG, press and release the RESET button. Then release PROG."
+        }
+    ],
     "maintainers": [
         {
             "name": "Matthew Hilton",

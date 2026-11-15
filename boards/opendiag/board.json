@@ -1,6 +1,17 @@
 {
     "name": "OpenDIAG",
     "default": true,
+    "download_steps": [
+        {
+            "title": "Hold the button",
+            "text": "Press and hold the button on the OpenDiag device — keep holding it through the next step."
+        },
+        {
+            "title": "Plug in the USB cable",
+            "text": "While still holding the button, connect OpenDiag to your computer's USB port. Release the button once it's plugged in."
+        }
+    ],
+    "finish_note": "When the update finishes, unplug OpenDiag and plug it back in normally.",
     "maintainers": [
         {
             "name": "Khoa Hoang",
