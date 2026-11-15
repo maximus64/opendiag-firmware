@@ -54,7 +54,7 @@ This manual covers setting up and using the OpenDIAG adapter.
 | --- | --- |
 | Hold for about 2 seconds | Opens the **Bluetooth pairing window** for 60 seconds (LED blinks blue) |
 | Keep holding, to about 10 seconds | **Forgets every paired phone**, and leaves the pairing window open |
-| Hold while plugging in USB | Starts **firmware-download mode** (see [Updating the firmware](#updating-the-firmware)) |
+| Hold while plugging in USB (OpenDIAG) | Starts **firmware-download mode** (see [Updating the firmware](#updating-the-firmware)). On RejsaCAN v3.4 the PROG button does this instead |
 
 ### Connectors
 
@@ -546,9 +546,13 @@ images, a `manifest.json` that lists the address for each one, and `SHA256SUMS`.
 `manifest.json` from the same ZIP as the images you flash.
 
 1. Unplug the adapter from the vehicle.
-2. Hold the button while you plug in the USB cable, then release it. You can also type
-   `reboot dl` in the debug shell. The LED stays off, and the adapter appears as a single
-   **USB JTAG/serial debug unit** port.
+2. Put the board in firmware-download mode:
+   - **OpenDIAG:** hold the button while you plug in the USB cable, then release it. You can also
+     type `reboot dl` in the debug shell. The LED stays off, and the adapter appears as a single
+     **USB JTAG/serial debug unit** port.
+   - **RejsaCAN v3.4:** while holding the PROG button, plug in the USB cable. Still holding PROG,
+     press and release RESET, then release PROG. The board appears as a single
+     **USB JTAG/serial debug unit** port.
 3. Flash each image at the address `manifest.json` gives for it, with
    [esptool](https://docs.espressif.com/projects/esptool/):
 
