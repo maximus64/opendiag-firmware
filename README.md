@@ -46,6 +46,31 @@ idf.py -p /dev/ttyACM1 monitor   # the console is the SECOND port
 
 The first port carries protocol traffic, not the console.
 
+### Build the firmware and updater website
+
+The combined build needs Docker with Compose, plus [Zensical](https://zensical.org/) installed in
+your Python environment:
+
+```bash
+python3 -m pip install zensical
+```
+
+Use that Python environment to run the build script:
+
+```bash
+python3 tools/build_site.py
+```
+
+The script builds every board in Docker, saves the firmware ZIPs under `build/docker/`, and creates
+the complete website—including the updater firmware and board list—under `build/github-site/`.
+Preview it locally with:
+
+```bash
+python3 -m http.server 8000 -d build/github-site
+```
+
+The updater is then available at <http://localhost:8000/update/> in desktop Chrome or Edge.
+
 Run test suite:
 
 ```bash

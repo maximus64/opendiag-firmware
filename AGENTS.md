@@ -6,9 +6,10 @@ Guidance for AI coding agents working in this repository.
 
 ESP32-S3 firmware (ESP-IDF v6.1, C11, FreeRTOS) for the OpenDIAG OBD-II adapter, plus a host-side
 J2534 pass-thru driver (`j2534_driver/`, C++11) that talks to the firmware over the same data link.
-User docs are MkDocs sources in `docs/` (`docs/at_commands.md` tracks which ELM327 commands are
-implemented; `docs/manual.md` documents shell commands and features, so update it alongside
-user-visible behaviour changes). Licence is GPL-3.0-only; source files carry an SPDX header.
+User docs are Zensical sources in `docs/`, configured by `mkdocs.yml` (`docs/at_commands.md` tracks
+which ELM327 commands are implemented; `docs/manual.md` documents shell commands and features, so
+update it alongside user-visible behaviour changes). Licence is GPL-3.0-only; source files carry an
+SPDX header.
 
 ## Commands
 

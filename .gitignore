@@ -14,6 +14,9 @@ __pycache__/
 # HTML documentation
 html_doc/
 
+# Zensical build cache
+.cache/
+
 managed_components/
 
 .DS_Store

@@ -1,0 +1,19 @@
+/* GitHub's [!CAUTION] alert becomes a "caution" admonition, which the theme has no style for. It
+   marks the commands that energise connector pins, so it takes the red "danger" look. */
+.md-typeset .admonition.caution {
+    border-color: #ff1744;
+}
+
+.md-typeset .admonition.caution:focus-within {
+    box-shadow: 0 0 0 0.2rem #ff17441a;
+}
+
+.md-typeset .caution > .admonition-title {
+    background-color: #ff17441a;
+}
+
+.md-typeset .caution > .admonition-title::before {
+    background-color: #ff1744;
+    -webkit-mask-image: var(--md-admonition-icon--danger);
+    mask-image: var(--md-admonition-icon--danger);
+}

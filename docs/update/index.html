@@ -152,7 +152,7 @@
             color: var(--ink);
             background: transparent;
             border: none;
-            padding: 0;
+            padding: 0 6px 0 0;
             cursor: pointer;
         }
 
@@ -294,21 +294,71 @@
             color: var(--ink-dim);
         }
 
+        /* Flashing a local folder is for the few who need something other than the latest release,
+           so it is collapsed and kept out of the steps. */
         .local {
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
+            border: 1px solid var(--card-edge);
+            border-radius: 14px;
+            padding: 0 26px;
             font-size: 14px;
             color: var(--ink-dim);
         }
 
+        .local summary {
+            padding: 14px 0;
+            font-size: 14.5px;
+            cursor: pointer;
+            transition: color 0.12s ease;
+        }
+
+        .local summary:hover,
+        .local[open] summary {
+            color: var(--ink);
+        }
+
+        .local summary:focus-visible {
+            outline: 2px solid var(--ink);
+            outline-offset: 3px;
+        }
+
+        .local-body {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            padding-bottom: 20px;
+        }
+
         .local p { margin: 0; }
 
-        .local input,
-        .local select {
+        .local input {
+            max-width: 100%;
             font: inherit;
             color: var(--ink);
         }
+
+        .local input::file-selector-button {
+            margin-right: 12px;
+            padding: 6px 16px;
+            border: 1px solid var(--card-edge);
+            border-radius: 999px;
+            background: transparent;
+            color: var(--ink);
+            font: inherit;
+            cursor: pointer;
+            transition: border-color 0.12s ease, color 0.12s ease;
+        }
+
+        .local input:hover::file-selector-button {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        .local input:focus-visible {
+            outline: 2px solid var(--ink);
+            outline-offset: 3px;
+        }
+
+        .warn[hidden] { display: none; }
 
         .warn {
             margin: 0;
@@ -360,6 +410,7 @@
             .logo-stage { height: 170px; }
             .brand-logo { top: -48px; width: 270px; height: 270px; }
             .card { padding: 4px 18px; }
+            .local { padding: 0 18px; }
             ol.steps > li { padding-left: 44px; }
             .install button { width: 100%; }
         }
@@ -387,6 +438,9 @@
             </div>
         </header>
 
+        <p class="warn" id="browser-warning">Requires <b>desktop Chrome or Edge</b>. Mobile browsers, Safari, and
+            Firefox cannot access USB serial devices.</p>
+
         <div class="card">
             <ol class="steps" id="steps">
                 <li id="start-step">
@@ -397,12 +451,6 @@
                         <li>If it isn't listed, repeat steps 1 and 2.</li>
                     </ul>
                     <div class="install">
-					    <div class="local">
-                            <label for="local-folder">Or flash firmware you've already downloaded. Choose the unzipped
-                                release folder, the one that holds <code>manifest.json</code>:</label>
-                            <input type="file" id="local-folder" webkitdirectory>
-                            <p id="local-status" class="note" aria-live="polite"></p>
-                        </div>
                         <esp-web-install-button hidden>
                             <button slot="activate">Begin Firmware Update</button>
                             <p slot="unsupported" class="warn">Your browser can't talk to serial devices. Use
@@ -416,8 +464,16 @@
             </ol>
         </div>
 
-        <p class="warn">Requires <b>desktop Chrome or Edge</b>. Mobile browsers, Safari, and Firefox cannot access USB
-            serial devices.</p>
+        <details class="local" id="local">
+            <summary>Advanced: flash a local firmware folder</summary>
+            <div class="local-body">
+                <label for="local-folder">Choose an unzipped release folder, the one that holds
+                    <code>manifest.json</code>. <b>Begin Firmware Update</b> then flashes it instead of the latest
+                    release.</label>
+                <input type="file" id="local-folder" webkitdirectory>
+                <p id="local-status" class="note" aria-live="polite"></p>
+            </div>
+        </details>
 
         <footer>
             <p>OpenDiag is open source — grab the code:</p>
@@ -445,6 +501,10 @@
         const finishNote = document.getElementById("finish-note");
         const boardInfo = document.getElementById("board-info");
         let boardList = [];
+
+        // The requirement is shown before the steps, so nobody on a browser that can't flash works
+        // through them first. A browser that has Web Serial does not need to be told.
+        document.getElementById("browser-warning").hidden = "serial" in navigator;
         const localUrls = [];
         let versionRequest = 0;
 
@@ -584,8 +644,10 @@
                 resetManifest();
                 showVersion(boardSelect.value);
             } catch {
-                // No board list is published (for example, a local preview). Only a local folder can be flashed.
+                // No board list is published (for example, a local preview). Only a local folder can be
+                // flashed, so that section is opened.
                 versionText.textContent = "unavailable";
+                document.getElementById("local").open = true;
             }
         }
 

@@ -3,7 +3,11 @@ site_url: https://maximus64.github.io/opendiag-firmware/
 repo_url: https://github.com/maximus64/opendiag-firmware
 edit_uri: edit/main/docs/
 
+# Read by Zensical, which builds a Material for MkDocs project from its mkdocs.yml unchanged.
 docs_dir: docs
+# Zensical takes the output directory from here only. docs.yml and tools/build_site.py add the
+# firmware under it.
+site_dir: build/github-site
 nav:
   - Home: index.md
   - User manual: manual.md
@@ -12,6 +16,7 @@ nav:
 
 theme:
   name: material
+  variant: classic         # the Material look; Zensical's default header hides the white logo
   logo: assets/logo.svg
   favicon: assets/logo.svg
   palette:
@@ -27,6 +32,9 @@ theme:
     - toc.follow
     - search.highlight
     - content.code.copy
+
+extra_css:
+  - assets/extra.css
 
 plugins:
   - search

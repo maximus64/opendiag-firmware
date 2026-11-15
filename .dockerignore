@@ -7,6 +7,7 @@ sdkconfig
 sdkconfig.old
 managed_components
 **/__pycache__
+.cache
 **/.venv
 .venv
 private

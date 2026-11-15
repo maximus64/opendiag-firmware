@@ -3,10 +3,10 @@ name: Docs
 on:
   push:
     branches: [main]
-    paths: ["docs/**", "mkdocs.yml", ".github/workflows/docs.yml"]
+    paths: ["docs/**", "mkdocs.yml", "tools/site_board_list.py", ".github/workflows/docs.yml"]
   pull_request:
     branches: [main, dev]
-    paths: ["docs/**", "mkdocs.yml", ".github/workflows/docs.yml"]
+    paths: ["docs/**", "mkdocs.yml", "tools/site_board_list.py", ".github/workflows/docs.yml"]
   # Also dispatched by firmware.yml after a release, so the update page serves the new firmware.
   workflow_dispatch:
 
@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build MkDocs site
+    name: Build docs site
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -31,13 +31,14 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install MkDocs
-        # MkDocs 2.0 drops the plugin and theme system Material depends on.
-        run: pip install "mkdocs<2" mkdocs-material mkdocs-github-admonitions-plugin
+      - name: Install Zensical
+        # Zensical is pre-1.0, so a new minor version must not reach the published site untested.
+        run: pip install "zensical~=0.1.1"
 
       # --strict turns broken links and missing files into failures, so a PR catches them.
+      # The site is written to site_dir from mkdocs.yml: build/github-site.
       - name: Build
-        run: mkdocs build --strict -d site
+        run: zensical build --strict
 
       # The update page reads firmware/boards.json and firmware/<board>/. A release that predates
       # per-board ZIPs has only opendiag-firmware.zip. That image is OpenDIAG hardware v1: the v1.0.3
@@ -68,74 +69,19 @@ jobs:
               board=$(basename "$package" .zip)
               board=${board#opendiag-firmware-}
             fi
-            mkdir -p "site/update/firmware/$board"
-            unzip "$package" -d "site/update/firmware/$board"
-            (cd "site/update/firmware/$board" && sha256sum --check SHA256SUMS)
+            mkdir -p "build/github-site/update/firmware/$board"
+            unzip "$package" -d "build/github-site/update/firmware/$board"
+            (cd "build/github-site/update/firmware/$board" && sha256sum --check SHA256SUMS)
           done
 
-      # boards.json is the board list the update page offers. A release ZIP for a board that is not
-      # in boards/ fails the build. A board with no ZIP in the latest release is left off the list,
-      # but the default board must have one. "default" comes from each board.json. The default entry
-      # is listed first, then the rest in board id order. The update page starts on the first entry.
-      # Each listed board must give download_steps: the two steps that put it in firmware-download mode.
+      # boards.json is the board list the update page offers. A board with no ZIP in the latest
+      # release is left off the list. tools/build_site.py writes it the same way for a local build.
       - name: Write the update page board list
-        run: |
-          python3 -I - site/update/firmware <<'PY'
-          import json
-          import sys
-          from pathlib import Path
-          firmware = Path(sys.argv[1])
-          published = {path.name for path in firmware.iterdir() if path.is_dir()}
-          boards = {
-              path.parent.name: json.loads(path.read_text())
-              for path in Path("boards").glob("*/board.json")
-          }
-          unknown = sorted(published - set(boards))
-          if unknown:
-              raise SystemExit(f"Release ZIPs without a board in boards/: {unknown}")
-          listed = {board: info for board, info in boards.items() if board in published}
-          if not listed:
-              raise SystemExit("The latest release has no ZIP for any board in boards/")
-          defaults = sorted(board for board, info in boards.items() if info["default"] is True)
-          if len(defaults) != 1:
-              raise SystemExit(f"Exactly one board.json must have \"default\": true, found {defaults}")
-          if defaults[0] not in listed:
-              raise SystemExit(f"The default board {defaults[0]} has no ZIP in the latest release")
-          def download_steps(board, info):
-              steps = info.get("download_steps")
-              if not isinstance(steps, list) or len(steps) != 2 or not all(
-                  isinstance(step, dict) and isinstance(step.get("title"), str) and isinstance(step.get("text"), str)
-                  for step in steps
-              ):
-                  raise SystemExit(f"{board}/board.json needs download_steps: two objects with title and text")
-              return steps
-          def finish_note(board, info):
-              note = info.get("finish_note")
-              if note is not None and not isinstance(note, str):
-                  raise SystemExit(f"{board}/board.json finish_note must be a string")
-              return note
-          def info_url(board, info):
-              url = info.get("info_url")
-              if url is not None and not (isinstance(url, str) and url.startswith("https://")):
-                  raise SystemExit(f"{board}/board.json info_url must be an https:// URL")
-              return url
-          entries = [
-              {
-                  "name": info["name"],
-                  "default": info["default"],
-                  "manifest": f"firmware/{board}/manifest.json",
-                  "download_steps": download_steps(board, info),
-                  "finish_note": finish_note(board, info),
-                  "info_url": info_url(board, info),
-              }
-              for board, info in sorted(listed.items(), key=lambda item: (not item[1]["default"], item[0]))
-          ]
-          (firmware / "boards.json").write_text(json.dumps(entries, indent=2) + "\n")
-          PY
+        run: python3 -I tools/site_board_list.py build/github-site/update/firmware
 
       - uses: actions/upload-pages-artifact@v4
         with:
-          path: site
+          path: build/github-site
 
   deploy:
     name: Deploy to GitHub Pages
