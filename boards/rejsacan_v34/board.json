@@ -1,4 +1,11 @@
 {
     "name": "RejsaCAN v3.4",
-    "default": false
+    "default": false,
+    "maintainers": [
+        {
+            "name": "Matthew Hilton",
+            "github": "matt2005",
+            "email": "matthilton2005@gmail.com"
+        }
+    ]
 }

@@ -28,7 +28,8 @@ jobs:
           persist-credentials: false
 
       # A board is a boards/<id>/ directory with a pinout.h. Each one needs a board.json with a
-      # string "name" and a boolean "default", and exactly one board may be the default.
+      # string "name" and a boolean "default", and exactly one board may be the default. The optional
+      # "maintainers" list must match the board's line in .github/CODEOWNERS.
       - name: Read the board matrix
         id: matrix
         run: |
@@ -63,6 +64,34 @@ jobs:
               raise SystemExit(
                   f'Exactly one board.json may have "default": true, found {len(defaults)}: {defaults}'
               )
+
+          # "maintainers" may be empty or absent (a board nobody maintains any more), but then the
+          # board must have no CODEOWNERS line either, so review requests never go to a stale owner.
+          owners = {}
+          for line in Path(".github/CODEOWNERS").read_text().splitlines():
+              fields = line.split("#", 1)[0].split()
+              if not fields:
+                  continue
+              parts = fields[0].strip("/").split("/")
+              if len(parts) == 2 and parts[0] == "boards":
+                  owners[parts[1]] = {owner.lower() for owner in fields[1:]}
+          unknown = sorted(set(owners) - set(boards))
+          if unknown:
+              raise SystemExit(f".github/CODEOWNERS lists boards that do not exist: {unknown}")
+          for board in boards:
+              info = json.loads(Path("boards", board, "board.json").read_text())
+              maintainers = info.get("maintainers", [])
+              if not isinstance(maintainers, list) or not all(
+                  isinstance(m, dict) and isinstance(m.get("github"), str) and m["github"]
+                  for m in maintainers
+              ):
+                  raise SystemExit(f'boards/{board}/board.json "maintainers" needs entries with a "github" string')
+              expected = {"@" + m["github"].lower() for m in maintainers}
+              if owners.get(board, set()) != expected:
+                  raise SystemExit(
+                      f"boards/{board}: .github/CODEOWNERS has {sorted(owners.get(board, set()))} "
+                      f"but board.json maintainers give {sorted(expected)}"
+                  )
 
           matrix = json.dumps({"board": boards})
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:

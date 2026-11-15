@@ -1,4 +1,11 @@
 {
     "name": "OpenDIAG",
-    "default": true
+    "default": true,
+    "maintainers": [
+        {
+            "name": "Khoa Hoang",
+            "github": "maximus64",
+            "email": "admin@khoahoang.com"
+        }
+    ]
 }

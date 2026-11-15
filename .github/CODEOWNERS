@@ -1,0 +1,3 @@
+# Keep in step with "maintainers" in each boards/<id>/board.json (CI checks that file).
+/boards/opendiag/ @maximus64
+/boards/rejsacan_v34/ @matt2005
