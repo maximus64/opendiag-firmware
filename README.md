@@ -46,13 +46,6 @@ idf.py -p /dev/ttyACM1 monitor   # the console is the SECOND port
 
 The first port carries protocol traffic, not the console.
 
-To test the firmware update page locally, stage the board ZIPs from a Docker release build and serve
-the page on 127.0.0.1. Nothing is flashed:
-
-```bash
-bash tools/updater/serve-update.sh      # then open http://127.0.0.1:8000/update/
-```
-
 Run test suite:
 
 ```bash
