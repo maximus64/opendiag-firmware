@@ -114,6 +114,11 @@ jobs:
               if note is not None and not isinstance(note, str):
                   raise SystemExit(f"{board}/board.json finish_note must be a string")
               return note
+          def info_url(board, info):
+              url = info.get("info_url")
+              if url is not None and not (isinstance(url, str) and url.startswith("https://")):
+                  raise SystemExit(f"{board}/board.json info_url must be an https:// URL")
+              return url
           entries = [
               {
                   "name": info["name"],
@@ -121,6 +126,7 @@ jobs:
                   "manifest": f"firmware/{board}/manifest.json",
                   "download_steps": download_steps(board, info),
                   "finish_note": finish_note(board, info),
+                  "info_url": info_url(board, info),
               }
               for board, info in sorted(listed.items(), key=lambda item: (not item[1]["default"], item[0]))
           ]

@@ -166,6 +166,19 @@
             outline-offset: 3px;
         }
 
+        .board-info {
+            padding-left: 10px;
+            border-left: 1px solid var(--card-edge);
+            color: var(--ink-dim);
+            text-decoration: none;
+            transition: color 0.12s ease;
+        }
+
+        .board-info:hover,
+        .board-info:focus-visible {
+            color: var(--accent);
+        }
+
         /* ---------- steps ---------- */
 
         .card {
@@ -370,6 +383,7 @@
             <div class="version board-picker" id="board-row" hidden>
                 <label class="label" for="board">Board</label>
                 <select id="board"></select>
+                <a class="board-info" id="board-info" target="_blank" rel="noopener" hidden>Board info</a>
             </div>
         </header>
 
@@ -429,6 +443,7 @@
         const steps = document.getElementById("steps");
         const startStep = document.getElementById("start-step");
         const finishNote = document.getElementById("finish-note");
+        const boardInfo = document.getElementById("board-info");
         let boardList = [];
         const localUrls = [];
         let versionRequest = 0;
@@ -529,10 +544,13 @@
             }
         }
 
-        // The download-mode steps and the note after a flash differ between boards, so each board's
-        // boards.json entry gives them. The steps go above the device-picker step, which is the same
-        // for every board. The note is hidden for a board that gives none.
-        function renderSteps(board) {
+        // The download-mode steps, the note after a flash, and the board's info link differ between
+        // boards, so each board's boards.json entry gives them. The steps go above the device-picker
+        // step, which is the same for every board. The note and the link are hidden for a board that
+        // gives none.
+        function renderBoard(board) {
+            boardInfo.href = board?.info_url ?? "";
+            boardInfo.hidden = !board?.info_url;
             finishNote.textContent = board?.finish_note ?? "";
             finishNote.hidden = !board?.finish_note;
             for (const item of steps.querySelectorAll("li[data-download]")) item.remove();
@@ -561,7 +579,7 @@
                 // Start on the board marked "default". Fall back to the first entry only if none is marked.
                 const defaultIndex = boards.findIndex((board) => board.default === true);
                 boardSelect.selectedIndex = defaultIndex >= 0 ? defaultIndex : 0;
-                renderSteps(boardList[boardSelect.selectedIndex]);
+                renderBoard(boardList[boardSelect.selectedIndex]);
                 boardRow.hidden = false;
                 resetManifest();
                 showVersion(boardSelect.value);
@@ -575,7 +593,7 @@
             localPicker.value = "";
             localStatus.textContent = "";
             resetManifest();
-            renderSteps(boardList[boardSelect.selectedIndex]);
+            renderBoard(boardList[boardSelect.selectedIndex]);
             showVersion(boardSelect.value);
         });
         localPicker.addEventListener("change", useLocalFolder);

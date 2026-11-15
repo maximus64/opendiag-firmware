@@ -12,6 +12,7 @@
         }
     ],
     "finish_note": "When the update finishes, unplug OpenDiag and plug it back in normally.",
+    "info_url": "https://github.com/maximus64/opendiag-hardware",
     "maintainers": [
         {
             "name": "Khoa Hoang",

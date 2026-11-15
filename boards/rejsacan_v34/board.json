@@ -11,6 +11,7 @@
             "text": "While still holding PROG, press and release the RESET button. Then release PROG."
         }
     ],
+    "info_url": "https://github.com/MagnusThome/RejsaCAN-ESP32",
     "maintainers": [
         {
             "name": "Matthew Hilton",
