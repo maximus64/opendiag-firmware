@@ -77,6 +77,7 @@ jobs:
       # in boards/ fails the build. A board with no ZIP in the latest release is left off the list,
       # but the default board must have one. "default" comes from each board.json. The default entry
       # is listed first, then the rest in board id order. The update page starts on the first entry.
+      # Each listed board must give download_steps: the two steps that put it in firmware-download mode.
       - name: Write the update page board list
         run: |
           python3 -I - site/update/firmware <<'PY'
@@ -100,11 +101,32 @@ jobs:
               raise SystemExit(f"Exactly one board.json must have \"default\": true, found {defaults}")
           if defaults[0] not in listed:
               raise SystemExit(f"The default board {defaults[0]} has no ZIP in the latest release")
+          def download_steps(board, info):
+              steps = info.get("download_steps")
+              if not isinstance(steps, list) or len(steps) != 2 or not all(
+                  isinstance(step, dict) and isinstance(step.get("title"), str) and isinstance(step.get("text"), str)
+                  for step in steps
+              ):
+                  raise SystemExit(f"{board}/board.json needs download_steps: two objects with title and text")
+              return steps
+          def finish_note(board, info):
+              note = info.get("finish_note")
+              if note is not None and not isinstance(note, str):
+                  raise SystemExit(f"{board}/board.json finish_note must be a string")
+              return note
+          def info_url(board, info):
+              url = info.get("info_url")
+              if url is not None and not (isinstance(url, str) and url.startswith("https://")):
+                  raise SystemExit(f"{board}/board.json info_url must be an https:// URL")
+              return url
           entries = [
               {
                   "name": info["name"],
                   "default": info["default"],
                   "manifest": f"firmware/{board}/manifest.json",
+                  "download_steps": download_steps(board, info),
+                  "finish_note": finish_note(board, info),
+                  "info_url": info_url(board, info),
               }
               for board, info in sorted(listed.items(), key=lambda item: (not item[1]["default"], item[0]))
           ]

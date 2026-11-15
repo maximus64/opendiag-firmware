@@ -166,6 +166,19 @@
             outline-offset: 3px;
         }
 
+        .board-info {
+            padding-left: 10px;
+            border-left: 1px solid var(--card-edge);
+            color: var(--ink-dim);
+            text-decoration: none;
+            transition: color 0.12s ease;
+        }
+
+        .board-info:hover,
+        .board-info:focus-visible {
+            color: var(--accent);
+        }
+
         /* ---------- steps ---------- */
 
         .card {
@@ -370,26 +383,18 @@
             <div class="version board-picker" id="board-row" hidden>
                 <label class="label" for="board">Board</label>
                 <select id="board"></select>
+                <a class="board-info" id="board-info" target="_blank" rel="noopener" hidden>Board info</a>
             </div>
         </header>
 
         <div class="card">
-            <ol class="steps">
-                <li>
-                    <h2>Hold the button</h2>
-                    <p>Press and hold the button on the OpenDiag device — keep holding it through the next step.</p>
-                </li>
-                <li>
-                    <h2>Plug in the USB cable</h2>
-                    <p>While still holding the button, connect OpenDiag to your computer's USB port. Release the button
-                        once it's plugged in.</p>
-                </li>
-                <li>
+            <ol class="steps" id="steps">
+                <li id="start-step">
                     <h2>Start the update</h2>
                     <p>Your browser will ask you to pick a device:</p>
                     <ul>
                         <li>Select the one called <b>"USB JTAG/serial debug unit"</b>.</li>
-                        <li>If it isn't listed, unplug the device and repeat steps 1 and 2.</li>
+                        <li>If it isn't listed, repeat steps 1 and 2.</li>
                     </ul>
                     <div class="install">
 					    <div class="local">
@@ -405,7 +410,7 @@
                             <p slot="not-allowed" class="warn">This page must be served over HTTPS (or from
                                 <code>localhost</code>) to flash firmware.</p>
                         </esp-web-install-button>
-                        <p class="note">When the update finishes, unplug OpenDiag and plug it back in normally.</p>
+                        <p class="note" id="finish-note" hidden></p>
                     </div>
                 </li>
             </ol>
@@ -435,6 +440,11 @@
         const localPicker = document.getElementById("local-folder");
         const localStatus = document.getElementById("local-status");
         const versionText = document.getElementById("fw-version");
+        const steps = document.getElementById("steps");
+        const startStep = document.getElementById("start-step");
+        const finishNote = document.getElementById("finish-note");
+        const boardInfo = document.getElementById("board-info");
+        let boardList = [];
         const localUrls = [];
         let versionRequest = 0;
 
@@ -534,18 +544,42 @@
             }
         }
 
+        // The download-mode steps, the note after a flash, and the board's info link differ between
+        // boards, so each board's boards.json entry gives them. The steps go above the device-picker
+        // step, which is the same for every board. The note and the link are hidden for a board that
+        // gives none.
+        function renderBoard(board) {
+            boardInfo.href = board?.info_url ?? "";
+            boardInfo.hidden = !board?.info_url;
+            finishNote.textContent = board?.finish_note ?? "";
+            finishNote.hidden = !board?.finish_note;
+            for (const item of steps.querySelectorAll("li[data-download]")) item.remove();
+            for (const { title, text } of board?.download_steps ?? []) {
+                const item = document.createElement("li");
+                item.dataset.download = "";
+                const heading = document.createElement("h2");
+                heading.textContent = title;
+                const body = document.createElement("p");
+                body.textContent = text;
+                item.append(heading, body);
+                steps.insertBefore(item, startStep);
+            }
+        }
+
         async function loadBoards() {
             try {
                 const response = await fetch("firmware/boards.json", { cache: "no-store" });
                 if (!response.ok) throw new Error("no board list");
                 const boards = await response.json();
                 if (!Array.isArray(boards) || !boards.length) throw new Error("empty board list");
+                boardList = boards;
                 for (const board of boards) {
                     boardSelect.add(new Option(board.name, board.manifest));
                 }
                 // Start on the board marked "default". Fall back to the first entry only if none is marked.
                 const defaultIndex = boards.findIndex((board) => board.default === true);
                 boardSelect.selectedIndex = defaultIndex >= 0 ? defaultIndex : 0;
+                renderBoard(boardList[boardSelect.selectedIndex]);
                 boardRow.hidden = false;
                 resetManifest();
                 showVersion(boardSelect.value);
@@ -559,6 +593,7 @@
             localPicker.value = "";
             localStatus.textContent = "";
             resetManifest();
+            renderBoard(boardList[boardSelect.selectedIndex]);
             showVersion(boardSelect.value);
         });
         localPicker.addEventListener("change", useLocalFolder);
