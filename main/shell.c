@@ -20,6 +20,7 @@
 #include "j1850_pwm.h"
 #include "j1850_vpw.h"
 #include "kline.h"
+#include "board_features.h"
 #include "link.h"
 #include "slcan.h"
 #include "soc/rtc_cntl_reg.h"
@@ -791,6 +792,7 @@ static void bus_set_param(vif_bus_t bus, const char *name, const char *value) {
     }
 }
 
+#if OPENDIAG_HAS_KLINE
 /** @brief Print what the last initialisation established. */
 static void kline_print_link(void) {
     bus_link_t l;
@@ -970,7 +972,9 @@ static void kline_command(int argc, char **argv) {
 
     shell_bus_command(VIF_BUS_KLINE, "kline", argc, argv);
 }
+#endif /* OPENDIAG_HAS_KLINE */
 
+#if OPENDIAG_HAS_J1850
 /**
  * @brief Print the counters only J1850 PWM has.
  *
@@ -1258,6 +1262,7 @@ static void j1850_vpw_command(int argc, char **argv) {
 
     shell_bus_command(VIF_BUS_J1850_VPW, "vpw", argc, argv);
 }
+#endif /* OPENDIAG_HAS_J1850 */
 
 /**
  * @brief Command handler for 'can'
@@ -1473,9 +1478,16 @@ static void canport_command(int argc, char **argv) {
         printf("Usage: canport [obd|aux]\n");
         return;
     }
-    if (argc == 2 && can_bus_use_aux(aux) != ESP_OK) {
-        printf("canport: close the CAN bus first\n");
-        return;
+    if (argc == 2) {
+        esp_err_t err = can_bus_use_aux(aux);
+        if (err == ESP_ERR_NOT_SUPPORTED) {
+            printf("canport: this board has no AUX_CAN header\n");
+            return;
+        }
+        if (err != ESP_OK) {
+            printf("canport: close the CAN bus first\n");
+            return;
+        }
     }
     printf("canport: %s\n", can_bus_aux() ? "aux (J3, listen-only)"
                                           : "obd (pins 6/14)");
@@ -1519,16 +1531,20 @@ const shell_command_t commands[] = {
     {"calset", calset_command,
      "Write calibration constants. Usage: calset <field> <value>|all <value> "
      "..."},
+#if OPENDIAG_HAS_KLINE
     {"kline", kline_command,
      "K-Line. Usage: kline <hex>|stop|stats|clear|link|close|cfg [<name> "
      "<value>]"
      "|init [slow|fast|none] [addr]|wm <hex>|bench <rounds> [hex]"},
+#endif
+#if OPENDIAG_HAS_J1850
     {"j1850", j1850_command,
      "J1850 PWM. Usage: j1850 <hex>|stop|stats|clear|cfg [<name> <value>]|dump "
      "[tx]|retries <n>|ifr <0|1>|dup <ms>"},
     {"vpw", j1850_vpw_command,
      "J1850 VPW. Usage: vpw <hex>|stop|stats|clear|cfg [<name> <value>]|dump "
      "[tx]|retries <n>|dup <ms>|collide <hex>|arbfault <n>"},
+#endif
     {"can", can_command,
      "CAN. Usage: can [cycles] - bring up/tear down loop; can stats - "
      "controller counters"},

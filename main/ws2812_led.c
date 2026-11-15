@@ -7,6 +7,9 @@
 #include "esp_log.h"
 #include "driver/spi_master.h"
 #include "pinout.h"
+#include "board_features.h"
+
+#if OPENDIAG_HAS_WS2812_LED
 
 /*
  * This value scales the brightness of all colors to prevent the LED from
@@ -192,3 +195,12 @@ void ws2812_led_set_state(led_state_t new_state) {
 
     xQueueSend(led_state_queue, &new_state, 0);
 }
+
+#else /* OPENDIAG_HAS_WS2812_LED */
+
+/* This board has no WS2812 LED: deliberate no-ops, no GPIO or peripheral use. */
+void ws2812_led_init(void) {}
+
+void ws2812_led_set_state(led_state_t new_state) { (void)new_state; }
+
+#endif /* OPENDIAG_HAS_WS2812_LED */

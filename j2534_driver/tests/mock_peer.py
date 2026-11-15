@@ -79,9 +79,10 @@ class Peer:
         name = request.WhichOneof("command")
         response = pb.Response()
         if name == "capabilities":
+            # 260 is the firmware's BUS_INIT_MSG_MAX, the largest fast-init request it takes.
             response.capabilities.CopyFrom(pb.Capabilities(
                 wire_version=3, api_version=0x500, fragment_bytes=self.fragment_bytes,
-                rpc_bytes=4608))
+                rpc_bytes=4608, fast_init_max_data=260))
         elif name == "open":
             self.queue.clear()
             response.id = 1
@@ -137,6 +138,11 @@ class Peer:
             response.text = "OpenDIAG deterministic test peer"
         elif name == "voltage" and request.voltage.pin == 16:
             response.status = 0x13
+        elif name == "fast_init":
+            # Echoes the request back on the K-line protocol (ISO 9141). A request with no data gets no reply.
+            fast = request.fast_init
+            if fast.data and not fast.no_response:
+                response.message.CopyFrom(pb.Message(protocol=3, data=fast.data))
         elif name == "ioctl":
             io = request.ioctl
             if io.id in (1, 2):
@@ -144,7 +150,7 @@ class Peer:
                     if value.parameter == 0xffff:
                         response.status = 0x1e
                         break
-                    if 0xff01 <= value.parameter <= 0xff07:
+                    if 0xff01 <= value.parameter <= 0xff09:
                         self.fault = value.parameter
                     if 0xfe01 <= value.parameter <= 0xfe04:
                         self.select_fault = value.parameter
@@ -219,6 +225,13 @@ class Peer:
                 frame = packet(op, sequence, 128, 0, bytes(193))
             elif fault == 0xff05:
                 continue
+            elif fault == 0xff08:
+                # Field 1 with wire type 7, which protobuf never defines. The frame is well formed, but the
+                # payload cannot be decoded.
+                frame = packet(op, sequence, 128, 0, b"\x0f")
+            elif fault == 0xff09:
+                # A continuation fragment with no data, which the driver must refuse.
+                frame = packet(op, sequence, 129, 0, b"")
             # Deliberately split headers and payloads to exercise exact-read loops.
             connection.sendall(frame[:3])
             connection.sendall(frame[3:11])

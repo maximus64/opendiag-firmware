@@ -40,6 +40,8 @@
 #include "kline.h"
 #include "pinout.h"
 #include "utility.h"
+#include "board_features.h"
+#if OPENDIAG_HAS_KLINE
 
 /* The claim holder's ear on this bus; see bus_listener_t. */
 static bus_listener_t listener;
@@ -2428,3 +2430,4 @@ const bus_ops_t kline_bus_ops = {
     .reset_stats = kline_reset_stats,
     .listener = &listener,
 };
+#endif /* OPENDIAG_HAS_KLINE */

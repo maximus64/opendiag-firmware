@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #pragma once
 
+#include "board_features.h"
+
 /* CAN0 Transceiver */
 #define PIN_CAN0_TX 4
 #define PIN_CAN0_RX 5

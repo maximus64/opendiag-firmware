@@ -1,6 +1,7 @@
 # mkdir -p build/docker
 # docker compose run --rm --build firmware
-# Add --verify after firmware to build twice and compare the ZIPs.
+# Add --verify after firmware to build every board twice and compare the ZIPs.
+# Add --board <id> after firmware to build and export only that board.
 services:
   j2534-driver:
     build:

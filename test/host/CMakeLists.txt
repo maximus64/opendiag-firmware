@@ -21,6 +21,14 @@ enable_testing()
 
 set(FW_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../main)
 
+# Board pin map, the same selection as the firmware build:
+# -DOPENDIAG_BOARD=<name>. The default is the OpenDIAG hardware v1 board.
+set(OPENDIAG_BOARD "opendiag" CACHE STRING "Board pin map for the host build")
+set(BOARD_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../boards/${OPENDIAG_BOARD})
+if(NOT EXISTS "${BOARD_DIR}/pinout.h")
+    message(FATAL_ERROR "Unknown board '${OPENDIAG_BOARD}': no boards/${OPENDIAG_BOARD}/pinout.h")
+endif()
+
 option(COVERAGE "Instrument the firmware sources for coverage reporting" OFF)
 
 # Pin 9 low side switching needs a board rework, so the firmware leaves it out
@@ -46,6 +54,7 @@ include_directories(BEFORE
     ${CMAKE_CURRENT_SOURCE_DIR}/stubs
     ${CMAKE_CURRENT_SOURCE_DIR}/framework
     ${CMAKE_CURRENT_SOURCE_DIR}/fakes
+    ${BOARD_DIR}
     ${FW_DIR}
 )
 

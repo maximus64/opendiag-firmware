@@ -539,9 +539,11 @@ and follow the instructions there.
 
 ### Updating manually
 
-If you'd rather flash the firmware yourself, releases are published as `opendiag-firmware.zip` on the
-[releases page](https://github.com/maximus64/opendiag-firmware/releases). The ZIP holds the flash
-images, a `manifest.json` that lists the address for each one, and `SHA256SUMS`.
+If you'd rather flash the firmware yourself, each release publishes one ZIP per board on the
+[releases page](https://github.com/maximus64/opendiag-firmware/releases), named
+`opendiag-firmware-<board>.zip`. Download the ZIP for your board and unzip it. It holds the flash
+images, a `manifest.json` that lists the address for each one, and `SHA256SUMS`. Use the
+`manifest.json` from the same ZIP as the images you flash.
 
 1. Unplug the adapter from the vehicle.
 2. Hold the button while you plug in the USB cable, then release it. You can also type
@@ -552,11 +554,12 @@ images, a `manifest.json` that lists the address for each one, and `SHA256SUMS`.
 
    ```bash
    esptool --chip esp32s3 -p /dev/ttyACM0 write-flash \
-       0x0 bootloader.bin 0x8000 partition-table.bin 0x10000 opendiag.bin
+       0x0 bootloader.bin 0x8000 partition-table.bin 0x10000 <app>.bin
    ```
 
-   The file names and addresses above are an example. Use the ones in your `manifest.json`. From a
-   source checkout, `idf.py -p /dev/ttyACM0 flash` does the same.
+   Replace `<app>.bin` with the application image named in your `manifest.json`. The file names and
+   addresses above are an example. Use the ones in your `manifest.json`, whose `parts` list each
+   image's path and address. From a source checkout, `idf.py -p /dev/ttyACM0 flash` does the same.
 
 4. Unplug and reconnect USB to start the new firmware.
 

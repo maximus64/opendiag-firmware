@@ -14,6 +14,7 @@
 #include "driver/ledc.h"
 #include "nvs_flash.h"
 #include "pinout.h"
+#include "board_features.h"
 #include "shell.h"
 
 #define TAG "board"
@@ -24,15 +25,19 @@
 /* Maximum duty for the LEDC_TIMER_12_BIT high side PWM timer */
 #define HS_DUTY_MAX ((1 << 12) - 1)
 
+#if OPENDIAG_HAS_OBD_LS
 #if OPENDIAG_HW_LS_OBD_9
 #define LOW_SIDE_PIN_MASK ((1ULL << PIN_LS_OBD_9) | (1ULL << PIN_LS_OBD_15))
 #else
 #define LOW_SIDE_PIN_MASK (1ULL << PIN_LS_OBD_15)
 #endif
+#endif
 
+#if OPENDIAG_HAS_OBD_SENSE
 static adc_oneshot_unit_handle_t adc1_handle;
 static adc_cali_handle_t adc1_cal_handle;
 static uint8_t board_id;
+#endif
 static struct {
     int32_t vbatt_gain;
     int32_t vbatt_offset;
@@ -43,7 +48,9 @@ static struct {
     bool calibrated;
 } pc_calibration;
 
+#if OPENDIAG_HAS_OBD_SENSE
 static int board_adc_read_boardid(void);
+#endif
 
 static void board_gpio_isr_install(void *arg) {
     *(esp_err_t *)arg =
@@ -51,6 +58,7 @@ static void board_gpio_isr_install(void *arg) {
 }
 
 void board_setup(void) {
+#if OPENDIAG_HAS_J1850
     /* J1850 driver */
     gpio_reset_pin(PIN_J1850_MODE);
     gpio_set_level(PIN_J1850_MODE,
@@ -71,6 +79,7 @@ void board_setup(void) {
 
     gpio_reset_pin(PIN_J1850_VPW_RX);
     gpio_set_direction(PIN_J1850_VPW_RX, GPIO_MODE_INPUT);
+#endif
 
     /* CAN0 transceiver: silent until a bus is actually opened, so the
      * adapter cannot drive a vehicle bus it was only plugged into. */
@@ -78,12 +87,15 @@ void board_setup(void) {
     gpio_set_level(PIN_CAN0_SILENT, 1);
     gpio_set_direction(PIN_CAN0_SILENT, GPIO_MODE_OUTPUT);
 
+#if OPENDIAG_HAS_CAN1
     /* CAN1 (AUX_CAN header) likewise: left floating, the TJA1051's pull-down
      * on S would put it in normal mode. */
     gpio_reset_pin(PIN_CAN1_SILENT);
     gpio_set_level(PIN_CAN1_SILENT, 1);
     gpio_set_direction(PIN_CAN1_SILENT, GPIO_MODE_OUTPUT);
+#endif
 
+#if OPENDIAG_HAS_KLINE
     /* K-Line driver */
     gpio_reset_pin(PIN_KLINE_TX);
     gpio_set_level(PIN_KLINE_TX, 1);
@@ -97,7 +109,9 @@ void board_setup(void) {
     gpio_pullup_en(
         PIN_KLINE_RX); // Enable pull since there are no external pull up
     gpio_set_direction(PIN_KLINE_RX, GPIO_MODE_INPUT);
+#endif
 
+#if OPENDIAG_HAS_OBD_HS
     /* High side driver */
     gpio_reset_pin(PIN_HS_BOOST_EN);
     gpio_set_level(PIN_HS_BOOST_EN, 0);
@@ -147,7 +161,9 @@ void board_setup(void) {
                                              .duty = 0, // Set duty to 0%
                                              .hpoint = 0};
     ESP_ERROR_CHECK(ledc_channel_config(&hs_vadj_channel));
+#endif
 
+#if OPENDIAG_HAS_OBD_LS
     /* Start low-side drivers off without gpio_reset_pin's pull-up. */
 #if OPENDIAG_HW_LS_OBD_9
     gpio_set_level(PIN_LS_OBD_9, 0);
@@ -161,6 +177,7 @@ void board_setup(void) {
         .intr_type = GPIO_INTR_DISABLE,
     };
     ESP_ERROR_CHECK(gpio_config(&low_side));
+#endif
 
     esp_err_t gpio_isr_err = ESP_OK;
     /* Keep shared GPIO timing interrupts away from Bluetooth on core 0. */
@@ -168,6 +185,7 @@ void board_setup(void) {
         esp_ipc_call_blocking(1, board_gpio_isr_install, &gpio_isr_err));
     ESP_ERROR_CHECK(gpio_isr_err);
 
+#if OPENDIAG_HAS_OBD_SENSE
     /* ADC inputs signals */
     adc_oneshot_unit_init_cfg_t init_config1 = {
         .unit_id = ADC_UNIT_1,
@@ -195,6 +213,7 @@ void board_setup(void) {
 
     /* Read board id from register strap */
     board_id = (board_adc_read_boardid() >> 8) & 0xff;
+#endif
 
     /* Retrieve calibration data from persistent config nvs */
     nvs_handle_t pc_handle;
@@ -368,6 +387,7 @@ esp_err_t board_calibration_set(const char *name, int32_t value) {
     return ESP_OK;
 }
 
+#if OPENDIAG_HAS_OBD_SENSE
 static int board_adc_read_ch(int ch) {
     int val;
     ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, ch, &val));
@@ -386,8 +406,15 @@ static int board_adc_read_vbatt(void) {
 static int board_adc_read_hs_vsense(void) {
     return board_adc_read_ch(ADC_CHANNEL_0);
 }
+#endif
 
+/* The sense readings return -1 on a board without the ADC inputs. Those pins
+ * carry other signals on such a board, so reading them would return made-up
+ * voltages. Callers treat a negative value as "not available". */
 int32_t board_get_vbatt(void) {
+#if !OPENDIAG_HAS_OBD_SENSE
+    return -1;
+#else
     int i;
     int adc_val = 0;
 
@@ -402,9 +429,13 @@ int32_t board_get_vbatt(void) {
     float volt = (adc_val * adc_gain) + adc_offset;
 
     return (int32_t)volt;
+#endif
 }
 
 int32_t board_get_hs_vsense(void) {
+#if !OPENDIAG_HAS_OBD_SENSE
+    return -1;
+#else
     int i;
     int adc_val = 0;
 
@@ -420,8 +451,10 @@ int32_t board_get_hs_vsense(void) {
     float volt = (adc_val * adc_gain) + adc_offset;
 
     return (int32_t)volt;
+#endif
 }
 
+#if OPENDIAG_HAS_OBD_HS
 void board_set_hs_boost_en(int state) {
     gpio_set_level(PIN_HS_BOOST_EN, state);
 }
@@ -503,6 +536,24 @@ void board_set_hs_state(enum hs_pin pin, int state) {
     }
 }
 
+#else
+/* No high side drivers on this board. Nothing is driven: a caller that asks
+ * for one is refused before it gets here (see vif_pin_set). */
+void board_set_hs_boost_en(int state) {
+    (void)state;
+}
+
+void board_set_hs_voltage(uint32_t millivolt) {
+    (void)millivolt;
+}
+
+void board_set_hs_state(enum hs_pin pin, int state) {
+    (void)pin;
+    (void)state;
+}
+#endif /* OPENDIAG_HAS_OBD_HS */
+
+#if OPENDIAG_HAS_OBD_LS
 void board_set_ls_state(enum ls_pin pin, int state) {
     switch (pin) {
 #if OPENDIAG_HW_LS_OBD_9
@@ -520,7 +571,15 @@ void board_set_ls_state(enum ls_pin pin, int state) {
     }
 }
 
+#else
+void board_set_ls_state(enum ls_pin pin, int state) {
+    (void)pin;
+    (void)state;
+}
+#endif /* OPENDIAG_HAS_OBD_LS */
+
 void board_hs_ls_reset_state(void) {
+#if OPENDIAG_HAS_OBD_HS
     board_set_hs_boost_en(0);
     board_set_hs_duty(0);
     gpio_set_level(PIN_HS_OBD_6, 0);
@@ -529,15 +588,19 @@ void board_hs_ls_reset_state(void) {
     gpio_set_level(PIN_HS_OBD_12, 0);
     gpio_set_level(PIN_HS_OBD_13, 0);
     gpio_set_level(PIN_HS_OBD_14, 0);
+#endif
+#if OPENDIAG_HAS_OBD_LS
 #if OPENDIAG_HW_LS_OBD_9
     gpio_set_level(PIN_LS_OBD_9, 0);
 #endif
     gpio_set_level(PIN_LS_OBD_15, 0);
+#endif
 }
 
 #define HS_CAL_LOW_DUTY 400
 #define HS_CAL_HIGH_DUTY 3800
 
+#if OPENDIAG_HAS_OBD_HS && OPENDIAG_HAS_OBD_SENSE
 void board_calibrate_hs(void) {
     char str[50] = {0};
     float voltl = 0.0f, volth = 0.0f;
@@ -662,7 +725,13 @@ void board_calibrate_hs(void) {
         printf("Cancelled.\n");
     }
 }
+#else
+void board_calibrate_hs(void) {
+    printf("HS calibration is not available on this board\n");
+}
+#endif /* OPENDIAG_HAS_OBD_HS && OPENDIAG_HAS_OBD_SENSE */
 
+#if OPENDIAG_HAS_OBD_SENSE
 #define VBATT_CAL_LOW_V 10.0f
 #define VBATT_CAL_HIGH_V 26.0f
 
@@ -746,3 +815,8 @@ void board_calibrate_vbatt(void) {
         printf("Cancelled.\n");
     }
 }
+#else
+void board_calibrate_vbatt(void) {
+    printf("Battery voltage calibration is not available on this board\n");
+}
+#endif /* OPENDIAG_HAS_OBD_SENSE */

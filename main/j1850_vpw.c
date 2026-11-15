@@ -75,6 +75,8 @@
 #include "j1850_lifecycle.h"
 #include "j1850_vpw.h"
 #include "pinout.h"
+#include "board_features.h"
+#if OPENDIAG_HAS_J1850
 
 /* The claim holder's ear on this bus; see bus_listener_t. */
 static bus_listener_t listener;
@@ -1809,3 +1811,4 @@ const bus_ops_t j1850_vpw_bus_ops = {
     .reset_stats = j1850_vpw_bus_reset_stats,
     .listener = &listener,
 };
+#endif /* OPENDIAG_HAS_J1850 */

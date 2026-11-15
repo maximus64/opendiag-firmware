@@ -16,10 +16,69 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: Test and build reproducible ESP32-S3 firmware
+  boards:
+    name: List firmware boards
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      # A board is a boards/<id>/ directory with a pinout.h. Each one needs a board.json with a
+      # string "name" and a boolean "default", and exactly one board may be the default.
+      - name: Read the board matrix
+        id: matrix
+        run: |
+          python3 -I - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          boards = sorted(path.parent.name for path in Path("boards").glob("*/pinout.h"))
+          if not boards:
+              raise SystemExit("No board directory with a pinout.h was found in boards/")
+
+          defaults = []
+          for board in boards:
+              manifest = Path("boards", board, "board.json")
+              if not manifest.is_file():
+                  raise SystemExit(f"boards/{board}/board.json is missing")
+              try:
+                  info = json.loads(manifest.read_text())
+              except json.JSONDecodeError as error:
+                  raise SystemExit(f"boards/{board}/board.json is not valid JSON: {error}")
+              if not isinstance(info, dict):
+                  raise SystemExit(f"boards/{board}/board.json must be a JSON object")
+              if not isinstance(info.get("name"), str) or not info["name"]:
+                  raise SystemExit(f'boards/{board}/board.json needs a non-empty string "name"')
+              if type(info.get("default")) is not bool:
+                  raise SystemExit(f'boards/{board}/board.json needs a boolean "default"')
+              if info["default"]:
+                  defaults.append(board)
+
+          if len(defaults) != 1:
+              raise SystemExit(
+                  f'Exactly one board.json may have "default": true, found {len(defaults)}: {defaults}'
+              )
+
+          matrix = json.dumps({"board": boards})
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"matrix={matrix}\n")
+          PY
+
+  build:
+    name: Build ${{ matrix.board }}
+    needs: [boards]
+    strategy:
+      matrix:
+        board: ${{ fromJSON(needs.boards.outputs.matrix).board }}
+      fail-fast: false
+    runs-on: ubuntu-24.04
+    # A board job builds twice under --verify, so it needs more time than the other jobs.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
         with:
@@ -30,17 +89,23 @@ jobs:
       - name: Test, build, and verify reproducibility
         run: |
           mkdir -p build/docker
-          docker compose --progress plain run --rm --build -T firmware --verify
+          docker compose --progress plain run --rm --build -T firmware --verify --board "${{ matrix.board }}"
 
       - name: Verify firmware package
         env:
           RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          PACKAGE: build/docker/opendiag-firmware-${{ matrix.board }}.zip
         run: |
-          verification_dir=$(mktemp -d)
-          trap 'rm -rf -- "$verification_dir"' EXIT
-          unzip build/docker/opendiag-firmware.zip -d "$verification_dir"
+          if [[ ! -f "$PACKAGE" ]]; then
+            echo "No $PACKAGE was produced" >&2
+            exit 1
+          fi
+          verification_root=$(mktemp -d)
+          trap 'rm -rf -- "$verification_root"' EXIT
+          verification_dir="$verification_root/$(basename "$PACKAGE" .zip)"
+          unzip "$PACKAGE" -d "$verification_dir"
           (cd "$verification_dir" && sha256sum --check SHA256SUMS)
-          python3 - "$verification_dir/manifest.json" <<'PY'
+          python3 -I - "$verification_dir/manifest.json" "$PACKAGE" <<'PY'
           import json
           import os
           import sys
@@ -48,13 +113,15 @@ jobs:
           version = json.loads(Path(sys.argv[1]).read_text())["version"]
           release_tag = os.environ["RELEASE_TAG"]
           if release_tag and version != release_tag:
-              raise SystemExit(f"Firmware version {version!r} does not match the release tag")
+              raise SystemExit(f"{sys.argv[2]}: firmware version {version!r} does not match the release tag")
           PY
 
+      # archive: false uploads the ZIP as the artifact itself, so download-artifact returns it as a file.
       - name: Upload firmware package
         uses: actions/upload-artifact@v7
         with:
-          path: build/docker/opendiag-firmware.zip
+          name: opendiag-firmware-${{ matrix.board }}.zip
+          path: build/docker/opendiag-firmware-${{ matrix.board }}.zip
           archive: false
           if-no-files-found: error
           retention-days: 30
@@ -90,6 +157,53 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  # Host tests and line coverage for main/ (host suite) and for the host-testable driver
+  # sources. Coverage is reported only; no threshold fails the job. Packages come from the
+  # Ubuntu 24.04 archive (unpinned, as the runner image moves them). GCC 14 and its gcov are
+  # pinned, because line counts differ between GCC majors; gcovr is pinned to 7.0.
+  coverage:
+    name: Host tests and line coverage
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CC: gcc-14
+      CXX: g++-14
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install coverage tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build protobuf-compiler python3 python3-protobuf python3-venv \
+            gcc-14 g++-14
+          sudo update-alternatives --install /usr/bin/gcov gcov /usr/bin/gcov-14 140
+          python3 -m venv --system-site-packages "$RUNNER_TEMP/gcovr-venv"
+          "$RUNNER_TEMP/gcovr-venv/bin/pip" install gcovr==7.0
+          echo "$RUNNER_TEMP/gcovr-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Coverage of main/ (host suite)
+        run: |
+          gcov --version | head -n 1
+          cmake -S test/host -B build/coverage-host -G Ninja -DCOVERAGE=ON
+          cmake --build build/coverage-host
+          ctest --test-dir build/coverage-host --output-on-failure
+          # Reports main/ only; prints the total line coverage.
+          cmake --build build/coverage-host --target coverage
+
+      - name: Coverage of j2534_driver/ (driver, common, legacy, platform, config)
+        run: |
+          make -C j2534_driver test COVERAGE=1
+          cd j2534_driver
+          gcovr --root . --print-summary --gcov-executable gcov-14 \
+            --filter 'driver/' --filter 'common/' --filter 'legacy/' \
+            --filter 'platform/' --filter 'config/' \
+            build/linux/release
+
   release:
     name: Publish GitHub Release
     needs: [build, j2534-driver]
@@ -100,11 +214,13 @@ jobs:
       contents: write
       actions: write
     steps:
-      - name: Download verified firmware package
+      # Each board's ZIP is its own artifact. It is not decompressed, so every ZIP lands in dist/ as a file.
+      - name: Download verified firmware packages
         uses: actions/download-artifact@v8
         with:
-          name: opendiag-firmware.zip
+          pattern: opendiag-firmware-*.zip
           path: dist
+          merge-multiple: true
           skip-decompress: true
 
       - name: Download verified driver package
@@ -116,11 +232,18 @@ jobs:
 
       - name: Verify release packages
         run: |
-          verification_dir=$(mktemp -d)
-          trap 'rm -rf -- "$verification_dir"' EXIT
-          for package in opendiag-firmware.zip opendiag-j2534-driver.zip; do
-            unzip "dist/$package" -d "$verification_dir/$package"
-            (cd "$verification_dir/$package" && sha256sum --check SHA256SUMS)
+          shopt -s nullglob
+          firmware_packages=(dist/opendiag-firmware-*.zip)
+          if (( ${#firmware_packages[@]} == 0 )); then
+            echo "No opendiag-firmware-<board>.zip found in dist/" >&2
+            exit 1
+          fi
+          verification_root=$(mktemp -d)
+          trap 'rm -rf -- "$verification_root"' EXIT
+          for package in "${firmware_packages[@]}" dist/opendiag-j2534-driver.zip; do
+            verification_dir="$verification_root/$(basename "$package" .zip)"
+            unzip "$package" -d "$verification_dir"
+            (cd "$verification_dir" && sha256sum --check SHA256SUMS)
           done
 
       - name: Publish release
@@ -129,12 +252,18 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
+          shopt -s nullglob
+          firmware_packages=(dist/opendiag-firmware-*.zip)
+          if (( ${#firmware_packages[@]} == 0 )); then
+            echo "No opendiag-firmware-<board>.zip found in dist/" >&2
+            exit 1
+          fi
           release_flags=(--verify-tag --generate-notes --title "$RELEASE_TAG")
           if [[ "$RELEASE_TAG" == *-* ]]; then
             release_flags+=(--prerelease)
           fi
           gh release create "$RELEASE_TAG" \
-            dist/opendiag-firmware.zip \
+            "${firmware_packages[@]}" \
             dist/opendiag-j2534-driver.zip \
             "${release_flags[@]}"
 

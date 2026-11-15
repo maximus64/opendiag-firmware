@@ -15,6 +15,7 @@
 #include "bus_tx.h"
 #include "driver/gpio.h"
 #include "pinout.h"
+#include "board_features.h"
 
 /* The claim holder's ear on this bus; see bus_listener_t. */
 static bus_listener_t listener;
@@ -503,9 +504,13 @@ static esp_err_t can_setup(int baud_rate, bool manual, bool listen_only) {
     /* AUX_CAN is for tapping a bus that is not on the OBD socket (a C-CAN
      * with the engine and ABS on it): never drive it, whatever the client
      * asked for. */
+#if OPENDIAG_HAS_CAN1
     if (aux_requested)
         listen_only = true;
     silent_pin = aux_requested ? PIN_CAN1_SILENT : PIN_CAN0_SILENT;
+#else
+    silent_pin = PIN_CAN0_SILENT; /* no CAN1 on this board */
+#endif
     manual_recovery = manual;
     listen_only_active = listen_only;
     __atomic_store_n(&link_down_pending, false, __ATOMIC_RELAXED);
@@ -513,8 +518,13 @@ static esp_err_t can_setup(int baud_rate, bool manual, bool listen_only) {
     twai_onchip_node_config_t node_config = {
         .io_cfg =
             {
+#if OPENDIAG_HAS_CAN1
                 .tx = aux_requested ? PIN_CAN1_TX : PIN_CAN0_TX,
                 .rx = aux_requested ? PIN_CAN1_RX : PIN_CAN0_RX,
+#else
+                .tx = PIN_CAN0_TX,
+                .rx = PIN_CAN0_RX,
+#endif
                 .quanta_clk_out = GPIO_NUM_NC,
                 .bus_off_indicator = GPIO_NUM_NC,
             },
@@ -658,11 +668,20 @@ esp_err_t can_bus_use_aux(bool aux) {
      * the wrong transceiver un-silenced at close. */
     if (can_node)
         return ESP_ERR_INVALID_STATE;
+#if !OPENDIAG_HAS_CAN1
+    /* No AUX_CAN transceiver on this board: refuse before touching state. */
+    if (aux)
+        return ESP_ERR_NOT_SUPPORTED;
+#endif
     aux_requested = aux;
     return ESP_OK;
 }
 
+#if OPENDIAG_HAS_CAN1
 bool can_bus_aux(void) { return aux_requested; }
+#else
+bool can_bus_aux(void) { return false; }
+#endif
 
 static esp_err_t can_ops_open(const bus_cfg_t *cfg) {
     /* The controller takes its rate at install time and cannot be retimed

@@ -19,3 +19,4 @@ managed_components/
 .DS_Store
 
 /private
+test/bench/

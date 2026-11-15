@@ -405,10 +405,49 @@ static void testIniFiles() {
     rmdir(temporary.c_str());
 }
 
+static void testStreamFailures() {
+    const std::string directory = platform::moduleDirectory(&moduleAnchor);
+    const std::string temporary = directory + "stream-test-" + std::to_string(getpid()) + "/";
+    check(platform::createDirectories(temporary), "Create stream test folder");
+    const std::string regular = temporary + "not-a-serial-port";
+    std::ofstream(regular.c_str()) << "x";
+    bool notSerial = false;
+    try {
+        platform::Stream stream;
+        stream.openCom(regular, 115200);
+    } catch (const std::runtime_error &error) {
+        notSerial = !strcmp(error.what(), "Cannot configure the serial device");
+    }
+    check(notSerial, "A regular file is refused as a serial device");
+    unlink(regular.c_str());
+    rmdir(temporary.c_str());
+
+    bool hostRejected = false;
+    try {
+        platform::Stream stream;
+        stream.openTcp("localhost", 1, 100);
+    } catch (const std::runtime_error &error) {
+        hostRejected = !strcmp(error.what(), "Host must be an IPv4 address");
+    }
+    check(hostRejected, "A TCP host must be an IPv4 address");
+
+    // Port 1 has no listener on a test host, so the connection is refused.
+    bool refused = false;
+    try {
+        platform::Stream stream;
+        stream.openTcp("127.0.0.1", 1, 1000);
+    } catch (const std::runtime_error &error) {
+        refused = !strcmp(error.what(), "TCP connect failed") ||
+                  !strcmp(error.what(), "TCP connection failed");
+    }
+    check(refused, "A TCP connection to a closed port is reported");
+}
+
 int main() {
     try {
         testSerial();
         testSerialConfigurationFailure();
+        testStreamFailures();
         testRemovedWorkingDirectory();
         testLease();
         testPaths();

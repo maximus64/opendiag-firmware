@@ -8,6 +8,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "board.h"
+#include "board_features.h"
 #include "bus_tx.h"
 #include "can_bus.h"
 #include "j1850_pwm.h"
@@ -155,13 +156,19 @@ static const bus_ops_t *bus_for(vif_bus_t bus) {
     switch (bus) {
     case VIF_BUS_CAN:
         return &can_bus_ops;
+#if OPENDIAG_HAS_KLINE
     case VIF_BUS_KLINE:
         return &kline_bus_ops;
+#endif
+#if OPENDIAG_HAS_J1850
     case VIF_BUS_J1850_PWM:
         return &j1850_pwm_bus_ops;
     case VIF_BUS_J1850_VPW:
         return &j1850_vpw_bus_ops;
+#endif
     default:
+        /* A bus this board does not have lands here, so the caller gets the
+         * same refusal as any other unknown bus. */
         return NULL;
     }
 }
@@ -1178,6 +1185,18 @@ esp_err_t vif_pin_set(vif_owner_t owner, int obd_pin, vif_pin_mode_t m,
     if (!high_side && !low_side) {
         return ESP_ERR_INVALID_ARG;
     }
+    /* Refuse before anything is claimed or driven, so a board without the
+     * driver never reports a pin as energised. */
+#if !OPENDIAG_HAS_OBD_HS
+    if (high_side) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+#endif
+#if !OPENDIAG_HAS_OBD_LS
+    if (low_side) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+#endif
     if ((m == VIF_PIN_VOLTAGE && !high_side) ||
         (m == VIF_PIN_GROUND && !low_side)) {
         return ESP_ERR_INVALID_ARG;
@@ -1342,6 +1361,9 @@ esp_err_t vif_calibrate_hs(vif_owner_t owner) {
     if (owner >= VIF_OWNER_COUNT) {
         return ESP_ERR_INVALID_ARG;
     }
+#if !(OPENDIAG_HAS_OBD_HS && OPENDIAG_HAS_OBD_SENSE)
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
 
     err = pins_claim_for_calibration(owner);
     if (err != ESP_OK) {
@@ -1358,6 +1380,9 @@ esp_err_t vif_calibrate_hs(vif_owner_t owner) {
 
 esp_err_t vif_calibrate_vbatt(void) {
     /* Reads the battery input only; no pin is driven, so no claim is needed. */
+#if !OPENDIAG_HAS_OBD_SENSE
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
     board_calibrate_vbatt();
     return ESP_OK;
 }

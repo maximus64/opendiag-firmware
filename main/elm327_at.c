@@ -20,6 +20,7 @@
 #include "sdkconfig.h"
 #include "timer.h"
 #include "utility.h"
+#include "board_features.h"
 #include "vif.h"
 
 /** Response bytes held between flushes. Sized for the longest single reply a
@@ -1144,10 +1145,15 @@ static void elm327_at_command_handler(elm327_ctx_t *e, const char *cmd) {
         e->settings.can_auto_format = true;
         elm327_send_string(e, "OK\r");
     } else if (strcmp(cmd, "RV") == 0) {
+#if OPENDIAG_HAS_OBD_SENSE
         char voltstr[8];
         float volt = vif_vbatt_mv() / 1000.0f;
         snprintf(voltstr, sizeof(voltstr), "%0.1fV\r", volt);
         elm327_send_string(e, voltstr);
+#else
+        /* No battery sense on this board: refuse rather than report a voltage. */
+        elm327_send_string(e, "?\r");
+#endif
     } else if (strncmp(cmd, "PROGV", 5) == 0) {
         rc = at_set_programing_voltage(e, &cmd[5]);
         if (rc) {

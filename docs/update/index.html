@@ -137,6 +137,35 @@
             color: var(--ink-dim);
         }
 
+        /* The board selector is a second pill under the release pill, with the same look. */
+        .board-picker {
+            display: flex;
+            width: fit-content;
+            margin: 10px auto 0;
+        }
+
+        .board-picker[hidden] { display: none; }
+
+        .board-picker select {
+            font: inherit;
+            font-size: 13.5px;
+            color: var(--ink);
+            background: transparent;
+            border: none;
+            padding: 0;
+            cursor: pointer;
+        }
+
+        .board-picker select option {
+            background: var(--card);
+            color: var(--ink);
+        }
+
+        .board-picker select:focus-visible {
+            outline: 2px solid var(--ink);
+            outline-offset: 3px;
+        }
+
         /* ---------- steps ---------- */
 
         .card {
@@ -239,6 +268,9 @@
 
         .install button:active { transform: translateY(1px); }
 
+        /* The script hides the button until there is a manifest to flash. */
+        esp-web-install-button[hidden] { display: none; }
+
         .install button:focus-visible {
             outline: 2px solid var(--ink);
             outline-offset: 3px;
@@ -247,6 +279,22 @@
         .note {
             font-size: 14px;
             color: var(--ink-dim);
+        }
+
+        .local {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            font-size: 14px;
+            color: var(--ink-dim);
+        }
+
+        .local p { margin: 0; }
+
+        .local input,
+        .local select {
+            font: inherit;
+            color: var(--ink);
         }
 
         .warn {
@@ -319,6 +367,10 @@
                 <span class="label">Latest release</span>
                 <span id="fw-version">checking…</span>
             </div>
+            <div class="version board-picker" id="board-row" hidden>
+                <label class="label" for="board">Board</label>
+                <select id="board"></select>
+            </div>
         </header>
 
         <div class="card">
@@ -340,7 +392,13 @@
                         <li>If it isn't listed, unplug the device and repeat steps 1 and 2.</li>
                     </ul>
                     <div class="install">
-                        <esp-web-install-button manifest="firmware/manifest.json">
+					    <div class="local">
+                            <label for="local-folder">Or flash firmware you've already downloaded. Choose the unzipped
+                                release folder, the one that holds <code>manifest.json</code>:</label>
+                            <input type="file" id="local-folder" webkitdirectory>
+                            <p id="local-status" class="note" aria-live="polite"></p>
+                        </div>
+                        <esp-web-install-button hidden>
                             <button slot="activate">Begin Firmware Update</button>
                             <p slot="unsupported" class="warn">Your browser can't talk to serial devices. Use
                                 <b>desktop Chrome or Edge</b> — mobile browsers are not supported.</p>
@@ -367,16 +425,144 @@
     </div>
 
     <script>
-        // Show the version from the same manifest the install button flashes,
-        // so this line can't go stale when new firmware is synced.
-        fetch("firmware/manifest.json", { cache: "no-store" })
-            .then((r) => r.json())
-            .then((m) => {
-                document.getElementById("fw-version").textContent = m.version || "unknown";
-            })
-            .catch(() => {
-                document.getElementById("fw-version").textContent = "unavailable";
-            });
+        // The install button reads its manifest attribute when it is clicked, so the page chooses
+        // the manifest here. The board list (firmware/boards.json) fills the selector, and the board
+        // marked "default" in it is selected at start. A local folder replaces the selection. Nothing
+        // is flashed until the user clicks the install button.
+        const installButton = document.querySelector("esp-web-install-button");
+        const boardRow = document.getElementById("board-row");
+        const boardSelect = document.getElementById("board");
+        const localPicker = document.getElementById("local-folder");
+        const localStatus = document.getElementById("local-status");
+        const versionText = document.getElementById("fw-version");
+        const localUrls = [];
+        let versionRequest = 0;
+
+        // The button stays hidden until there is a manifest to flash.
+        function selectManifest(url) {
+            installButton.hidden = !url;
+            if (url) installButton.setAttribute("manifest", url);
+            else installButton.removeAttribute("manifest");
+        }
+
+        function resetManifest() {
+            for (const url of localUrls.splice(0)) URL.revokeObjectURL(url);
+            selectManifest(boardSelect.value);
+        }
+
+        // Show the version from the selected board's manifest, the same file the install button
+        // flashes, so this line can't go stale when new firmware is synced.
+        async function showVersion(url) {
+            const request = ++versionRequest;
+            versionText.textContent = "checking…";
+            try {
+                const response = await fetch(url, { cache: "no-store" });
+                if (!response.ok) throw new Error(response.statusText);
+                const manifest = await response.json();
+                if (request === versionRequest) versionText.textContent = manifest.version || "unknown";
+            } catch {
+                if (request === versionRequest) versionText.textContent = "unavailable";
+            }
+        }
+
+        async function sha256Hex(file) {
+            const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+            return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+        }
+
+        // sha256sum writes "<hex>  <name>", or "<hex> *<name>" in binary mode.
+        function parseSums(text) {
+            const sums = new Map();
+            for (const line of text.split("\n")) {
+                const match = /^([0-9a-f]{64}) [ *](.+)$/.exec(line.trim());
+                if (match) sums.set(match[2], match[1]);
+            }
+            return sums;
+        }
+
+        async function useLocalFolder() {
+            resetManifest();
+            const files = new Map([...localPicker.files].map((file) => [file.name, file]));
+            if (!files.size) {
+                localStatus.textContent = "";
+                return;
+            }
+            try {
+                const manifestFile = files.get("manifest.json");
+                if (!manifestFile) throw new Error("no manifest.json in that folder");
+                const manifest = JSON.parse(await manifestFile.text());
+                if (!Array.isArray(manifest.builds) || !manifest.builds.length) {
+                    throw new Error("manifest.json lists no builds");
+                }
+
+                // Every file that is flashed must be listed in SHA256SUMS and match it.
+                const sumsFile = files.get("SHA256SUMS");
+                const sums = sumsFile ? parseSums(await sumsFile.text()) : null;
+                async function checkFile(name, file) {
+                    if (!sums) return;
+                    if (!sums.has(name)) throw new Error(`${name} is not listed in SHA256SUMS`);
+                    if ((await sha256Hex(file)) !== sums.get(name)) {
+                        throw new Error(`${name} does not match SHA256SUMS`);
+                    }
+                }
+                await checkFile("manifest.json", manifestFile);
+
+                const builds = [];
+                for (const build of manifest.builds) {
+                    const parts = [];
+                    for (const part of build.parts) {
+                        const file = files.get(part.path);
+                        if (!file) throw new Error(`${part.path} is missing from the folder`);
+                        await checkFile(part.path, file);
+                        const url = URL.createObjectURL(file);
+                        localUrls.push(url);
+                        parts.push({ ...part, path: url });
+                    }
+                    builds.push({ ...build, parts });
+                }
+
+                const localManifest = URL.createObjectURL(
+                    new Blob([JSON.stringify({ ...manifest, builds })], { type: "application/json" })
+                );
+                localUrls.push(localManifest);
+                selectManifest(localManifest);
+                localStatus.textContent = `Ready to flash local firmware ${manifest.version || "unknown"}` +
+                    (sums ? ", checksums match." : ". No SHA256SUMS was found, so checksums were not checked.");
+            } catch (error) {
+                resetManifest();
+                localStatus.textContent = `Can't use that folder: ${error.message}.`;
+            }
+        }
+
+        async function loadBoards() {
+            try {
+                const response = await fetch("firmware/boards.json", { cache: "no-store" });
+                if (!response.ok) throw new Error("no board list");
+                const boards = await response.json();
+                if (!Array.isArray(boards) || !boards.length) throw new Error("empty board list");
+                for (const board of boards) {
+                    boardSelect.add(new Option(board.name, board.manifest));
+                }
+                // Start on the board marked "default". Fall back to the first entry only if none is marked.
+                const defaultIndex = boards.findIndex((board) => board.default === true);
+                boardSelect.selectedIndex = defaultIndex >= 0 ? defaultIndex : 0;
+                boardRow.hidden = false;
+                resetManifest();
+                showVersion(boardSelect.value);
+            } catch {
+                // No board list is published (for example, a local preview). Only a local folder can be flashed.
+                versionText.textContent = "unavailable";
+            }
+        }
+
+        boardSelect.addEventListener("change", () => {
+            localPicker.value = "";
+            localStatus.textContent = "";
+            resetManifest();
+            showVersion(boardSelect.value);
+        });
+        localPicker.addEventListener("change", useLocalFolder);
+        loadBoards();
     </script>
 </body>
 

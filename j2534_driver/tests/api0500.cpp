@@ -248,6 +248,30 @@ static void selfTest(Api &api, const char *name) {
     elapsed = platform::milliseconds() - start;
     printf("Empty Select timeout: %" J2534_PRIu " ms (requested 100)\n", elapsed);
     check(set.ChannelCount == 0 && elapsed >= 100 && elapsed <= 150, "Select timeout tolerance");
+    J2534_ULONG unknownIds[] = {0x7777};
+    SCHANNELSET unknown = {1, 1, unknownIds};
+    api.require(api.select(&unknown, READABLE_TYPE, 0), ERR_INVALID_CHANNEL_ID, "Select unknown channel");
+    // Only one of the two channels has data, so a threshold of two times out with that channel reported.
+    J2534_ULONG selectPins[] = {7, 15};
+    RESOURCE_STRUCT selectResources = {J1962_CONNECTOR, 2, selectPins};
+    J2534_ULONG selectKline = 0;
+    api.require(api.connect(session.id, ISO9141, 0, 10400, selectResources, &selectKline),
+                STATUS_NOERROR,
+                "Connect second select channel");
+    Message readable;
+    readable.value.ProtocolID = CAN;
+    readable.value.DataLength = 4;
+    readable.value.MsgHandle = 43;
+    J2534_ULONG queued = 1;
+    api.require(api.queue(physical, &readable.value, &queued), STATUS_NOERROR, "Queue readable channel");
+    J2534_ULONG partialIds[] = {physical, selectKline};
+    SCHANNELSET partial = {2, 2, partialIds};
+    api.require(api.select(&partial, READABLE_TYPE, 100), ERR_TIMEOUT, "Select below threshold times out");
+    check(partial.ChannelCount == 1 && partial.ChannelList[0] == physical,
+          "Timed-out select reports only the readable channel");
+    J2534_ULONG drained = 1;
+    api.require(api.read(physical, &readable.value, &drained, 0), STATUS_NOERROR, "Drain readable channel");
+    api.require(api.disconnect(selectKline), STATUS_NOERROR, "Disconnect second select channel");
     // Configuration batches must stop at the first unsupported parameter.
     SCONFIG configs[40];
     for (unsigned i = 0; i < 40; ++i) {
@@ -328,6 +352,46 @@ static void selfTest(Api &api, const char *name) {
     api.require(api.ioctl(physical, FAST_INIT, NULL, NULL),
                 ERR_IOCTL_ID_NOT_SUPPORTED,
                 "Fast init needs a K-line channel");
+    // The mock peer echoes fast-init data back on ISO 9141, so the reply and buffer checks run.
+    J2534_ULONG klinePins[] = {7, 15};
+    RESOURCE_STRUCT klineResources = {J1962_CONNECTOR, 2, klinePins};
+    J2534_ULONG kline = 0;
+    api.require(api.connect(session.id, ISO9141, 0, 10400, klineResources, &kline),
+                STATUS_NOERROR,
+                "Connect K-line");
+    api.require(api.ioctl(kline, FAST_INIT, NULL, NULL),
+                STATUS_NOERROR,
+                "Fast init without a reply");
+    Message request;
+    request.value.ProtocolID = ISO9141;
+    request.value.DataLength = 4;
+    putId(request.data, 0x12345678);
+    Message reply;
+    api.require(api.ioctl(kline, FAST_INIT, &request.value, &reply.value),
+                STATUS_NOERROR,
+                "Fast init echoes the reply");
+    check(reply.value.DataLength == 4 && !memcmp(reply.data, request.data, 4),
+          "Fast init reply carries the request bytes");
+    api.require(api.ioctl(kline, FAST_INIT, NULL, &reply.value),
+                ERR_FAILED,
+                "Fast init output without a request has no reply");
+    PASSTHRU_MSG noBuffer = {};
+    noBuffer.ProtocolID = ISO9141;
+    api.require(api.ioctl(kline, FAST_INIT, NULL, &noBuffer),
+                ERR_NULL_PARAMETER,
+                "Fast init output without a buffer");
+    Message small;
+    small.value.DataBufferSize = 2;
+    api.require(api.ioctl(kline, FAST_INIT, &request.value, &small.value),
+                ERR_BUFFER_TOO_SMALL,
+                "Fast init reply beyond the output buffer");
+    Message longRequest;
+    longRequest.value.ProtocolID = ISO9141;
+    longRequest.value.DataLength = 261;
+    api.require(api.ioctl(kline, FAST_INIT, &longRequest.value, NULL),
+                ERR_INVALID_MSG,
+                "Fast init request beyond the firmware limit");
+    api.require(api.disconnect(kline), STATUS_NOERROR, "Disconnect K-line");
     // Filters and logical channels must invalidate their handles when removed.
     Message mask;
     Message pattern;
@@ -470,7 +534,7 @@ static void contractTest(Api &api, const char *name) {
                     "Small buffer suffix discarded");
     }
     // Each injected wire failure must latch disconnection until Close and Open.
-    for (J2534_ULONG fault = 0xff01; fault <= 0xff07; ++fault) {
+    for (J2534_ULONG fault = 0xff01; fault <= 0xff09; ++fault) {
         Session session(api, name);
         J2534_ULONG channel = connectCan(api, session.id);
         SCONFIG config = {fault, 123};

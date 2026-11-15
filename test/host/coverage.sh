@@ -90,7 +90,13 @@ GNU)
     done
 
     if command -v gcovr >/dev/null 2>&1; then
-        gcovr --root "$FW_DIR" --print-summary .
+        # COVERAGE_FAIL_UNDER (a percentage) makes the report fail below that line
+        # coverage. CI sets it; unset, this only reports.
+        if [ -n "${COVERAGE_FAIL_UNDER:-}" ]; then
+            gcovr --root "$FW_DIR" --print-summary --fail-under-line "$COVERAGE_FAIL_UNDER" .
+        else
+            gcovr --root "$FW_DIR" --print-summary .
+        fi
     else
         find . -name '*.gcda' -exec gcov -b -o {} \; >/dev/null
         echo "gcovr not installed; raw .gcov files are in $BUILD_DIR"

@@ -47,3 +47,13 @@ idf_component_register(SRCS main.c
                             esp_driver_twai
                        REQUIRES driver freertos
                        INCLUDE_DIRS "")
+
+# Board pin map. Each board has a directory under boards/ holding its own
+# pinout.h. Select one with idf.py -DOPENDIAG_BOARD=<name>. The default is the
+# OpenDIAG hardware v1 board, so an unchanged build is the same image.
+set(OPENDIAG_BOARD "opendiag" CACHE STRING "Board pin map to build for")
+set(OPENDIAG_BOARD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../boards/${OPENDIAG_BOARD}")
+if(NOT EXISTS "${OPENDIAG_BOARD_DIR}/pinout.h")
+    message(FATAL_ERROR "Unknown board '${OPENDIAG_BOARD}': no boards/${OPENDIAG_BOARD}/pinout.h")
+endif()
+target_include_directories(${COMPONENT_LIB} PRIVATE "${OPENDIAG_BOARD_DIR}")
