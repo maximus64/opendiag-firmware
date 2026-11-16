@@ -669,9 +669,15 @@ J2534_LONG PassThruReadMsgs(J2534_ULONG id,
         if (!response.has_message || response.count != 1) {
             return ERR_INVALID_MSG;
         }
-        // The small-buffer rule specifically requires a truncated copy and discards the suffix.
+        // The small-buffer rule requires a truncated copy and discards the suffix. The copy is
+        // counted, so the caller can find it, and the messages already taken in this call are
+        // returned with it rather than dropped.
         if (response.message.data.size > messages[collected.size()].DataBufferSize) {
             copyMessage(response.message, messages[collected.size()]);
+            for (size_t i = 0; i < collected.size(); ++i) {
+                copyMessage(collected[i], messages[i]);
+            }
+            *count = (J2534_ULONG)(collected.size() + 1);
             return ERR_BUFFER_TOO_SMALL;
         }
         collected.push_back(response.message);
