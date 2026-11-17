@@ -240,7 +240,9 @@ void appendLog(const char *path, const char *line, uint32_t maximumBytes) {
         ::close(file);
         return;
     }
-    if (info.st_size >= maximumBytes) {
+    // st_size is signed, and off_t has the same width as uint32_t on 32-bit targets, so compare
+    // it as unsigned. A regular file never has a negative size.
+    if (static_cast<uint64_t>(info.st_size) >= maximumBytes) {
         ::close(file);
         char previous[PATH_MAX];
         if (format(previous, sizeof(previous), "%s.1", path) < 0 || rename(path, previous)) {

@@ -176,9 +176,16 @@ $(LEGACY_LIB): $(LEGACY_OBJECTS) $(LEGACY_LINK)
 $(BUILD_DIR)/opendiag_config.exe: $(GUI_OBJECTS) $(BUILD_DIR)/config/config.res
 	$(CXX) -mwindows $(LDFLAGS) -o "$@" $^ $(LDLIBS) -luser32 -lgdi32 -lshell32 -ladvapi32 -lversion
 
-$(BUILD_DIR)/opendiag.ini:
+# Linux needs a device path in COM (/dev/ttyACMx), so it gets its own template.
+ifeq ($(TARGET_OS),linux)
+INI_TEMPLATE := opendiag.linux.ini
+else
+INI_TEMPLATE := opendiag.ini
+endif
+
+$(BUILD_DIR)/opendiag.ini: $(INI_TEMPLATE)
 	@mkdir -p "$(@D)"
-	cp opendiag.ini "$@"
+	cp $(INI_TEMPLATE) "$@"
 
 ifneq ($(TARGET_OS),win32)
 API_TESTS := $(BUILD_DIR)/tests/api0500 $(BUILD_DIR)/tests/api0404
