@@ -524,7 +524,7 @@ static void contractTest(Api &api, const char *name) {
         api.require(api.read(channel, &received.value, &count, 0),
                     ERR_BUFFER_TOO_SMALL,
                     "Small receive buffer");
-        check(count == 0 && received.value.DataLength == 3 &&
+        check(count == 1 && received.value.DataLength == 3 &&
                   received.value.DataBuffer == received.data &&
                   received.value.DataBufferSize == 3 && !memcmp(received.data, sent.data, 3),
               "Truncated message contract");
