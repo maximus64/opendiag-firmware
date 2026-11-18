@@ -35,12 +35,12 @@ Bluetooth.
 
 | CMD | Description | Supported |
 | :--- | :--- | :--- |
-| `PP xx OFF` | disable Prog Parameter xx | |
-| `PP FF OFF` | all Prog Parameters disabled | |
-| `PP xx ON` | enable Prog Parameter xx | |
-| `PP FF ON` | all Prog Parameters enabled | |
-| `PP xx SV yy` | for PP xx, Set the Value to yy | |
-| `PPS` | print a PP Summary | |
+| `PP xx OFF` | disable Prog Parameter xx | ✅ 2C-2F only |
+| `PP FF OFF` | all Prog Parameters disabled | ✅ 2C-2F only |
+| `PP xx ON` | enable Prog Parameter xx | ✅ 2C-2F only |
+| `PP FF ON` | all Prog Parameters enabled | ✅ 2C-2F only |
+| `PP xx SV yy` | for PP xx, Set the Value to yy | ✅ 2C-2F only |
+| `PPS` | print a PP Summary | ✅ 2C-2F only |
 
 ### Voltage Reading Commands
 
@@ -73,9 +73,9 @@ Bluetooth.
 | `FT hh` | Filter for Transmitter = hh | ✅ |
 | `H0, H1` | Headers off, or on | ✅ |
 | `IA` | Is the protocol Active? | ✅ |
-| `MA` | Monitor All | |
-| `MR hh` | Monitor for Receiver = hh | |
-| `MT hh` | Monitor for Transmitter = hh | |
+| `MA` | Monitor All | ✅ CAN only |
+| `MR hh` | Monitor for Receiver = hh | ✅ CAN 29 bit only |
+| `MT hh` | Monitor for Transmitter = hh | ✅ CAN 29 bit only |
 | `NL` | Normal Length messages | ✅ |
 | `PC` | Protocol Close | ✅ |
 | `R0, R1` | Responses off, or on | ✅ |
@@ -126,28 +126,28 @@ Bluetooth.
 | :--- | :--- | :--- |
 | `C0, C1` | send Confirmation off, or on | |
 | `CAF0, CAF1` | Automatic Formatting off, or on |  ✅ |
-| `CEA` | CAN Extended Addressing off | |
-| `CEA hh` | use CAN Extended Address hh | |
-| `CER hh` | set CAN Extended Rx address to hh | |
-| `CF hhh` | set the ID Filter to hhh | |
-| `CF hhhhhhhh` | set the ID Filter to hhhhhhhh | |
-| `CFC0, CFC1` | Flow Controls off, or on | |
-| `CM hhh` | set the ID Mask to hhh | |
-| `CM hhhhhhhh` | set the ID Mask to hhhhhhhh | |
+| `CEA` | CAN Extended Addressing off | ✅ |
+| `CEA hh` | use CAN Extended Address hh | ✅ |
+| `CER hh` | set CAN Extended Rx address to hh | ✅ |
+| `CF hhh` | set the ID Filter to hhh | ✅ |
+| `CF hhhhhhhh` | set the ID Filter to hhhhhhhh | ✅ |
+| `CFC0, CFC1` | Flow Controls off, or on | ✅ |
+| `CM hhh` | set the ID Mask to hhh | ✅ |
+| `CM hhhhhhhh` | set the ID Mask to hhhhhhhh | ✅ |
 | `CP hh` | set CAN Priority to hh (29 bit) | |
-| `CRA` | reset the Receive Address filters | |
-| `CRA hhh` | set CAN Receive Address to hhh | |
-| `CRA hhhhhhhh` | set the Rx Address to hhhhhhhh | |
+| `CRA` | reset the Receive Address filters | ✅ |
+| `CRA hhh` | set CAN Receive Address to hhh | ✅ |
+| `CRA hhhhhhhh` | set the Rx Address to hhhhhhhh | ✅ |
 | `CS` | show CAN Status counts & freq | |
 | `CSM0, CSM1` | Silent Monitoring off, or on | |
 | `CTM1` | set Timer Multiplier to 1 | |
 | `CTM5` | set Timer Multiplier to 5 | |
 | `D0, D1` | display of the DLC off, or on | ✅ |
-| `FC SM h` | Flow Control, Set the Mode to h | |
-| `FC SH hhh` | FC, Set the Header to hhh | |
-| `FC SH hhhhhhhh` | Set the Header to hhhhhhhh | |
-| `FC SD [1 - 5 bytes]` | FC, Set Data to [...] | |
-| `PB xx yy` | Protocol B options and baud rate | |
+| `FC SM h` | Flow Control, Set the Mode to h | ✅ |
+| `FC SH hhh` | FC, Set the Header to hhh | ✅ |
+| `FC SH hhhhhhhh` | Set the Header to hhhhhhhh | ✅ |
+| `FC SD [1 - 5 bytes]` | FC, Set Data to [...] | ✅ CTS only, see below |
+| `PB xx yy` | Protocol B options and baud rate | ✅ no J1939 format |
 | `RTR` | send an RTR message | |
 | `V0, V1` | use of Variable DLC off, or on | |
 
@@ -173,3 +173,18 @@ Bluetooth.
 | `PROGV p vvvvvvvv` | drive an OBD-II pin `p`, or release it |
 | `VIF PASSTHRU` | Select the J2534 binary frontend on the current data connection. |
 | `VIF SLCAN` | Select the SLCAN frontend on the current data connection. |
+
+
+### Additional implemented commands
+
+`AT CRA`, `CF` and `CM` replace the default OBD reply ranges with a CAN identifier and mask. For physical requests with a filter, flow control uses the request identifier.
+
+`AT FC SH`, `FC SD` and `FC SM` configure flow control. FC SD accepts CTS (30, block size and valid STmin); `CFC0` disables outgoing flow control and displays the first frame.
+
+`AT CEA hh` adds an extended address to outgoing frames and hides it with transport headers in CAF1/H0. `AT CER hh` filters the reply address; `AT CEA` disables extended addressing.
+
+Protocols B/C use configurable CAN options and a 500 kbit/s baud divisor (`PB`, `PP 2C–2F`, `PPS`). Unsupported J1939 formats are refused. PP settings survive AT Z, but not a power cycle.
+
+`AT MA`, `MR hh` and `MT hh` monitor CAN listen-only until any client byte arrives. MR/MT require 29-bit identifiers. The bounded queue can lose frames on a busy bus; use SLCAN for full captures.
+
+The B/C divisor must select a rate the driver supports: 1000, 500, 250, 125 or 50 kbit/s on this branch. The independent expanded-rate change adds the remaining rates.
