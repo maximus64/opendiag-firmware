@@ -53,14 +53,14 @@ static const gpio_num_t held_outputs[] = {
     PIN_CAN1_SILENT,
 #endif
 #if OPENDIAG_HAS_J1850
-    PIN_J1850_MODE, PIN_J1850_TX_P, PIN_J1850_TX_N,
+    PIN_J1850_MODE,  PIN_J1850_TX_P,    PIN_J1850_TX_N,
 #endif
 #if OPENDIAG_HAS_KLINE
-    PIN_KLINE_TX, PIN_KLINE_nSILENT,
+    PIN_KLINE_TX,    PIN_KLINE_nSILENT,
 #endif
 #if OPENDIAG_HAS_OBD_HS
-    PIN_HS_BOOST_EN, PIN_HS_OBD_6, PIN_HS_OBD_9, PIN_HS_OBD_11,
-    PIN_HS_OBD_12, PIN_HS_OBD_13, PIN_HS_OBD_14, PIN_HS_VOLTAGE_ADJUST,
+    PIN_HS_BOOST_EN, PIN_HS_OBD_6,      PIN_HS_OBD_9,   PIN_HS_OBD_11,
+    PIN_HS_OBD_12,   PIN_HS_OBD_13,     PIN_HS_OBD_14,  PIN_HS_VOLTAGE_ADJUST,
 #endif
 #if OPENDIAG_HAS_OBD_LS
     PIN_LS_OBD_15,
@@ -222,7 +222,8 @@ static esp_err_t power_edges_setup(void) {
 
     if (err == ESP_OK)
         err = pcnt_unit_set_glitch_filter(edges, &filter);
-    for (size_t i = 0; err == ESP_OK && i < sizeof(pins) / sizeof(pins[0]); i++) {
+    for (size_t i = 0; err == ESP_OK && i < sizeof(pins) / sizeof(pins[0]);
+         i++) {
         const pcnt_chan_config_t chan = {.edge_gpio_num = pins[i],
                                          .level_gpio_num = -1};
         pcnt_channel_handle_t ch;
