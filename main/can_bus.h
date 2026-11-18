@@ -7,6 +7,8 @@
 #include "can_frame.h"
 
 void can_print_stat(void);
+/** Error counters are meaningful only while the controller is open. */
+esp_err_t can_bus_error_counters(uint8_t *tec, uint8_t *rec);
 esp_err_t can_bus_setup(int baud_rate);
 /** Failure retains resources; retry teardown before setup. */
 esp_err_t can_bus_teardown(void);
