@@ -1250,3 +1250,28 @@ TEST(cfc0_shows_the_first_frame_and_sends_no_flow_control) {
                              elm_ask("2180\r"));
     TEST_ASSERT_EQUAL_INT(1, fake_can_sent_count());
 }
+
+TEST(cea_prefixes_the_address_and_cer_filters_replies) {
+    static const uint8_t reply[8] = {0xF1, 0x03, 0x61, 0x80, 0x01};
+    elm_echo_off();
+    elm_ok(CAN_11BIT_500K);
+    elm_ok("ATSH6F1\r");
+    elm_ok("ATCRA612\r");
+    elm_ok("ATCEA12\r");
+    fake_can_stage_response(0x612, 8, reply, 5);
+    TEST_ASSERT_EQUAL_STRING("61 80 01 \r" ELM_PROMPT, elm_ask("2180\r"));
+    const struct can_frame *req = fake_can_sent(0);
+    TEST_ASSERT_EQUAL_HEX32(0x6F1, req->id);
+    TEST_ASSERT_EQUAL_HEX32(0x12, req->data[0]);
+    TEST_ASSERT_EQUAL_HEX32(0x02, req->data[1]);
+    TEST_ASSERT_EQUAL_HEX32(0x21, req->data[2]);
+
+    elm_ok("ATCERF2\r");
+    fake_can_stage_response(0x612, 8, reply, 5);
+    TEST_ASSERT_EQUAL_STRING("NO DATA\r" ELM_PROMPT, elm_ask("2180\r"));
+
+    elm_ok("ATCEA\r");
+    fake_can_stage_response(0x612, 8, body_reply, 5);
+    elm_ask("2180\r");
+    TEST_ASSERT_EQUAL_HEX32(0x02, fake_can_sent(2)->data[0]);
+}
