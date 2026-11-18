@@ -1178,7 +1178,6 @@ TEST(failed_flow_control_keeps_can_open_for_the_next_request) {
     TEST_ASSERT_EQUAL_HEX32(CAN_EFF_FLAG | 0x0CDA10F1, fake_can_sent(1)->id);
 }
 
-
 static const uint8_t body_reply[8] = {0x03, 0x61, 0x80, 0x01};
 static const uint8_t body_ff[8] = {0x10, 0x0A, 0x61, 0x80, 1, 2, 3, 4};
 static const uint8_t body_cf0[8] = {0x21, 5, 6, 7, 8, 0, 0, 0};
@@ -1187,7 +1186,6 @@ static void on_body_module(void) {
     elm_ok("ATSH7B0\r");
     elm_ok("ATCRA7C0\r");
 }
-
 
 TEST(cra_accepts_replies_outside_the_obd_range_until_reset) {
     on_can_11bit();
@@ -1324,7 +1322,6 @@ TEST(pp_2c_2d_become_protocol_b_defaults_after_a_reset) {
     elm_ok("ATPP2CSVE0\r");
     elm_ok("ATPP2DSV04\r");
 }
-
 
 TEST(a_filtered_physical_request_finishes_after_its_reply) {
     on_can_11bit();

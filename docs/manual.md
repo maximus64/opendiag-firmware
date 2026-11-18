@@ -260,7 +260,8 @@ Apps that only support *Bluetooth Classic* ELM327 adapters won't find it. Look f
 | 7 | ISO 15765-4 CAN 29-bit, 500 kbaud | ✅ |
 | 8 | ISO 15765-4 CAN 11-bit, 250 kbaud | ✅ |
 | 9 | ISO 15765-4 CAN 29-bit, 250 kbaud | ✅ |
-| A–C | J1939, USER1, USER2 | not yet |
+| A | SAE J1939 | not yet |
+| B, C | USER1/USER2 CAN, rate and identifier length set with `AT PB` | ✅ |
 
 Automatic search tries CAN first (500k before 250k), then K-Line, then J1850. Setting a protocol
 by hand skips the search and connects faster. `AT SS` switches to the SAE J1978 order, which
@@ -603,3 +604,7 @@ for any damage arising from its use, including a bricked module, an immobilised 
 costs. You are responsible for everything you send to a vehicle. See the repository
 [README](https://github.com/maximus64/opendiag-firmware/blob/main/README.md) and
 [LICENSE](https://github.com/maximus64/opendiag-firmware/blob/main/LICENSE) for the full terms.
+
+### Modules outside the OBD-II address ranges
+
+For a module at request ID 7B0 and reply ID 7C0, use `AT PB 81 0A` then `AT SP B` for 50 kbit/s 11-bit CAN, `AT SH 7B0` and `AT CRA 7C0`. Use `AT CEA hh` when the module requires an extended address. `FC SH`, `FC SD` and `FC SM` configure flow control. The listen-first guard checks the selected rate before transmission; `AT D` or `AT Z` restores the defaults.
