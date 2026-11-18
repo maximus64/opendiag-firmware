@@ -1177,3 +1177,12 @@ TEST(failed_flow_control_keeps_can_open_for_the_next_request) {
     TEST_ASSERT_EQUAL_INT(teardowns, fake_can_teardown_count());
     TEST_ASSERT_EQUAL_HEX32(CAN_EFF_FLAG | 0x0CDA10F1, fake_can_sent(1)->id);
 }
+
+TEST(cp_supplies_the_priority_of_a_six_digit_29bit_header) {
+    on_can_29bit();
+    elm_ok("ATCP0C\r");
+    elm_ok("ATSHDA10F1\r");
+    fake_can_stage_response(CAN_EFF_FLAG | 0x18DAF110, 8, supported_pids, 1);
+    elm_ask("0100\r");
+    TEST_ASSERT_EQUAL_HEX32(CAN_EFF_FLAG | 0x0CDA10F1, fake_can_sent(0)->id);
+}

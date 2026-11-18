@@ -190,6 +190,8 @@ typedef struct {
     /** AT WM. Empty means the default for whichever protocol was negotiated. */
     uint8_t wakeup_msg[BUS_PERIODIC_MAX];
     uint8_t wakeup_len;
+    uint8_t header_digits;
+    uint8_t can_priority;
 } elm327_settings_t;
 
 /* Timing evidence belongs to one exchange until the next command. */
@@ -329,6 +331,8 @@ static int elm327_kline_init(elm327_ctx_t *e, kline_init_mode_t mode);
 static void elm327_kline_reconcile(elm327_ctx_t *e);
 static void elm327_kline_apply_wakeup(elm327_ctx_t *e);
 
+static bool elm327_at_extra_command(elm327_ctx_t *e, const char *cmd);
+
 static size_t elm327_uart_read_bytes(elm327_ctx_t *e, uint8_t *buffer,
                                      size_t len, TickType_t ticks_to_wait) {
     return vif_link_read(buffer, len, ticks_to_wait);
@@ -451,6 +455,8 @@ static void elm327_load_defaults(elm327_ctx_t *e) {
     /* AT SW defaults to $92, "a nominal delay of 3 seconds". */
     e->settings.wakeup_ms = 0x92u * 20u;
     e->settings.wakeup_len = 0;
+    e->settings.header_digits = 8;
+    e->settings.can_priority = 0x18;
 }
 
 /**
@@ -554,6 +560,7 @@ static int at_set_header(elm327_ctx_t *e, const char *arg) {
     ESP_LOGI(TAG, "Set Header to 0x%08" PRIx32, id);
 
     e->settings.header_id = id;
+    e->settings.header_digits = (uint8_t)len;
 
     return 0;
 }
@@ -758,6 +765,7 @@ static int elm327_set_protocol(elm327_ctx_t *e, int proto) {
      * two CAN protocols on the same wire can still want different bit rates. */
     if (bus != VIF_BUS_CAN && vif_bus_is_open(VIF_OWNER_LINK, bus)) {
         e->settings.header_id = header_id;
+        e->settings.header_digits = 8;
         e->settings.current_protocol = proto;
         return 0;
     }
@@ -781,6 +789,7 @@ static int elm327_set_protocol(elm327_ctx_t *e, int proto) {
     memset(&e->timing, 0, sizeof(e->timing));
 
     e->settings.header_id = header_id;
+    e->settings.header_digits = 8;
     e->settings.current_protocol = proto;
     return 0;
 }
@@ -1410,6 +1419,8 @@ static void elm327_at_command_handler(elm327_ctx_t *e, const char *cmd) {
          * so there is nothing to switch; accepted so a client that asks is
          * not turned away. */
         elm327_send_string(e, "OK\r");
+    } else if (elm327_at_extra_command(e, cmd)) {
+        /* Answered by the extended command handler. */
     } else {
         elm327_send_string(e, "?\r");
     }
@@ -1803,6 +1814,17 @@ static uint32_t elm327_can_flow_control_id(const elm327_ctx_t *e,
     return 0x18DA0000u | ((reply_id & 0xFFu) << 8) | 0xF1u | CAN_EFF_FLAG;
 }
 
+static uint32_t elm327_can_request_id(const elm327_ctx_t *e) {
+    uint32_t id = e->settings.header_id;
+
+    if (elm327_can_is_11bit(e))
+        return id & CAN_SFF_MASK;
+    if (e->settings.header_digits == 6)
+        id = ((uint32_t)(e->settings.can_priority & 0x1F) << 24) |
+             (id & 0xFFFFFFu);
+    return (id & CAN_EFF_MASK) | CAN_EFF_FLAG;
+}
+
 static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
                                     size_t len, int num_frame) {
     int ret;
@@ -1817,14 +1839,14 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
     }
 
     /* UDS framing. Single frame */
-    tx_frame.id = e->settings.header_id;
+    tx_frame.id = elm327_can_request_id(e);
 
     /* Normal-fixed priority is not part of the transport address. */
     uint32_t address_mask =
         elm327_can_is_11bit(e) ? UINT32_MAX : ~ELM327_CAN_PRIORITY_MASK;
-    bool multicast = elm327_can_is_11bit(e)
-                         ? tx_frame.id == 0x7DF
-                         : (tx_frame.id & address_mask) == 0x00DB33F1;
+    bool multicast = elm327_can_is_11bit(e) ? tx_frame.id == 0x7DF
+                                            : (tx_frame.id & address_mask) ==
+                                                  (0x00DB33F1 | CAN_EFF_FLAG);
 
     // Set extended ID flag for 29 bit ID protocols
     if (e->settings.current_protocol == ELM327_PROTO_CAN_29BIT_250K ||
@@ -2955,6 +2977,25 @@ done:
      * nothing. */
     e->settings.auto_search = true;
     return ret;
+}
+
+static bool elm327_at_extra_command(elm327_ctx_t *e, const char *cmd) {
+    uint8_t b = 0;
+    elm327_settings_t *s = &e->settings;
+    const char *reply = "OK\r";
+    const char *bad = "?\r";
+    if (strncmp(cmd, "CP", 2) == 0) {
+        if (at_parse_byte(&cmd[2], &b))
+            reply = bad;
+        else
+            s->can_priority = b & 0x1F;
+    } else {
+        return false;
+    }
+
+    if (reply)
+        elm327_send_string(e, reply);
+    return true;
 }
 
 static void elm327_parse_command(elm327_ctx_t *e, const char *cmd) {
