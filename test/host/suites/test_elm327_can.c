@@ -1215,3 +1215,16 @@ TEST(cf_and_cm_filter_by_id_and_mask) {
     TEST_ASSERT_EQUAL_STRING("7C5 03 61 80 01 00 00 00 00 \r" ELM_PROMPT,
                              elm_ask("2180\r"));
 }
+
+
+TEST(a_filtered_physical_request_finishes_after_its_reply) {
+    on_can_11bit();
+    elm_ok("ATSH7B0\r");
+    elm_ok("ATCRA7C0\r");
+    elm_ok("ATAT0\r");
+    elm_ok("ATSTFF\r");
+    fake_can_stage_response(0x7C0, 8, body_reply, 5);
+    uint32_t before = fake_clock_ms();
+    elm_ask("2180\r");
+    TEST_ASSERT_TRUE(fake_clock_ms() - before < 100);
+}
