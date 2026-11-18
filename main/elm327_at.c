@@ -1970,8 +1970,7 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
     struct can_frame tx_frame = {0};
     const unsigned a = elm327_can_addr_len(e);
     const bool formatted = elm327_can_formatted(e);
-    const bool var_dlc =
-        (elm327_can_opts(e) & ELM327_OPT_VAR_DLC);
+    const bool var_dlc = (elm327_can_opts(e) & ELM327_OPT_VAR_DLC);
 
     if (elm327_can_ensure_open(e))
         return -2;
