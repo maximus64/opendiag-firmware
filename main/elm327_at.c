@@ -273,6 +273,8 @@ typedef struct {
      * speaks, not to watch four of them fail.
      */
     bool in_search;
+    char monitor;
+    uint8_t monitor_addr;
 } elm327_ctx_t;
 
 static elm327_ctx_t g_elm327;
@@ -491,6 +493,7 @@ static void elm327_load_defaults(elm327_ctx_t *e) {
         e->settings.user_opts[i] = elm327_pp(i * 2);
         e->settings.user_div[i] = elm327_pp(i * 2 + 1);
     }
+    e->monitor = 0;
 }
 
 /**
@@ -3167,6 +3170,30 @@ static int at_parse_can_id(const char *arg, bool wildcard, uint32_t *id,
     return 0;
 }
 
+static void elm327_monitor_poll(elm327_ctx_t *e) {
+    struct can_frame rx;
+    bool printed = false;
+
+    for (unsigned i = 0; i < 64 && can_frame_recv(&rx, 0) == 0; i++) {
+        bool ext = (rx.id & CAN_EFF_FLAG) != 0;
+        if (rx.dlc > 8 || (rx.id & CAN_RTR_FLAG))
+            continue;
+        if (e->settings.can_filter
+                ? !elm327_can_reply_id_ok(e, rx.id)
+                : (!(elm327_can_opts(e) & ELM327_OPT_RX_BOTH) &&
+                   ext == elm327_can_is_11bit(e)))
+            continue;
+        if (e->monitor == 'R' && ((rx.id >> 8) & 0xFFu) != e->monitor_addr)
+            continue;
+        if (e->monitor == 'T' && (rx.id & 0xFFu) != e->monitor_addr)
+            continue;
+        elm327_print_can_frame(e, rx.id, rx.dlc, rx.data);
+        printed = true;
+    }
+    if (printed)
+        elm327_uart_flush(e);
+}
+
 static void elm327_pp_summary(elm327_ctx_t *e) {
     char out[48];
     char *p = out;
@@ -3315,6 +3342,32 @@ static bool elm327_at_extra_command(elm327_ctx_t *e, const char *cmd) {
     } else if (strncmp(cmd, "PP", 2) == 0) {
         if (at_set_pp(&cmd[2]))
             reply = bad;
+    } else if (strcmp(cmd, "MA") == 0 || strncmp(cmd, "MR", 2) == 0 ||
+               strncmp(cmd, "MT", 2) == 0) {
+        /* ponytail: CAN only, and MR/MT on 29 bit IDs only, where the
+         * receiver and transmitter are the second and last ID bytes. */
+        vif_bus_cfg_t cfg = {0};
+        if (!elm327_is_can(e) ||
+            (cmd[1] != 'A' &&
+             (elm327_can_is_11bit(e) || at_parse_byte(&cmd[2], &b)))) {
+            reply = bad;
+        } else {
+            /* Silent monitoring, the ELM327's CSM1 default: reopened
+             * listen-only, so watching a bus never ACKs or error-frames on
+             * it, whatever its rate. Released again when monitoring stops. */
+            elm327_bus_for_protocol(s->current_protocol, &cfg, NULL);
+            cfg.listen_only = true;
+            if (vif_bus_release_all(VIF_OWNER_LINK) != ESP_OK ||
+                vif_bus_open(VIF_OWNER_LINK, VIF_BUS_CAN, &cfg) != ESP_OK) {
+                reply = bad;
+            } else {
+                read_all_can(e);
+                e->monitor = cmd[1];
+                e->monitor_addr = b;
+                reply = NULL;
+            }
+        }
+
     } else {
         return false;
     }
@@ -3421,7 +3474,8 @@ static void elm327_parse_command(elm327_ctx_t *e, const char *cmd) {
     }
 
 done:
-    elm327_send_string(e, "\r>");
+    if (!e->monitor)
+        elm327_send_string(e, "\r>");
     elm327_uart_flush(e);
 }
 
@@ -3529,6 +3583,21 @@ static bool elm327_fe_start(void) {
 static void elm327_fe_feed(const uint8_t *data, size_t len) {
     elm327_ctx_t *e = &g_elm327;
 
+    /* "Monitoring will continue until any character is received". The rest
+     * of this chunk goes with that character, as after AT Z: the client has
+     * to wait for the prompt. */
+    if (e->monitor && len) {
+        e->monitor = 0;
+        /* Drop the listen-only bus: the next request reopens it the
+         * ordinary way, listening first. */
+        vif_bus_release_all(VIF_OWNER_LINK);
+        elm327_send_string(e, "STOPPED\r\r>");
+        elm327_uart_flush(e);
+        e->line.cmdidx = 0;
+        e->line.overflow = false;
+        return;
+    }
+
     for (size_t i = 0; i < len; i++) {
         elm327_feed_byte(e, (char)data[i]);
 
@@ -3569,7 +3638,14 @@ static void elm327_fe_stop(void) {
     }
 }
 
-static void elm327_fe_poll(void) { elm327_observe_late_replies(&g_elm327); }
+static void elm327_fe_poll(void) {
+    elm327_ctx_t *e = &g_elm327;
+
+    if (e->monitor)
+        elm327_monitor_poll(e);
+    else
+        elm327_observe_late_replies(e);
+}
 
 const vif_frontend_t elm327_frontend = {
     .name = "elm327",

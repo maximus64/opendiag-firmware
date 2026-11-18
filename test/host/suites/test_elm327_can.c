@@ -1324,3 +1324,35 @@ TEST(pp_2c_2d_become_protocol_b_defaults_after_a_reset) {
     elm_ok("ATPP2CSVE0\r");
     elm_ok("ATPP2DSV04\r");
 }
+
+TEST(ma_streams_frames_until_a_byte_arrives) {
+    static const uint8_t data[2] = {0xAB, 0xCD};
+    on_can_11bit();
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATMR10\r"));
+    TEST_ASSERT_EQUAL_STRING("", elm_ask("ATMA\r"));
+    TEST_ASSERT_TRUE(fake_can_last_listen_only());
+    fake_can_stage_stale(0x123, 2, data);
+    fake_can_stage_stale(0x18DAF110 | CAN_EFF_FLAG, 2, data);
+    fake_port_reset();
+    elm327_frontend.poll();
+    TEST_ASSERT_EQUAL_STRING("123 AB CD \r", fake_port_text(0));
+    TEST_ASSERT_EQUAL_STRING("STOPPED\r" ELM_PROMPT, elm_ask("X"));
+
+    /* The next request reopens the bus driving it, after listening. */
+    fake_can_stage_response(0x7E8, 8, supported_pids, 1);
+    elm_ask("0100\r");
+    TEST_ASSERT_FALSE(fake_can_last_listen_only());
+    TEST_ASSERT_TRUE(fake_can_last_listen_first());
+}
+
+TEST(mt_on_29bit_keeps_only_that_transmitter) {
+    static const uint8_t data[2] = {0x01, 0x02};
+    on_can_29bit();
+    TEST_ASSERT_EQUAL_STRING("", elm_ask("ATMT10\r"));
+    fake_can_stage_stale(0x18DAF111 | CAN_EFF_FLAG, 2, data);
+    fake_can_stage_stale(0x18DAF110 | CAN_EFF_FLAG, 2, data);
+    fake_port_reset();
+    elm327_frontend.poll();
+    TEST_ASSERT_EQUAL_STRING("18DAF110 01 02 \r", fake_port_text(0));
+    elm_ask("\r");
+}
