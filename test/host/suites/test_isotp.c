@@ -460,3 +460,22 @@ TEST(extended_address_is_checked_before_pci) {
     sf[1] = 7;
     TEST_ASSERT_EQUAL_INT(ISOTP_IGNORED, feed(sf, 8, 2));
 }
+
+TEST(first_cf_numbered_zero_is_rejected_unless_lenient) {
+    uint8_t cf0[8] = {0x20, 7, 8, 9, 10, 11, 12, 13};
+    uint8_t cf1[8] = {0x21, 14, 15, 16, 17, 18, 19, 20};
+    first(20, 0);
+    TEST_ASSERT_EQUAL_INT(ISOTP_ERR_SEQUENCE, feed(cf0, 8, 1));
+
+    config.lenient_first_sn = true;
+    TEST_ASSERT_EQUAL_INT(0, isotp_rx_init(&rx, &config, received, 4095));
+    first(20, 0);
+    TEST_ASSERT_EQUAL_INT(ISOTP_FRAME, feed(cf0, 8, 1));
+    TEST_ASSERT_EQUAL_INT(ISOTP_COMPLETE, feed(cf1, 8, 2));
+    for (unsigned i = 0; i < 20; i++)
+        TEST_ASSERT_EQUAL_INT(i + 1, received[i]);
+    /* Only the first CF may be 0: a later 0 out of turn still aborts. */
+    first(20, 3);
+    TEST_ASSERT_EQUAL_INT(ISOTP_FRAME, feed(cf1, 8, 4));
+    TEST_ASSERT_EQUAL_INT(ISOTP_ERR_SEQUENCE, feed(cf0, 8, 5));
+}
