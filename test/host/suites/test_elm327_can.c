@@ -1250,3 +1250,16 @@ TEST(cfc0_shows_the_first_frame_and_sends_no_flow_control) {
                              elm_ask("2180\r"));
     TEST_ASSERT_EQUAL_INT(1, fake_can_sent_count());
 }
+
+
+TEST(a_filtered_physical_request_finishes_after_its_reply) {
+    on_can_11bit();
+    elm_ok("ATSH7B0\r");
+    elm_ok("ATCRA7C0\r");
+    elm_ok("ATAT0\r");
+    elm_ok("ATSTFF\r");
+    fake_can_stage_response(0x7C0, 8, body_reply, 5);
+    uint32_t before = fake_clock_ms();
+    elm_ask("2180\r");
+    TEST_ASSERT_TRUE(fake_clock_ms() - before < 100);
+}

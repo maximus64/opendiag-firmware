@@ -2041,7 +2041,7 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
         }
         if (num_frame > 0 && frame_counter >= (unsigned)num_frame)
             return 0;
-        if (!multicast && !e->settings.can_filter && segment.complete)
+        if (!multicast && segment.complete)
             return 0;
         if (!response_pending) {
             Timer_start(&timer, elm327_collection_window(e));
