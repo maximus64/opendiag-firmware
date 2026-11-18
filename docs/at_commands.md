@@ -23,8 +23,8 @@ Bluetooth.
 | `L0, L1` | Linefeeds off, or on | ✅ |
 | `LP` | go to Low Power mode | |
 | `M0, M1` | Memory off, or on | ✅ |
-| `RD` | Read the stored Data byte | |
-| `SD hh` | Save Data byte hh | |
+| `RD` | Read the stored Data byte | ✅ |
+| `SD hh` | Save Data byte hh | ✅ RAM only |
 | `WS` | Warm Start (quick software reset) | ✅ |
 | `Z` | reset all | ✅ |
 | `@1` | display the device description | ✅ |
