@@ -109,7 +109,7 @@ Implemented and working:
 Not yet implemented:
 
 - Protocols 10–12 (SAE J1939, USER1, USER2)
-- The second CAN transceiver
+- Two CAN buses at once (the second transceiver serves AUX or, after a rework, pins 3/11)
 - A persistent per-link default, so a bench unit has to be told `mode usb slcan` after each
   power cycle
 

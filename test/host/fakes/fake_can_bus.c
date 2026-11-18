@@ -199,7 +199,6 @@ esp_err_t can_bus_set_port(can_port_t port) {
 
 can_port_t can_bus_port(void) { return fake_port; }
 
-
 int can_send(const struct can_frame *frame) {
     if (!frame) {
         return -1;
