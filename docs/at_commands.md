@@ -186,3 +186,8 @@ Bluetooth.
 Protocols B/C use configurable CAN options and a 500 kbit/s baud divisor (`PB`, `PP 2Câ€“2F`, `PPS`). Unsupported J1939 formats are refused. PP settings survive AT Z, but not a power cycle.
 
 `AT MA`, `MR hh` and `MT hh` monitor CAN listen-only until any client byte arrives. MR/MT require 29-bit identifiers. The bounded queue can lose frames on a busy bus; use SLCAN for full captures.
+
+
+### K-Line monitoring
+
+`AT MA`, `MR hh` and `MT hh` also monitor K-Line on protocols 3–5, without initialisation or transmission. Messages are framed by the discovery gap; MR/MT filter target/source header bytes. Any client byte stops monitoring and releases the bus.
