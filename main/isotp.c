@@ -146,6 +146,10 @@ int isotp_rx_feed(isotp_rx_t *rx, const struct can_frame *f, uint32_t now_us,
     size = remaining < 7 - a ? remaining : 7 - a;
     if (f->dlc < a + 1 + size)
         return ISOTP_IGNORED;
+    /* First CF numbered 0: resynchronise on it, the rest follow from there. */
+    if (rx->config.lenient_first_sn && rx->offset == 6 - a &&
+        (f->data[a] & 0x0f) == 0)
+        rx->sequence = 0;
     if ((f->data[a] & 0x0f) != rx->sequence) {
         rx->state = ISOTP_RX_IDLE;
         return ISOTP_ERR_SEQUENCE;

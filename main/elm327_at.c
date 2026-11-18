@@ -1950,6 +1950,7 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
             isotp_config_t config = isotp_config_default(
                 elm327_can_flow_control_id(e, rx.id), rx.id);
             config.rx_mask = address_mask;
+            config.lenient_first_sn = true;
             isotp_rx_init(stream, &config, NULL, ISOTP_MAX_PAYLOAD);
         }
         isotp_segment_t segment;
