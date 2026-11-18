@@ -1907,6 +1907,7 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
     if (!vif_bus_is_open(VIF_OWNER_LINK, VIF_BUS_CAN)) {
         vif_bus_cfg_t cfg = {0};
         elm327_bus_for_protocol(e->settings.current_protocol, &cfg, NULL);
+        cfg.listen_first = can_guard;
         if (vif_bus_open(VIF_OWNER_LINK, VIF_BUS_CAN, &cfg) != ESP_OK)
             return ELM327_XFER_CAN_ERROR;
         elm327_apply_bus_policy(e, VIF_BUS_CAN, e->settings.current_protocol);
