@@ -134,7 +134,7 @@ Bluetooth.
 | `CFC0, CFC1` | Flow Controls off, or on | |
 | `CM hhh` | set the ID Mask to hhh | |
 | `CM hhhhhhhh` | set the ID Mask to hhhhhhhh | |
-| `CP hh` | set CAN Priority to hh (29 bit) | |
+| `CP hh` | set CAN Priority to hh (29 bit) | ✅ |
 | `CRA` | reset the Receive Address filters | |
 | `CRA hhh` | set CAN Receive Address to hhh | |
 | `CRA hhhhhhhh` | set the Rx Address to hhhhhhhh | |
@@ -192,3 +192,6 @@ What a request can answer besides its data, as the ELM327 words it:
 | `BUS INIT: ...ERROR` | The K-Line initialisation failed |
 
 A failed automatic search still answers `NO DATA` or `?` as before.
+### Additional implemented commands
+
+`AT CP hh` supplies the priority byte for six-digit CAN headers on a 29-bit protocol.
