@@ -178,3 +178,5 @@ Bluetooth.
 ### Additional implemented commands
 
 `AT CRA`, `CF` and `CM` replace the default OBD reply ranges with a CAN identifier and mask. For physical requests with a filter, flow control uses the request identifier.
+
+`AT FC SH`, `FC SD` and `FC SM` configure flow control. FC SD accepts CTS (30, block size and valid STmin); `CFC0` disables outgoing flow control and displays the first frame.

@@ -193,6 +193,12 @@ typedef struct {
     bool can_filter;
     uint32_t cf_id;
     uint32_t cf_mask;
+    bool cfc;
+    uint8_t fc_mode;
+    bool fc_header_set;
+    uint32_t fc_header;
+    uint8_t fc_data[5];
+    uint8_t fc_len;
 } elm327_settings_t;
 
 /* Timing evidence belongs to one exchange until the next command. */
@@ -457,6 +463,10 @@ static void elm327_load_defaults(elm327_ctx_t *e) {
     e->settings.wakeup_ms = 0x92u * 20u;
     e->settings.wakeup_len = 0;
     e->settings.can_filter = false;
+    e->settings.cfc = true;
+    e->settings.fc_mode = 0;
+    e->settings.fc_header_set = false;
+    e->settings.fc_len = 0;
 }
 
 /**
@@ -1824,6 +1834,11 @@ static uint32_t elm327_can_flow_control_id(const elm327_ctx_t *e,
 
 static uint32_t elm327_can_fc_tx_id(const elm327_ctx_t *e, uint32_t reply_id,
                                     uint32_t request_id, bool multicast) {
+    if (e->settings.fc_mode == 1 && e->settings.fc_header_set) {
+        uint32_t id = e->settings.fc_header;
+        return elm327_can_is_11bit(e) ? id & CAN_SFF_MASK
+                                      : (id & CAN_EFF_MASK) | CAN_EFF_FLAG;
+    }
     if (e->settings.can_filter && !multicast) {
         return request_id;
     }
@@ -1977,6 +1992,10 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
             isotp_config_t config = isotp_config_default(
                 elm327_can_fc_tx_id(e, rx.id, tx_frame.id, multicast), rx.id);
             config.rx_mask = address_mask;
+            if (e->settings.fc_mode && e->settings.fc_len >= 3) {
+                config.block_size = e->settings.fc_data[1];
+                config.stmin = e->settings.fc_data[2];
+            }
             isotp_rx_init(stream, &config, NULL, ISOTP_MAX_PAYLOAD);
         }
         isotp_segment_t segment;
@@ -1993,10 +2012,16 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
         if (fc_result < 0)
             goto fail;
         if (fc_result == ISOTP_FRAME) {
-            int sent = can_frame_send_confirmed(&fc);
-            now = (uint32_t)Timer_elapsed_ms(&since_request) * 1000u;
-            if (isotp_rx_confirm(stream, sent == 0, now) < 0)
-                goto fail;
+            if (!e->settings.cfc) {
+                /* AT CFC0: no flow control, so no consecutive frames are
+                 * coming. Show the first frame and stop waiting for more. */
+                stream->state = ISOTP_RX_IDLE;
+            } else {
+                int sent = can_frame_send_confirmed(&fc);
+                now = (uint32_t)Timer_elapsed_ms(&since_request) * 1000u;
+                if (isotp_rx_confirm(stream, sent == 0, now) < 0)
+                    goto fail;
+            }
         }
         uint8_t display_dlc = rx.dlc;
         if (e->settings.can_auto_format && !e->settings.show_header &&
@@ -3033,6 +3058,8 @@ static bool elm327_at_extra_command(elm327_ctx_t *e, const char *cmd) {
             s->cf_id = id;
             s->cf_mask = mask;
         }
+    } else if (strcmp(cmd, "CFC0") == 0 || strcmp(cmd, "CFC1") == 0) {
+        s->cfc = cmd[3] == '1';
     } else if (strncmp(cmd, "CF", 2) == 0) {
         if (at_parse_can_id(&cmd[2], false, &id, NULL)) {
             reply = bad;
@@ -3051,6 +3078,38 @@ static bool elm327_at_extra_command(elm327_ctx_t *e, const char *cmd) {
                 s->cf_id = 0;
             s->can_filter = true;
             s->cf_mask = id;
+        }
+    } else if (strncmp(cmd, "FCSH", 4) == 0) {
+        size_t n = strlen(&cmd[4]);
+        if ((n != 3 && n != 8) || hex_string_to_u32_be(&cmd[4], n, &id)) {
+            reply = bad;
+        } else {
+            s->fc_header = id;
+            s->fc_header_set = true;
+        }
+    } else if (strncmp(cmd, "FCSD", 4) == 0) {
+        uint8_t d[5];
+        size_t n = strlen(&cmd[4]);
+        int got = (n && n % 2 == 0)
+                      ? hex_string_to_u8_array(&cmd[4], n, d, sizeof(d))
+                      : -1;
+        /* ponytail: a CTS flow control only - 30, block size, STmin. Bytes
+         * past the third are padding and go out as the pad byte. */
+        if (got < 3 || d[0] != 0x30 ||
+            !(d[2] <= 0x7F || (d[2] >= 0xF1 && d[2] <= 0xF9))) {
+            reply = bad;
+        } else {
+            memcpy(s->fc_data, d, (size_t)got);
+            s->fc_len = (uint8_t)got;
+        }
+    } else if (strncmp(cmd, "FCSM", 4) == 0) {
+        char m = cmd[4];
+        /* Mode 1 needs both halves defined first, mode 2 the data. */
+        if (strlen(&cmd[4]) != 1 || m < '0' || m > '2' ||
+            (m == '1' && !s->fc_header_set) || (m != '0' && s->fc_len < 3)) {
+            reply = bad;
+        } else {
+            s->fc_mode = (uint8_t)(m - '0');
         }
     } else {
         return false;

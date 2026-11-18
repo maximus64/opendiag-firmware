@@ -1180,6 +1180,13 @@ TEST(failed_flow_control_keeps_can_open_for_the_next_request) {
 
 
 static const uint8_t body_reply[8] = {0x03, 0x61, 0x80, 0x01};
+static const uint8_t body_ff[8] = {0x10, 0x0A, 0x61, 0x80, 1, 2, 3, 4};
+static const uint8_t body_cf0[8] = {0x21, 5, 6, 7, 8, 0, 0, 0};
+static void on_body_module(void) {
+    on_can_11bit();
+    elm_ok("ATSH7B0\r");
+    elm_ok("ATCRA7C0\r");
+}
 
 
 TEST(cra_accepts_replies_outside_the_obd_range_until_reset) {
@@ -1214,4 +1221,32 @@ TEST(cf_and_cm_filter_by_id_and_mask) {
     fake_can_stage_response(0x7C5, 8, body_reply, 5);
     TEST_ASSERT_EQUAL_STRING("7C5 03 61 80 01 00 00 00 00 \r" ELM_PROMPT,
                              elm_ask("2180\r"));
+}
+
+TEST(fc_sm1_uses_the_user_header_and_data) {
+    on_body_module();
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATFCSM1\r"));
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATFCSD310000\r"));
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATFCSD3000FF\r"));
+    elm_ok("ATFCSH7B5\r");
+    elm_ok("ATFCSD300810\r");
+    elm_ok("ATFCSM1\r");
+    fake_can_stage_response(0x7C0, 8, body_ff, 5);
+    fake_can_stage_response_at(0x7C0, 8, body_cf0, 1, 2);
+    elm_ask("2180\r");
+    TEST_ASSERT_EQUAL_INT(2, fake_can_sent_count());
+    const struct can_frame *fc = fake_can_sent(1);
+    TEST_ASSERT_EQUAL_HEX32(0x7B5, fc->id);
+    TEST_ASSERT_EQUAL_HEX32(0x30, fc->data[0]);
+    TEST_ASSERT_EQUAL_HEX32(0x08, fc->data[1]);
+    TEST_ASSERT_EQUAL_HEX32(0x10, fc->data[2]);
+}
+
+TEST(cfc0_shows_the_first_frame_and_sends_no_flow_control) {
+    on_body_module();
+    elm_ok("ATCFC0\r");
+    fake_can_stage_response(0x7C0, 8, body_ff, 5);
+    TEST_ASSERT_EQUAL_STRING("7C0 10 0A 61 80 01 02 03 04 \r" ELM_PROMPT,
+                             elm_ask("2180\r"));
+    TEST_ASSERT_EQUAL_INT(1, fake_can_sent_count());
 }
