@@ -11,6 +11,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "ble_uart.h"
+#include "board_features.h"
 #include "can_bus.h"
 #include "can_xfer.h"
 #include "common.h"
@@ -21,7 +22,6 @@
 #include "sdkconfig.h"
 #include "timer.h"
 #include "utility.h"
-#include "board_features.h"
 #include "vif.h"
 
 /** Response bytes held between flushes. Sized for the longest single reply a
@@ -2965,7 +2965,6 @@ done:
 static bool elm327_at_extra_command(elm327_ctx_t *e, const char *cmd) {
     char out[24];
     const char *reply = "OK\r";
-    const char *bad = "?\r";
     if (strcmp(cmd, "CS") == 0) {
         uint8_t tec = 0, rec = 0;
         /* Read with the bus up: a closed controller has no counters, and the
