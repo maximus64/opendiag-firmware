@@ -1177,3 +1177,12 @@ TEST(failed_flow_control_keeps_can_open_for_the_next_request) {
     TEST_ASSERT_EQUAL_INT(teardowns, fake_can_teardown_count());
     TEST_ASSERT_EQUAL_HEX32(CAN_EFF_FLAG | 0x0CDA10F1, fake_can_sent(1)->id);
 }
+
+TEST(sd_byte_survives_a_reset) {
+    elm_echo_off();
+    elm_ok("ATSD5A\r");
+    elm_ok("ATD\r");
+    elm_echo_off();
+    TEST_ASSERT_EQUAL_STRING("5A\r" ELM_PROMPT, elm_ask("ATRD\r"));
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATSD5\r"));
+}
