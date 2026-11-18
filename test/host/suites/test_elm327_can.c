@@ -1179,9 +1179,6 @@ TEST(failed_flow_control_keeps_can_open_for_the_next_request) {
     TEST_ASSERT_EQUAL_HEX32(CAN_EFF_FLAG | 0x0CDA10F1, fake_can_sent(1)->id);
 }
 
-
-
-
 TEST(cp_supplies_the_priority_of_a_six_digit_29bit_header) {
     on_can_29bit();
     elm_ok("ATCP0C\r");

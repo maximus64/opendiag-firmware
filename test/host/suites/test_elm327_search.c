@@ -657,7 +657,6 @@ TEST(selecting_same_protocol_after_failed_close_reopens_driver) {
     TEST_ASSERT_EQUAL_STRING("Y\r" ELM_PROMPT, elm_ask("ATIA\r"));
 }
 
-
 TEST(reopening_can_after_a_release_keeps_the_listen_first_guard) {
     elm_echo_off();
     elm_ok("ATSP6\r");
@@ -667,7 +666,6 @@ TEST(reopening_can_after_a_release_keeps_the_listen_first_guard) {
     TEST_ASSERT_EQUAL_INT(0, fake_can_sent_count());
     TEST_ASSERT_FALSE(fake_can_is_up());
 }
-
 
 TEST(a_deferred_can_selection_resets_a_previous_six_digit_header) {
     elm_echo_off();
