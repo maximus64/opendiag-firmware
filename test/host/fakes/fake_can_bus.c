@@ -200,7 +200,6 @@ void fake_can_set_activity(uint32_t frames, uint32_t errors) {
     fake_errors = errors;
 }
 
-
 int can_send(const struct can_frame *frame) {
     if (!frame) {
         return -1;
