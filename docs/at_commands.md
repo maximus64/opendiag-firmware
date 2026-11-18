@@ -190,4 +190,4 @@ Protocols B/C use configurable CAN options and a 500 kbit/s baud divisor (`PB`, 
 
 ### K-Line monitoring
 
-`AT MA`, `MR hh` and `MT hh` also monitor K-Line on protocols 3–5, without initialisation or transmission. Messages are framed by the discovery gap; MR/MT filter target/source header bytes. Any client byte stops monitoring and releases the bus.
+`AT MA`, `MR hh` and `MT hh` also monitor K-Line on protocols 3â€“5, without initialisation or transmission. Messages are framed by the discovery gap; MR/MT filter target/source header bytes. Any client byte stops monitoring and releases the bus.
