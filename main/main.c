@@ -299,6 +299,7 @@ static void ble_ctrl_command(const char *cmd, size_t len) {
     ble_uart_ctrl_reply(out);
 }
 
+#if OPENDIAG_HAS_KLINE
 static void usb_coding_changed(int itf, uint32_t baud, uint8_t data_bits,
                                uint8_t parity) {
     if (itf == USB_CDC_INTERFACE_DATA) {
@@ -312,11 +313,15 @@ static void usb_break(int itf, uint16_t duration_ms) {
     }
 }
 
+#endif
+
 static void links_setup(void) {
     elm327_register();
     slcan_register();
     j2534_register();
+#if OPENDIAG_HAS_KLINE
     kkl_register();
+#endif
 
     if (vif_link_start(&elm327_frontend) != ESP_OK) {
         ESP_LOGE(TAG, "failed to start the data link");
@@ -329,8 +334,10 @@ static void links_setup(void) {
      * themselves, so nothing has to poll.
      */
     usb_cdc_set_line_callback(usb_line_state_changed);
+#if OPENDIAG_HAS_KLINE
     usb_cdc_set_coding_callback(usb_coding_changed);
     usb_cdc_set_break_callback(usb_break);
+#endif
     ble_uart_set_conn_callback(ble_conn_changed);
 
     /* A host that opened the port before the callback existed reports no
