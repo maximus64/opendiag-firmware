@@ -1685,7 +1685,7 @@ TEST(connect_rejects_bad_device_connector_baud_protocol_and_flags) {
     c.connector = 2;
     TEST_ASSERT_EQUAL_INT(J2534_PIN, connect_with(&c));
     c.connector = 1;
-    c.baudrate = 100000;
+    c.baudrate = 123456;
     TEST_ASSERT_EQUAL_INT(J2534_BAUD, connect_with(&c));
     c.baudrate = 500000;
     c.flags = J2534_CHECKSUM_DISABLED;
