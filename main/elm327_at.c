@@ -2967,7 +2967,6 @@ done:
 static bool elm327_at_extra_command(elm327_ctx_t *e, const char *cmd) {
     elm327_settings_t *s = &e->settings;
     const char *reply = "OK\r";
-    const char *bad = "?\r";
     if (strcmp(cmd, "V0") == 0 || strcmp(cmd, "V1") == 0) {
         s->var_dlc = cmd[1] == '1';
     } else {

@@ -149,7 +149,7 @@ Bluetooth.
 | `FC SD [1 - 5 bytes]` | FC, Set Data to [...] | |
 | `PB xx yy` | Protocol B options and baud rate | |
 | `RTR` | send an RTR message | |
-| `V0, V1` | use of Variable DLC off, or on | |
+| `V0, V1` | use of Variable DLC off, or on | ✅ |
 
 ### J1939 CAN Specific Commands (protocols A to C)
 

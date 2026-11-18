@@ -1178,9 +1178,6 @@ TEST(failed_flow_control_keeps_can_open_for_the_next_request) {
     TEST_ASSERT_EQUAL_HEX32(CAN_EFF_FLAG | 0x0CDA10F1, fake_can_sent(1)->id);
 }
 
-
-
-
 TEST(v1_sends_the_real_length) {
     on_can_11bit();
     elm_ok("ATV1\r");
