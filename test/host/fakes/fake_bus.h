@@ -89,3 +89,7 @@ const uint8_t *fake_bus_sent(fake_bus_id_t bus, int idx, size_t *out_len);
 const bus_init_t *fake_bus_kline_last_init(void);
 void fake_bus_kline_init_reply(const uint8_t *data, size_t len,
                                uint32_t timestamp);
+
+/** Ordered K-Line writes, settings and breaks for bridge tests. */
+const char *fake_bus_kline_log(void);
+void fake_bus_kline_raw_result(int rc);
