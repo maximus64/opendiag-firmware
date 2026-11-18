@@ -47,17 +47,36 @@ static const char *wake_cause = "power-on";
  * light a high side pin.
  */
 static const gpio_num_t held_outputs[] = {
-    PIN_J1850_MODE,  PIN_J1850_TX_P, PIN_J1850_TX_N,        PIN_CAN0_SILENT,
-    PIN_CAN1_SILENT, PIN_KLINE_TX,   PIN_KLINE_nSILENT,     PIN_HS_BOOST_EN,
-    PIN_HS_OBD_6,    PIN_HS_OBD_9,   PIN_HS_OBD_11,         PIN_HS_OBD_12,
-    PIN_HS_OBD_13,   PIN_HS_OBD_14,  PIN_HS_VOLTAGE_ADJUST, PIN_LS_OBD_15,
-    PIN_WS2812_LED,
+    PIN_CAN0_SILENT,
+#if OPENDIAG_HAS_CAN1
+    PIN_CAN1_SILENT,
+#endif
+#if OPENDIAG_HAS_J1850
+    PIN_J1850_MODE, PIN_J1850_TX_P, PIN_J1850_TX_N,
+#endif
+#if OPENDIAG_HAS_KLINE
+    PIN_KLINE_TX, PIN_KLINE_nSILENT,
+#endif
+#if OPENDIAG_HAS_OBD_HS
+    PIN_HS_BOOST_EN, PIN_HS_OBD_6, PIN_HS_OBD_9, PIN_HS_OBD_11,
+    PIN_HS_OBD_12, PIN_HS_OBD_13, PIN_HS_OBD_14, PIN_HS_VOLTAGE_ADJUST,
+#endif
+#if OPENDIAG_HAS_OBD_LS
+    PIN_LS_OBD_15,
 #if OPENDIAG_HW_LS_OBD_9
     PIN_LS_OBD_9,
 #endif
+#endif
+#if OPENDIAG_HAS_WS2812_LED
+    PIN_WS2812_LED,
+#endif
 };
 
+#if OPENDIAG_HAS_CAN1
 #define WAKE_PINS (BIT64(PIN_CAN0_RX) | BIT64(PIN_CAN1_RX) | BIT64(PIN_BUTTON))
+#else
+#define WAKE_PINS (BIT64(PIN_CAN0_RX) | BIT64(PIN_BUTTON))
+#endif
 
 static void power_load(void) {
     nvs_handle_t h;
@@ -192,12 +211,17 @@ static void power_task(void *arg) {
 static esp_err_t power_edges_setup(void) {
     const pcnt_unit_config_t unit = {.low_limit = -1, .high_limit = 32767};
     const pcnt_glitch_filter_config_t filter = {.max_glitch_ns = 200};
-    const int pins[] = {PIN_CAN0_RX, PIN_CAN1_RX};
+    const int pins[] = {
+        PIN_CAN0_RX,
+#if OPENDIAG_HAS_CAN1
+        PIN_CAN1_RX,
+#endif
+    };
     esp_err_t err = pcnt_new_unit(&unit, &edges);
 
     if (err == ESP_OK)
         err = pcnt_unit_set_glitch_filter(edges, &filter);
-    for (size_t i = 0; err == ESP_OK && i < 2; i++) {
+    for (size_t i = 0; err == ESP_OK && i < sizeof(pins) / sizeof(pins[0]); i++) {
         const pcnt_chan_config_t chan = {.edge_gpio_num = pins[i],
                                          .level_gpio_num = -1};
         pcnt_channel_handle_t ch;
