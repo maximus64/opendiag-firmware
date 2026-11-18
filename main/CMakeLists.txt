@@ -29,6 +29,8 @@ idf_component_register(SRCS main.c
                             comm_iface.c
                             vif.c
                             vif_ctrl.c
+                            power.c
+                            power_policy.c
                        PRIV_REQUIRES
                             nanopb
                             esp_hal_usb
@@ -45,6 +47,7 @@ idf_component_register(SRCS main.c
                             esp_driver_rmt
                             esp_driver_gptimer
                             esp_driver_twai
+                            esp_driver_pcnt
                        REQUIRES driver freertos
                        INCLUDE_DIRS "")
 
