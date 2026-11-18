@@ -1275,3 +1275,52 @@ TEST(cea_prefixes_the_address_and_cer_filters_replies) {
     elm_ask("2180\r");
     TEST_ASSERT_EQUAL_HEX32(0x02, fake_can_sent(2)->data[0]);
 }
+
+TEST(pb_sets_protocol_b_rate_and_id_length) {
+    elm_echo_off();
+    elm_ok("ATPB810A\r");
+    elm_ok("ATSPB\r");
+    TEST_ASSERT_EQUAL_INT(50000, fake_can_last_baud());
+    /* A wrong rate driving the bus is what puts it Bus Off. */
+    TEST_ASSERT_TRUE(fake_can_last_listen_first());
+    elm_ok("ATH1\r");
+    elm_ok("ATSH7B0\r");
+    elm_ok("ATCRA7C0\r");
+    fake_can_stage_response(0x7C0, 8, body_reply, 5);
+    TEST_ASSERT_EQUAL_STRING("7C0 03 61 80 01 00 00 00 00 \r" ELM_PROMPT,
+                             elm_ask("2180\r"));
+    TEST_ASSERT_EQUAL_HEX32(0x7B0, fake_can_sent(0)->id);
+
+    /* A new rate reopens the bus on the next request. */
+    elm_ok("ATPB8104\r");
+    fake_can_stage_response(0x7C0, 8, body_reply, 5);
+    elm_ask("2180\r");
+    TEST_ASSERT_EQUAL_INT(125000, fake_can_last_baud());
+    TEST_ASSERT_TRUE(fake_can_last_listen_first());
+
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATPB4201\r"));
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATPB8100\r"));
+}
+
+TEST(pp_2c_2d_become_protocol_b_defaults_after_a_reset) {
+    elm_echo_off();
+    TEST_ASSERT_EQUAL_STRING("2C:E0 F  2D:04 F  2E:80 F  2F:0A F\r" ELM_PROMPT,
+                             elm_ask("ATPPS\r"));
+    elm_ok("ATPP2CSV81\r");
+    elm_ok("ATPP2DSV0A\r");
+    elm_ok("ATPP2CON\r");
+    elm_ok("ATPP2DON\r");
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATPP0CSV12\r"));
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATPP2CSV42\r"));
+    TEST_ASSERT_EQUAL_STRING("2C:81 N  2D:0A N  2E:80 F  2F:0A F\r" ELM_PROMPT,
+                             elm_ask("ATPPS\r"));
+    elm_ok("ATD\r");
+    elm_echo_off();
+    elm_ok("ATSPB\r");
+    TEST_ASSERT_EQUAL_INT(50000, fake_can_last_baud());
+
+    /* Back to factory for the tests that follow. */
+    elm_ok("ATPPFFOFF\r");
+    elm_ok("ATPP2CSVE0\r");
+    elm_ok("ATPP2DSV04\r");
+}

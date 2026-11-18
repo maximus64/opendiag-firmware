@@ -203,6 +203,8 @@ typedef struct {
     uint32_t fc_header;
     uint8_t fc_data[5];
     uint8_t fc_len;
+    uint8_t user_opts[2];
+    uint8_t user_div[2];
 } elm327_settings_t;
 
 /* Timing evidence belongs to one exchange until the next command. */
@@ -274,6 +276,16 @@ typedef struct {
 } elm327_ctx_t;
 
 static elm327_ctx_t g_elm327;
+
+#define ELM327_PP_FIRST 0x2C
+#define ELM327_PP_COUNT 4
+static const uint8_t pp_default[ELM327_PP_COUNT] = {0xE0, 0x04, 0x80, 0x0A};
+static uint8_t pp_value[ELM327_PP_COUNT] = {0xE0, 0x04, 0x80, 0x0A};
+static bool pp_on[ELM327_PP_COUNT];
+
+static uint8_t elm327_pp(unsigned idx) {
+    return pp_on[idx] ? pp_value[idx] : pp_default[idx];
+}
 
 enum elm327_protocol {
     ELM327_PROTO_AUTO = 0,      // Automatic
@@ -475,6 +487,10 @@ static void elm327_load_defaults(elm327_ctx_t *e) {
     e->settings.fc_mode = 0;
     e->settings.fc_header_set = false;
     e->settings.fc_len = 0;
+    for (unsigned i = 0; i < 2; i++) {
+        e->settings.user_opts[i] = elm327_pp(i * 2);
+        e->settings.user_div[i] = elm327_pp(i * 2 + 1);
+    }
 }
 
 /**
@@ -638,6 +654,44 @@ static void elm327_apply_bus_policy(elm327_ctx_t *e, vif_bus_t bus,
  * @param cfg    Filled with what the bus needs to start. Optional.
  * @param header Filled with the protocol's request header. Optional.
  */
+#define ELM327_OPT_11BIT 0x80u
+#define ELM327_OPT_VAR_DLC 0x40u
+#define ELM327_OPT_RX_BOTH 0x20u
+#define ELM327_OPT_X87 0x10u
+#define ELM327_OPT_FORMAT 0x07u
+#define ELM327_FORMAT_ISO 0x01u
+#define ELM327_FORMAT_J1939 0x02u
+
+static uint8_t elm327_proto_can_opts(const elm327_ctx_t *e, int proto) {
+    switch (proto) {
+    case ELM327_PROTO_CAN_11BIT_500K:
+    case ELM327_PROTO_CAN_11BIT_250K:
+        return ELM327_OPT_11BIT | ELM327_FORMAT_ISO;
+    case ELM327_PROTO_CAN_29BIT_500K:
+    case ELM327_PROTO_CAN_29BIT_250K:
+        return ELM327_FORMAT_ISO;
+    case ELM327_PROTO_CAN_SAE_J1939:
+        return ELM327_OPT_VAR_DLC | ELM327_FORMAT_J1939;
+    case ELM327_PROTO_CAN_USER1:
+    case ELM327_PROTO_CAN_USER2:
+        return e->settings.user_opts[proto - ELM327_PROTO_CAN_USER1];
+    default:
+        return 0;
+    }
+}
+
+static uint8_t elm327_can_opts(const elm327_ctx_t *e) {
+    return elm327_proto_can_opts(e, e->settings.current_protocol);
+}
+
+/** 500 kbit/s over the AT PB divisor, times 8/7 if b4 asks. */
+static uint32_t elm327_user_bitrate(const elm327_ctx_t *e, int proto) {
+    unsigned i = (unsigned)(proto - ELM327_PROTO_CAN_USER1);
+    uint32_t rate =
+        500000u / (e->settings.user_div[i] ? e->settings.user_div[i] : 1u);
+    return (e->settings.user_opts[i] & ELM327_OPT_X87) ? rate * 8u / 7u : rate;
+}
+
 static vif_bus_t elm327_bus_for_protocol(int proto, vif_bus_cfg_t *cfg,
                                          uint32_t *header) {
     vif_bus_t bus = VIF_BUS_NONE;
@@ -645,6 +699,15 @@ static vif_bus_t elm327_bus_for_protocol(int proto, vif_bus_cfg_t *cfg,
     uint32_t bitrate = 0;
 
     switch (proto) {
+    case ELM327_PROTO_CAN_USER1:
+    case ELM327_PROTO_CAN_USER2:
+        /* ponytail: one interpreter instance, so the global is the caller. */
+        bus = VIF_BUS_CAN;
+        bitrate = elm327_user_bitrate(&g_elm327, proto);
+        header_id = (elm327_proto_can_opts(&g_elm327, proto) & ELM327_OPT_11BIT)
+                        ? 0x7DF
+                        : 0x18DB33F1;
+        break;
     case ELM327_PROTO_J1850_PWM:
         /* SAE J1850 PWM (41.6 kbaud) */
         bus = VIF_BUS_J1850_PWM;
@@ -1783,8 +1846,16 @@ static void elm327_timing_finish(elm327_ctx_t *e) {
 
 /** @brief True for the two ISO 15765-4 protocols that use 11 bit identifiers.
  */
+static bool elm327_is_can(const elm327_ctx_t *e) {
+    uint8_t p = e->settings.current_protocol;
+    return (p >= ELM327_PROTO_CAN_11BIT_500K &&
+            p <= ELM327_PROTO_CAN_29BIT_250K) ||
+           p == ELM327_PROTO_CAN_USER1 || p == ELM327_PROTO_CAN_USER2;
+}
+
 static bool elm327_can_formatted(const elm327_ctx_t *e) {
-    return e->settings.can_auto_format;
+    return e->settings.can_auto_format &&
+           (elm327_can_opts(e) & ELM327_OPT_FORMAT) == ELM327_FORMAT_ISO;
 }
 
 static unsigned elm327_can_addr_len(const elm327_ctx_t *e) {
@@ -1792,8 +1863,7 @@ static unsigned elm327_can_addr_len(const elm327_ctx_t *e) {
 }
 
 static bool elm327_can_is_11bit(const elm327_ctx_t *e) {
-    return e->settings.current_protocol == ELM327_PROTO_CAN_11BIT_250K ||
-           e->settings.current_protocol == ELM327_PROTO_CAN_11BIT_500K;
+    return (elm327_can_opts(e) & ELM327_OPT_11BIT) != 0;
 }
 
 #define ELM327_CAN_PRIORITY_MASK 0x1C000000u
@@ -1824,7 +1894,8 @@ static bool elm327_can_reply_id_ok(const elm327_ctx_t *e, uint32_t id) {
         return false;
     }
 
-    if (extended == elm327_can_is_11bit(e)) {
+    if (!(elm327_can_opts(e) & ELM327_OPT_RX_BOTH) &&
+        extended == elm327_can_is_11bit(e)) {
         return false;
     }
 
@@ -1897,7 +1968,7 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
     const unsigned a = elm327_can_addr_len(e);
     const bool formatted = elm327_can_formatted(e);
     const bool var_dlc =
-        false;
+        (elm327_can_opts(e) & ELM327_OPT_VAR_DLC);
 
     if (elm327_can_ensure_open(e))
         return -2;
@@ -3096,6 +3167,50 @@ static int at_parse_can_id(const char *arg, bool wildcard, uint32_t *id,
     return 0;
 }
 
+static void elm327_pp_summary(elm327_ctx_t *e) {
+    char out[48];
+    char *p = out;
+
+    for (unsigned i = 0; i < ELM327_PP_COUNT; i++)
+        p += sprintf(p, "%02X:%02X %c%s", ELM327_PP_FIRST + i, pp_value[i],
+                     pp_on[i] ? 'N' : 'F',
+                     i + 1 < ELM327_PP_COUNT ? "  " : "\r");
+    elm327_send_string(e, out);
+}
+
+static bool elm327_user_opts_ok(uint8_t opts) {
+    return (opts & ELM327_OPT_FORMAT) <= ELM327_FORMAT_ISO;
+}
+
+static int at_set_pp(const char *arg) {
+    char hx[3] = {arg[0], arg[0] ? arg[1] : '\0', '\0'};
+    uint8_t xx, val;
+    const char *rest = arg[0] && arg[1] ? &arg[2] : "";
+
+    if (at_parse_byte(hx, &xx))
+        return -1;
+    if (xx != 0xFF &&
+        (xx < ELM327_PP_FIRST || xx >= ELM327_PP_FIRST + ELM327_PP_COUNT))
+        return -1;
+
+    if (strcmp(rest, "ON") == 0 || strcmp(rest, "OFF") == 0) {
+        bool on = rest[1] == 'N';
+        for (unsigned i = 0; i < ELM327_PP_COUNT; i++)
+            if (xx == 0xFF || i == (unsigned)(xx - ELM327_PP_FIRST))
+                pp_on[i] = on;
+        return 0;
+    }
+    if (xx == 0xFF || strncmp(rest, "SV", 2) || at_parse_byte(&rest[2], &val))
+        return -1;
+
+    unsigned idx = xx - ELM327_PP_FIRST;
+    /* Even ones are options bytes, odd ones baud divisors. */
+    if (idx % 2 ? val == 0 : !elm327_user_opts_ok(val))
+        return -1;
+    pp_value[idx] = val;
+    return 0;
+}
+
 static bool elm327_at_extra_command(elm327_ctx_t *e, const char *cmd) {
     uint8_t b = 0;
     uint32_t id, mask;
@@ -3181,6 +3296,25 @@ static bool elm327_at_extra_command(elm327_ctx_t *e, const char *cmd) {
         } else {
             s->fc_mode = (uint8_t)(m - '0');
         }
+    } else if (strncmp(cmd, "PB", 2) == 0) {
+        uint8_t d[2];
+        if (strlen(&cmd[2]) != 4 ||
+            hex_string_to_u8_array(&cmd[2], 4, d, sizeof(d)) != 2 || !d[1] ||
+            !elm327_user_opts_ok(d[0])) {
+            reply = bad;
+        } else {
+            s->user_opts[0] = d[0];
+            s->user_div[0] = d[1];
+            /* The next request reopens the bus at the new rate. */
+            if (s->current_protocol == ELM327_PROTO_CAN_USER1)
+                vif_bus_release_all(VIF_OWNER_LINK);
+        }
+    } else if (strcmp(cmd, "PPS") == 0) {
+        elm327_pp_summary(e);
+        reply = NULL;
+    } else if (strncmp(cmd, "PP", 2) == 0) {
+        if (at_set_pp(&cmd[2]))
+            reply = bad;
     } else {
         return false;
     }
@@ -3248,14 +3382,7 @@ static void elm327_parse_command(elm327_ctx_t *e, const char *cmd) {
                 rc = elm327_j1850_vpw_xfer(e, frame, frame_len, num_frame);
             } else if (elm327_is_kline(e)) {
                 rc = elm327_kline_xfer(e, frame, frame_len, num_frame);
-            } else if (e->settings.current_protocol ==
-                           ELM327_PROTO_CAN_29BIT_500K ||
-                       e->settings.current_protocol ==
-                           ELM327_PROTO_CAN_29BIT_250K ||
-                       e->settings.current_protocol ==
-                           ELM327_PROTO_CAN_11BIT_500K ||
-                       e->settings.current_protocol ==
-                           ELM327_PROTO_CAN_11BIT_250K) {
+            } else if (elm327_is_can(e)) {
                 rc = elm327_can_protocol_xfer(e, frame, frame_len, num_frame);
             }
 

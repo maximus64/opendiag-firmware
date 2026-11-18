@@ -182,3 +182,5 @@ Bluetooth.
 `AT FC SH`, `FC SD` and `FC SM` configure flow control. FC SD accepts CTS (30, block size and valid STmin); `CFC0` disables outgoing flow control and displays the first frame.
 
 `AT CEA hh` adds an extended address to outgoing frames and hides it with transport headers in CAF1/H0. `AT CER hh` filters the reply address; `AT CEA` disables extended addressing.
+
+Protocols B/C use configurable CAN options and a 500 kbit/s baud divisor (`PB`, `PP 2C–2F`, `PPS`). Unsupported J1939 formats are refused. PP settings survive AT Z, but not a power cycle.
