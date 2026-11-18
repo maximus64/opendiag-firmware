@@ -88,3 +88,5 @@ const struct can_frame *fake_can_sent(int idx);
 
 void fake_can_fail_confirmed_send(void);
 void fake_can_abort_confirmed_send(void);
+
+void fake_can_set_error_counters(uint8_t tec, uint8_t rec);
