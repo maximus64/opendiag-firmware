@@ -173,3 +173,8 @@ Bluetooth.
 | `PROGV p vvvvvvvv` | drive an OBD-II pin `p`, or release it |
 | `VIF PASSTHRU` | Select the J2534 binary frontend on the current data connection. |
 | `VIF SLCAN` | Select the SLCAN frontend on the current data connection. |
+
+
+### Additional implemented commands
+
+`AT CRA`, `CF` and `CM` replace the default OBD reply ranges with a CAN identifier and mask. For physical requests with a filter, flow control uses the request identifier.
