@@ -1178,10 +1178,8 @@ TEST(failed_flow_control_keeps_can_open_for_the_next_request) {
     TEST_ASSERT_EQUAL_HEX32(CAN_EFF_FLAG | 0x0CDA10F1, fake_can_sent(1)->id);
 }
 
-
 static const uint8_t body_ff[8] = {0x10, 0x0A, 0x61, 0x80, 1, 2, 3, 4};
 static const uint8_t body_cf0[8] = {0x20, 5, 6, 7, 8, 0, 0, 0};
-
 
 TEST(cra_flow_control_goes_to_the_request_id_and_sn0_is_accepted) {
     on_can_11bit();
