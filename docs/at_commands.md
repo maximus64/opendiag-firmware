@@ -134,7 +134,7 @@ Bluetooth.
 | `CFC0, CFC1` | Flow Controls off, or on | |
 | `CM hhh` | set the ID Mask to hhh | |
 | `CM hhhhhhhh` | set the ID Mask to hhhhhhhh | |
-| `CP hh` | set CAN Priority to hh (29 bit) | |
+| `CP hh` | set CAN Priority to hh (29 bit) | ✅ |
 | `CRA` | reset the Receive Address filters | |
 | `CRA hhh` | set CAN Receive Address to hhh | |
 | `CRA hhhhhhhh` | set the Rx Address to hhhhhhhh | |

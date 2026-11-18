@@ -765,7 +765,7 @@ static int elm327_set_protocol(elm327_ctx_t *e, int proto) {
      * two CAN protocols on the same wire can still want different bit rates. */
     if (bus != VIF_BUS_CAN && vif_bus_is_open(VIF_OWNER_LINK, bus)) {
         e->settings.header_id = header_id;
-    e->settings.header_digits = 8;
+        e->settings.header_digits = 8;
         e->settings.current_protocol = proto;
         return 0;
     }
@@ -1844,9 +1844,9 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
     /* Normal-fixed priority is not part of the transport address. */
     uint32_t address_mask =
         elm327_can_is_11bit(e) ? UINT32_MAX : ~ELM327_CAN_PRIORITY_MASK;
-    bool multicast = elm327_can_is_11bit(e)
-                         ? tx_frame.id == 0x7DF
-                         : (tx_frame.id & address_mask) == (0x00DB33F1 | CAN_EFF_FLAG);
+    bool multicast = elm327_can_is_11bit(e) ? tx_frame.id == 0x7DF
+                                            : (tx_frame.id & address_mask) ==
+                                                  (0x00DB33F1 | CAN_EFF_FLAG);
 
     // Set extended ID flag for 29 bit ID protocols
     if (e->settings.current_protocol == ELM327_PROTO_CAN_29BIT_250K ||
