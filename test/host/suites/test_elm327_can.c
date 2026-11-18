@@ -1178,9 +1178,6 @@ TEST(failed_flow_control_keeps_can_open_for_the_next_request) {
     TEST_ASSERT_EQUAL_HEX32(CAN_EFF_FLAG | 0x0CDA10F1, fake_can_sent(1)->id);
 }
 
-
-
-
 TEST(brd_handshake_completes_on_a_bare_cr) {
     elm_echo_off();
     TEST_ASSERT_EQUAL_STRING("OK\r" ELM_ID "\r", elm_ask("ATBRD23\r"));

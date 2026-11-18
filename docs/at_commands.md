@@ -14,8 +14,8 @@ Bluetooth.
 | CMD | Description | Supported |
 | :--- | :--- | :--- |
 | `<CR>` | repeat the last command | ✅ |
-| `BRD hh` | try Baud Rate Divisor hh | N/A |
-| `BRT hh` | set Baud Rate Timeout | N/A |
+| `BRD hh` | try Baud Rate Divisor hh | ✅ handshake only, see below |
+| `BRT hh` | set Baud Rate Timeout | ✅ accepted, no effect |
 | `D` | set all to Defaults | ✅ |
 | `E0, E1` | Echo off, or on | ✅ |
 | `FE` | Forget Events | |
