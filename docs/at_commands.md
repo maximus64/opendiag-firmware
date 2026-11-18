@@ -66,7 +66,7 @@ Bluetooth.
 | `AR` | Automatically Receive | ✅ |
 | `AT0, 1, 2` | Adaptive Timing off, auto1, auto2 | ✅ |
 | `BD` | perform a Buffer Dump | |
-| `BI` | Bypass the Initialization sequence | ✅ |
+| `BI` | Bypass the Initialization sequence | ✅ K-Line, CAN and J1850 |
 | `DP` | Describe the current Protocol | ✅ |
 | `DPN` | Describe the Protocol by Number | ✅ |
 | `FT` | Filter for Transmitter off | ✅ |
