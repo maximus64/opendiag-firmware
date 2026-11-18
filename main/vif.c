@@ -107,6 +107,8 @@ static struct {
          * shut down. */
         const vif_frontend_t *fe;
         const vif_frontend_t *fe_next;
+        /* fe_next becomes the default too, once it has started. */
+        bool fe_next_default;
         /* Set under the lock, consumed by the link task, and read outside the
          * lock on the way in - see vif_link_service(). */
         volatile bool fe_switch;
@@ -402,6 +404,7 @@ static bool link_apply_frontend(const vif_frontend_t *fe) {
 bool vif_link_service(void) {
     const vif_frontend_t *next = NULL;
     bool switching = false;
+    bool make_default = false;
     bool did;
 
     if (!on_owner_thread(VIF_OWNER_LINK)) {
@@ -420,6 +423,7 @@ bool vif_link_service(void) {
         if (g.link.fe_switch) {
             g.link.fe_switch = false;
             next = g.link.fe_next;
+            make_default = g.link.fe_next_default;
             switching = true;
         }
         UNLOCK();
@@ -435,8 +439,14 @@ bool vif_link_service(void) {
         LOCK();
         if (!g.link.fe_switch) {
             g.link.fe_next = next;
+            g.link.fe_next_default = make_default;
             g.link.fe_switch = true;
         }
+        UNLOCK();
+    } else if (make_default && next && g.link.fe == next) {
+        /* Only a grammar that actually came up is worth returning to. */
+        LOCK();
+        g.link.fe_default = next;
         UNLOCK();
     }
 
@@ -607,6 +617,7 @@ void vif_link_set_frontend(const vif_frontend_t *fe) {
      * feed() that is mid-command. */
     LOCK();
     g.link.fe_next = fe;
+    g.link.fe_next_default = false;
     g.link.fe_switch = true;
     UNLOCK();
     link_wake();
@@ -647,6 +658,19 @@ const char *vif_link_frontend_name(void) {
 
 const vif_frontend_t *vif_link_default_frontend(void) {
     return g.link.fe_default;
+}
+
+void vif_link_set_default_frontend(const vif_frontend_t *fe) {
+    if (!fe) {
+        return; /* the link must always have something to fall back to */
+    }
+
+    LOCK();
+    g.link.fe_next = fe;
+    g.link.fe_next_default = true;
+    g.link.fe_switch = true;
+    UNLOCK();
+    link_wake();
 }
 
 void vif_link_down(void) {

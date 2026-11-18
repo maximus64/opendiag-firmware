@@ -23,6 +23,7 @@
  *   ID            product, firmware, the link, its grammar, and every grammar
  *   MODE          the grammar running now
  *   MODE=<name>   switch to it, releasing every claim the link held
+ *   DEFAULT=<name> as MODE=, and the link returns to it when a client leaves
  *   BUS           which buses are live, how fast, and who holds each
  *   RESET         release the link's claims and go back to its default
  */
