@@ -258,6 +258,7 @@ typedef struct {
      * speaks, not to watch four of them fail.
      */
     bool in_search;
+    bool brd_pending;
 } elm327_ctx_t;
 
 static elm327_ctx_t g_elm327;
@@ -328,6 +329,8 @@ static bool elm327_kline_link(elm327_ctx_t *e, bus_link_t *out);
 static int elm327_kline_init(elm327_ctx_t *e, kline_init_mode_t mode);
 static void elm327_kline_reconcile(elm327_ctx_t *e);
 static void elm327_kline_apply_wakeup(elm327_ctx_t *e);
+
+static bool elm327_at_extra_command(elm327_ctx_t *e, const char *cmd);
 
 static size_t elm327_uart_read_bytes(elm327_ctx_t *e, uint8_t *buffer,
                                      size_t len, TickType_t ticks_to_wait) {
@@ -451,6 +454,7 @@ static void elm327_load_defaults(elm327_ctx_t *e) {
     /* AT SW defaults to $92, "a nominal delay of 3 seconds". */
     e->settings.wakeup_ms = 0x92u * 20u;
     e->settings.wakeup_len = 0;
+    e->brd_pending = false;
 }
 
 /**
@@ -1410,6 +1414,8 @@ static void elm327_at_command_handler(elm327_ctx_t *e, const char *cmd) {
          * so there is nothing to switch; accepted so a client that asks is
          * not turned away. */
         elm327_send_string(e, "OK\r");
+    } else if (elm327_at_extra_command(e, cmd)) {
+        /* Answered by the extended command handler. */
     } else {
         elm327_send_string(e, "?\r");
     }
@@ -2957,6 +2963,33 @@ done:
     return ret;
 }
 
+static bool elm327_at_extra_command(elm327_ctx_t *e, const char *cmd) {
+    uint8_t b = 0;
+    const char *reply = "OK\r";
+    const char *bad = "?\r";
+    if (strncmp(cmd, "BRD", 3) == 0) {
+        /* USB CDC and BLE have no baud rate to change, so the handshake is
+         * the whole command: OK, the ID at the "new" rate, then a CR from
+         * the client completes it (see elm327_parse_command()). */
+        if (at_parse_byte(&cmd[3], &b) || !b) {
+            reply = bad;
+        } else {
+            reply = "OK\r" ELM_IDENTIFY "\r";
+            e->brd_pending = true;
+        }
+    } else if (strncmp(cmd, "BRT", 3) == 0) {
+        /* The BRD handshake waits for the client indefinitely here. */
+        if (at_parse_byte(&cmd[3], &b))
+            reply = bad;
+    } else {
+        return false;
+    }
+
+    if (reply)
+        elm327_send_string(e, reply);
+    return true;
+}
+
 static void elm327_parse_command(elm327_ctx_t *e, const char *cmd) {
     elm327_observe_late_replies(e);
     e->timing.watch.active = false;
@@ -2967,6 +3000,17 @@ static void elm327_parse_command(elm327_ctx_t *e, const char *cmd) {
 
     int rc;
     uint8_t frame[8] = {0};
+
+    /* AT BRD: the client answers the ID string with a bare CR. Anything else
+     * is a command in its own right; the rate never really changed. */
+    if (e->brd_pending) {
+        e->brd_pending = false;
+        if (cmd[0] == '\0') {
+            e->line.lastcmd[0] = '\0';
+            elm327_send_string(e, "OK\r");
+            goto done;
+        }
+    }
 
     if (cmd[0] == 'A' && cmd[1] == 'T') {
         /* AT commands */
@@ -3061,7 +3105,8 @@ static void elm327_parse_command(elm327_ctx_t *e, const char *cmd) {
     }
 
 done:
-    elm327_send_string(e, "\r>");
+    if (!e->brd_pending)
+        elm327_send_string(e, "\r>");
     elm327_uart_flush(e);
 }
 
@@ -3118,8 +3163,9 @@ static void elm327_feed_byte(elm327_ctx_t *e, char val) {
             elm327_send_string(e, "?\r\r>");
             elm327_uart_flush(e);
         } else if (e->line.cmdidx == 0) {
-            /* A bare carriage return repeats the last command. */
-            elm327_parse_command(e, e->line.lastcmd);
+            /* A bare carriage return repeats the last command - unless it
+             * is the one that completes an AT BRD handshake. */
+            elm327_parse_command(e, e->brd_pending ? "" : e->line.lastcmd);
         } else {
             elm327_parse_command(e, e->line.cmdbuf);
 

@@ -173,3 +173,8 @@ Bluetooth.
 | `PROGV p vvvvvvvv` | drive an OBD-II pin `p`, or release it |
 | `VIF PASSTHRU` | Select the J2534 binary frontend on the current data connection. |
 | `VIF SLCAN` | Select the SLCAN frontend on the current data connection. |
+
+
+### Additional implemented commands
+
+`AT BRD hh` performs the ELM baud negotiation handshake (OK, identification string, then a bare CR from the client). USB/BLE do not change physical baud rate; `BRT` is accepted.
