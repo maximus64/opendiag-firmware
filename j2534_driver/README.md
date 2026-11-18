@@ -44,6 +44,24 @@ USB CDC ports on Windows XP SP3 (x86), using Windows' built-in `usbser.sys`.
 Follow the hardware wizard instructions in [packaging/README.txt](packaging/README.txt).
 The INF source is [packaging/opendiag-cdc-xp.inf](packaging/opendiag-cdc-xp.inf).
 
+Build the Linux driver libraries for x86_64, armhf and arm64 through Docker BuildKit
+(`docker buildx`). The x86_64 build runs the host tests. The armhf and arm64 builds
+are cross-compiled and linked only, so test them on the target hardware. Run this from
+the repository root in any shell:
+
+```sh
+docker build -f j2534_driver/Dockerfile.unix --target export --output type=local,dest=build/j2534-dist/unix .
+```
+
+Each architecture writes `opendiag-j2534-linux-<arch>.tar.gz` and a `SHA256SUMS` file to
+`build/j2534-dist/unix/linux-<arch>/`. The archive holds `libopendiag.so` (05.00 API),
+`libopendiag0404.so` (04.04 API) and `opendiag.ini`. Check it with `sha256sum --check SHA256SUMS`.
+
+The Linux `opendiag.ini` sets `COM=/dev/ttyACM0`, which is a placeholder. On Linux `COM` is a
+serial device path, not a Windows port name. Set it to the diagnostic data port (see the
+comments in the file), then copy the file to `/etc/opendiag/opendiag.ini` or point
+`OPENDIAG_DRIVER_CONFIG` at it.
+
 ## Configuration and logs
 
 Default locations:
