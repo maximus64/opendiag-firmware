@@ -667,3 +667,17 @@ TEST(reopening_can_after_a_release_keeps_the_listen_first_guard) {
     TEST_ASSERT_EQUAL_INT(0, fake_can_sent_count());
     TEST_ASSERT_FALSE(fake_can_is_up());
 }
+
+
+TEST(a_deferred_can_selection_resets_a_previous_six_digit_header) {
+    elm_echo_off();
+    elm_ok("ATSP7\r");
+    elm_ok("ATCP0C\r");
+    elm_ok("ATSHDA10F1\r");
+    fake_can_set_foreign_rate(true);
+    elm_ok("ATSP9\r");
+    fake_can_set_foreign_rate(false);
+    elm_ask("0100\r");
+    TEST_ASSERT_EQUAL_INT(1, fake_can_sent_count());
+    TEST_ASSERT_EQUAL_HEX32(CAN_EFF_FLAG | 0x18DB33F1, fake_can_sent(0)->id);
+}

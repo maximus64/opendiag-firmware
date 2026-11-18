@@ -197,3 +197,6 @@ A failed automatic search still answers `NO DATA` or `?` as before.
 ### Fixed CAN protocols do not fall back to another bus
 
 `AT SP 6` (and other fixed CAN selections) keeps the selected protocol if opening fails. Each request then reports `CAN ERROR` instead of starting a K-Line/J1850 search. `AT SP A6` still requests automatic fallback. Pin voltage and bus ownership interlocks remain enforced.
+### Additional implemented commands
+
+`AT CP hh` supplies the priority byte for six-digit CAN headers on a 29-bit protocol.
