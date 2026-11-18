@@ -129,15 +129,15 @@ Bluetooth.
 | `CEA` | CAN Extended Addressing off | |
 | `CEA hh` | use CAN Extended Address hh | |
 | `CER hh` | set CAN Extended Rx address to hh | |
-| `CF hhh` | set the ID Filter to hhh | |
-| `CF hhhhhhhh` | set the ID Filter to hhhhhhhh | |
+| `CF hhh` | set the ID Filter to hhh | ✅ |
+| `CF hhhhhhhh` | set the ID Filter to hhhhhhhh | ✅ |
 | `CFC0, CFC1` | Flow Controls off, or on | |
-| `CM hhh` | set the ID Mask to hhh | |
-| `CM hhhhhhhh` | set the ID Mask to hhhhhhhh | |
+| `CM hhh` | set the ID Mask to hhh | ✅ |
+| `CM hhhhhhhh` | set the ID Mask to hhhhhhhh | ✅ |
 | `CP hh` | set CAN Priority to hh (29 bit) | |
-| `CRA` | reset the Receive Address filters | |
-| `CRA hhh` | set CAN Receive Address to hhh | |
-| `CRA hhhhhhhh` | set the Rx Address to hhhhhhhh | |
+| `CRA` | reset the Receive Address filters | ✅ |
+| `CRA hhh` | set CAN Receive Address to hhh | ✅ |
+| `CRA hhhhhhhh` | set the Rx Address to hhhhhhhh | ✅ |
 | `CS` | show CAN Status counts & freq | |
 | `CSM0, CSM1` | Silent Monitoring off, or on | |
 | `CTM1` | set Timer Multiplier to 1 | |
