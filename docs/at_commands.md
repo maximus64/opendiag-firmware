@@ -66,7 +66,7 @@ Bluetooth.
 | `AR` | Automatically Receive | ✅ |
 | `AT0, 1, 2` | Adaptive Timing off, auto1, auto2 | ✅ |
 | `BD` | perform a Buffer Dump | |
-| `BI` | Bypass the Initialization sequence | ✅ |
+| `BI` | Bypass the Initialization sequence | ✅ K-Line, CAN and J1850 |
 | `DP` | Describe the current Protocol | ✅ |
 | `DPN` | Describe the Protocol by Number | ✅ |
 | `FT` | Filter for Transmitter off | ✅ |
@@ -173,3 +173,8 @@ Bluetooth.
 | `PROGV p vvvvvvvv` | drive an OBD-II pin `p`, or release it |
 | `VIF PASSTHRU` | Select the J2534 binary frontend on the current data connection. |
 | `VIF SLCAN` | Select the SLCAN frontend on the current data connection. |
+
+
+### Bypass initialisation on CAN and J1850
+
+`AT BI` accepts CAN and J1850 without transmitting. Automatic protocol search still refuses it; K-Line keeps its existing initialisation bypass.

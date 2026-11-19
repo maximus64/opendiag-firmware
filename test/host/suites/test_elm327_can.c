@@ -1177,3 +1177,27 @@ TEST(failed_flow_control_keeps_can_open_for_the_next_request) {
     TEST_ASSERT_EQUAL_INT(teardowns, fake_can_teardown_count());
     TEST_ASSERT_EQUAL_HEX32(CAN_EFF_FLAG | 0x0CDA10F1, fake_can_sent(1)->id);
 }
+
+TEST(bi_on_can_is_accepted_without_touching_the_bus) {
+    elm_echo_off();
+    elm_ok("ATSP6\r");
+
+    elm_ok("ATBI\r");
+
+    TEST_ASSERT_EQUAL_INT(0, fake_can_sent_count());
+}
+
+TEST(bi_on_can_leaves_the_protocol_active) {
+    on_can_11bit();
+
+    elm_ok("ATBI\r");
+
+    TEST_ASSERT_EQUAL_STRING("Y\r" ELM_PROMPT, elm_ask("ATIA\r"));
+}
+
+TEST(bi_without_a_protocol_is_still_refused) {
+    elm_echo_off();
+    elm_ok("ATSP0\r");
+
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATBI\r"));
+}
