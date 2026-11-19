@@ -594,3 +594,7 @@ for any damage arising from its use, including a bricked module, an immobilised 
 costs. You are responsible for everything you send to a vehicle. See the repository
 [README](https://github.com/maximus64/opendiag-firmware/blob/main/README.md) and
 [LICENSE](https://github.com/maximus64/opendiag-firmware/blob/main/LICENSE) for the full terms.
+
+### Additional CAN bit rates
+
+The CAN driver accepts 10, 20, 33.3, 50, 83.3, 95.2, 100, 125, 250, 500, 800 and 1000 kbit/s. SLCAN, J2534 and the driver share the same canonical rate validation.

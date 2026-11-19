@@ -757,7 +757,7 @@ TEST(a_frame_the_isr_cannot_read_is_dropped_without_using_a_sequence_number) {
 }
 
 TEST(unsupported_bit_rates_are_refused_before_any_hardware_is_touched) {
-    const int rates[] = {0, 100000, 2000000};
+    const int rates[] = {0, 123456, 2000000};
     for (unsigned i = 0; i < sizeof(rates) / sizeof(rates[0]); i++) {
         TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG, can_bus_setup(rates[i]));
         TEST_ASSERT_EQUAL_INT(0, calls[NEW]);
