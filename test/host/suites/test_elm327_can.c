@@ -1177,3 +1177,243 @@ TEST(failed_flow_control_keeps_can_open_for_the_next_request) {
     TEST_ASSERT_EQUAL_INT(teardowns, fake_can_teardown_count());
     TEST_ASSERT_EQUAL_HEX32(CAN_EFF_FLAG | 0x0CDA10F1, fake_can_sent(1)->id);
 }
+
+static const uint8_t body_reply[8] = {0x03, 0x61, 0x80, 0x01};
+static const uint8_t body_ff[8] = {0x10, 0x0A, 0x61, 0x80, 1, 2, 3, 4};
+static const uint8_t body_cf0[8] = {0x21, 5, 6, 7, 8, 0, 0, 0};
+static void on_body_module(void) {
+    on_can_11bit();
+    elm_ok("ATSH7B0\r");
+    elm_ok("ATCRA7C0\r");
+}
+
+TEST(cra_accepts_replies_outside_the_obd_range_until_reset) {
+    on_can_11bit();
+    elm_ok("ATSH7B0\r");
+    fake_can_stage_response(0x7C0, 8, body_reply, 5);
+    TEST_ASSERT_EQUAL_STRING("NO DATA\r" ELM_PROMPT, elm_ask("2180\r"));
+
+    elm_ok("ATCRA7C0\r");
+    fake_can_stage_response(0x7C0, 8, body_reply, 5);
+    TEST_ASSERT_EQUAL_STRING("7C0 03 61 80 01 00 00 00 00 \r" ELM_PROMPT,
+                             elm_ask("2180\r"));
+
+    elm_ok("ATCRA7CX\r");
+    fake_can_stage_response(0x7C5, 8, body_reply, 5);
+    TEST_ASSERT_EQUAL_STRING("7C5 03 61 80 01 00 00 00 00 \r" ELM_PROMPT,
+                             elm_ask("2180\r"));
+
+    elm_ok("ATCRA\r");
+    fake_can_stage_response(0x7C0, 8, body_reply, 5);
+    TEST_ASSERT_EQUAL_STRING("NO DATA\r" ELM_PROMPT, elm_ask("2180\r"));
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATCRA8C0\r"));
+}
+
+TEST(cf_and_cm_filter_by_id_and_mask) {
+    on_can_11bit();
+    elm_ok("ATSH7B0\r");
+    elm_ok("ATCF7C0\r");
+    fake_can_stage_response(0x7C5, 8, body_reply, 5);
+    TEST_ASSERT_EQUAL_STRING("NO DATA\r" ELM_PROMPT, elm_ask("2180\r"));
+    elm_ok("ATCM7F0\r");
+    fake_can_stage_response(0x7C5, 8, body_reply, 5);
+    TEST_ASSERT_EQUAL_STRING("7C5 03 61 80 01 00 00 00 00 \r" ELM_PROMPT,
+                             elm_ask("2180\r"));
+}
+
+TEST(fc_sm1_uses_the_user_header_and_data) {
+    on_body_module();
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATFCSM1\r"));
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATFCSD310000\r"));
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATFCSD3000FF\r"));
+    elm_ok("ATFCSH7B5\r");
+    elm_ok("ATFCSD300810\r");
+    elm_ok("ATFCSM1\r");
+    fake_can_stage_response(0x7C0, 8, body_ff, 5);
+    fake_can_stage_response_at(0x7C0, 8, body_cf0, 1, 2);
+    elm_ask("2180\r");
+    TEST_ASSERT_EQUAL_INT(2, fake_can_sent_count());
+    const struct can_frame *fc = fake_can_sent(1);
+    TEST_ASSERT_EQUAL_HEX32(0x7B5, fc->id);
+    TEST_ASSERT_EQUAL_HEX32(0x30, fc->data[0]);
+    TEST_ASSERT_EQUAL_HEX32(0x08, fc->data[1]);
+    TEST_ASSERT_EQUAL_HEX32(0x10, fc->data[2]);
+}
+
+TEST(cfc0_shows_the_first_frame_and_sends_no_flow_control) {
+    on_body_module();
+    elm_ok("ATCFC0\r");
+    fake_can_stage_response(0x7C0, 8, body_ff, 5);
+    TEST_ASSERT_EQUAL_STRING("7C0 10 0A 61 80 01 02 03 04 \r" ELM_PROMPT,
+                             elm_ask("2180\r"));
+    TEST_ASSERT_EQUAL_INT(1, fake_can_sent_count());
+}
+
+TEST(cea_prefixes_the_address_and_cer_filters_replies) {
+    static const uint8_t reply[8] = {0xF1, 0x03, 0x61, 0x80, 0x01};
+    elm_echo_off();
+    elm_ok(CAN_11BIT_500K);
+    elm_ok("ATSH6F1\r");
+    elm_ok("ATCRA612\r");
+    elm_ok("ATCEA12\r");
+    fake_can_stage_response(0x612, 8, reply, 5);
+    TEST_ASSERT_EQUAL_STRING("61 80 01 \r" ELM_PROMPT, elm_ask("2180\r"));
+    const struct can_frame *req = fake_can_sent(0);
+    TEST_ASSERT_EQUAL_HEX32(0x6F1, req->id);
+    TEST_ASSERT_EQUAL_HEX32(0x12, req->data[0]);
+    TEST_ASSERT_EQUAL_HEX32(0x02, req->data[1]);
+    TEST_ASSERT_EQUAL_HEX32(0x21, req->data[2]);
+
+    elm_ok("ATCERF2\r");
+    fake_can_stage_response(0x612, 8, reply, 5);
+    TEST_ASSERT_EQUAL_STRING("NO DATA\r" ELM_PROMPT, elm_ask("2180\r"));
+
+    elm_ok("ATCEA\r");
+    fake_can_stage_response(0x612, 8, body_reply, 5);
+    elm_ask("2180\r");
+    TEST_ASSERT_EQUAL_HEX32(0x02, fake_can_sent(2)->data[0]);
+}
+
+TEST(pb_sets_protocol_b_rate_and_id_length) {
+    elm_echo_off();
+    elm_ok("ATPB810A\r");
+    elm_ok("ATSPB\r");
+    TEST_ASSERT_EQUAL_INT(50000, fake_can_last_baud());
+    /* A wrong rate driving the bus is what puts it Bus Off. */
+    TEST_ASSERT_TRUE(fake_can_last_listen_first());
+    elm_ok("ATH1\r");
+    elm_ok("ATSH7B0\r");
+    elm_ok("ATCRA7C0\r");
+    fake_can_stage_response(0x7C0, 8, body_reply, 5);
+    TEST_ASSERT_EQUAL_STRING("7C0 03 61 80 01 00 00 00 00 \r" ELM_PROMPT,
+                             elm_ask("2180\r"));
+    TEST_ASSERT_EQUAL_HEX32(0x7B0, fake_can_sent(0)->id);
+
+    /* A new rate reopens the bus on the next request. */
+    elm_ok("ATPB8104\r");
+    fake_can_stage_response(0x7C0, 8, body_reply, 5);
+    elm_ask("2180\r");
+    TEST_ASSERT_EQUAL_INT(125000, fake_can_last_baud());
+    TEST_ASSERT_TRUE(fake_can_last_listen_first());
+
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATPB4201\r"));
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATPB8100\r"));
+}
+
+TEST(pp_2c_2d_become_protocol_b_defaults_after_a_reset) {
+    elm_echo_off();
+    TEST_ASSERT_EQUAL_STRING("2C:E0 F  2D:04 F  2E:80 F  2F:0A F\r" ELM_PROMPT,
+                             elm_ask("ATPPS\r"));
+    elm_ok("ATPP2CSV81\r");
+    elm_ok("ATPP2DSV0A\r");
+    elm_ok("ATPP2CON\r");
+    elm_ok("ATPP2DON\r");
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATPP0CSV12\r"));
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATPP2CSV42\r"));
+    TEST_ASSERT_EQUAL_STRING("2C:81 N  2D:0A N  2E:80 F  2F:0A F\r" ELM_PROMPT,
+                             elm_ask("ATPPS\r"));
+    elm_ok("ATD\r");
+    elm_echo_off();
+    elm_ok("ATSPB\r");
+    TEST_ASSERT_EQUAL_INT(50000, fake_can_last_baud());
+
+    /* Back to factory for the tests that follow. */
+    elm_ok("ATPPFFOFF\r");
+    elm_ok("ATPP2CSVE0\r");
+    elm_ok("ATPP2DSV04\r");
+}
+
+TEST(a_filtered_physical_request_finishes_after_its_reply) {
+    on_can_11bit();
+    elm_ok("ATSH7B0\r");
+    elm_ok("ATCRA7C0\r");
+    elm_ok("ATAT0\r");
+    elm_ok("ATSTFF\r");
+    fake_can_stage_response(0x7C0, 8, body_reply, 5);
+    uint32_t before = fake_clock_ms();
+    elm_ask("2180\r");
+    TEST_ASSERT_TRUE(fake_clock_ms() - before < 100);
+}
+
+TEST(a_filtered_physical_reply_uses_the_request_id_for_flow_control) {
+    static const uint8_t first[8] = {0x10, 0x0A, 0x61, 0x80, 1, 2, 3, 4};
+    static const uint8_t next[8] = {0x21, 5, 6, 7, 8};
+    on_can_11bit();
+    elm_ok("ATSH7B0\r");
+    elm_ok("ATCRA7C0\r");
+    fake_can_stage_response(0x7C0, 8, first, 5);
+    fake_can_stage_response_at(0x7C0, 8, next, 1, 2);
+    elm_ask("2180\r");
+    TEST_ASSERT_EQUAL_INT(2, fake_can_sent_count());
+    TEST_ASSERT_EQUAL_HEX32(0x7B0, fake_can_sent(1)->id);
+    TEST_ASSERT_EQUAL_HEX32(0x30, fake_can_sent(1)->data[0]);
+}
+
+static void on_bcan_raw_like_multiecuscan(void) {
+    elm_echo_off();
+    elm_ok("ATPP2CSV81\r");
+    elm_ok("ATPP2CON\r");
+    elm_ok("ATPP2DSV0A\r");
+    elm_ok("ATPP2DON\r");
+    /* PP values take effect at the next reset, so Multiecuscan sends ATZ. */
+    elm_ask("ATZ\r");
+    elm_echo_off();
+    elm_ok("ATH0\r");
+    elm_ok("ATSPB\r");
+    elm_ok("ATS0\r");
+    elm_ok("ATCAF0\r");
+    elm_ok("ATCFC0\r");
+    elm_ok("ATCRA7C0\r");
+    elm_ok("ATSH7B0\r");
+    elm_ok("ATST29\r");
+}
+
+TEST(caf0_shows_a_reply_that_starts_with_an_extended_address) {
+    static const uint8_t reply[8] = {0xF1, 0x02, 0x50, 0x81,
+                                     0x00, 0x00, 0x00, 0x00};
+    on_bcan_raw_like_multiecuscan();
+    fake_can_stage_response(0x7C0, 8, reply, 10);
+
+    TEST_ASSERT_EQUAL_STRING("F102508100000000\r" ELM_PROMPT,
+                             elm_ask("04021081\r"));
+
+    const struct can_frame *tx = fake_can_sent(0);
+    TEST_ASSERT_NOT_NULL(tx);
+    TEST_ASSERT_EQUAL_HEX32(0x7B0, tx->id);
+    TEST_ASSERT_EQUAL_INT(8, tx->dlc);
+    TEST_ASSERT_EQUAL_MEM("\x04\x02\x10\x81\x00\x00\x00\x00", tx->data, 8);
+}
+
+TEST(caf0_with_an_extended_address_still_honours_the_receive_filter) {
+    static const uint8_t other[8] = {0xF1, 0x02, 0x50, 0x81,
+                                     0x00, 0x00, 0x00, 0x00};
+    on_bcan_raw_like_multiecuscan();
+    fake_can_stage_response(0x7C3, 8, other, 10);
+
+    TEST_ASSERT_EQUAL_STRING("NO DATA\r" ELM_PROMPT, elm_ask("04021081\r"));
+}
+
+TEST(raw_replies_with_explicit_cea_keep_isotp_flow_control) {
+    static const uint8_t first[8] = {0xF1, 0x10, 9, 0x50, 0x81, 1, 2, 3};
+    static const uint8_t next[8] = {0xF1, 0x21, 4, 5, 6, 7};
+    on_bcan_raw_like_multiecuscan();
+    elm_ok("ATCFC1\r");
+    elm_ok("ATCEA04\r");
+    elm_ok("ATCERF1\r");
+    fake_can_stage_response(0x7C0, 8, first, 5);
+    fake_can_stage_response_at(0x7C0, 8, next, 1, 2);
+    elm_ask("021081\r");
+    TEST_ASSERT_EQUAL_INT(2, fake_can_sent_count());
+    TEST_ASSERT_EQUAL_HEX32(0x04, fake_can_sent(1)->data[0]);
+    TEST_ASSERT_EQUAL_HEX32(0x30, fake_can_sent(1)->data[1]);
+}
+
+TEST(user_protocol_raw_format_is_honoured_with_caf1) {
+    static const uint8_t reply[8] = {0xF1, 2, 0x50, 0x81};
+    on_bcan_raw_like_multiecuscan();
+    elm_ok("ATCAF1\r");
+    elm_ok("ATPB800A\r");
+    fake_can_stage_response(0x7C0, 8, reply, 5);
+    TEST_ASSERT_EQUAL_STRING("F102508100000000\r" ELM_PROMPT,
+                             elm_ask("04021081\r"));
+}
