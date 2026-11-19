@@ -190,6 +190,7 @@ typedef struct {
     /** AT WM. Empty means the default for whichever protocol was negotiated. */
     uint8_t wakeup_msg[BUS_PERIODIC_MAX];
     uint8_t wakeup_len;
+    bool var_dlc;
 } elm327_settings_t;
 
 /* Timing evidence belongs to one exchange until the next command. */
@@ -329,6 +330,8 @@ static int elm327_kline_init(elm327_ctx_t *e, kline_init_mode_t mode);
 static void elm327_kline_reconcile(elm327_ctx_t *e);
 static void elm327_kline_apply_wakeup(elm327_ctx_t *e);
 
+static bool elm327_at_extra_command(elm327_ctx_t *e, const char *cmd);
+
 static size_t elm327_uart_read_bytes(elm327_ctx_t *e, uint8_t *buffer,
                                      size_t len, TickType_t ticks_to_wait) {
     return vif_link_read(buffer, len, ticks_to_wait);
@@ -451,6 +454,7 @@ static void elm327_load_defaults(elm327_ctx_t *e) {
     /* AT SW defaults to $92, "a nominal delay of 3 seconds". */
     e->settings.wakeup_ms = 0x92u * 20u;
     e->settings.wakeup_len = 0;
+    e->settings.var_dlc = false;
 }
 
 /**
@@ -1410,6 +1414,8 @@ static void elm327_at_command_handler(elm327_ctx_t *e, const char *cmd) {
          * so there is nothing to switch; accepted so a client that asks is
          * not turned away. */
         elm327_send_string(e, "OK\r");
+    } else if (elm327_at_extra_command(e, cmd)) {
+        /* Answered by the extended command handler. */
     } else {
         elm327_send_string(e, "?\r");
     }
@@ -1842,7 +1848,7 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
 
         isotp_config_t config = isotp_config_default(tx_frame.id, tx_frame.id);
         config.functional = multicast;
-        config.pad = e->settings.current_protocol != ELM327_PROTO_CAN_SAE_J1939;
+        config.pad = !e->settings.var_dlc;
         isotp_tx_t transport;
         if (isotp_tx_init(&transport, &config) < 0 ||
             isotp_tx_start(&transport, frame, len, 0) < 0 ||
@@ -1863,7 +1869,7 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
      * these protocols. SAE J1939 is the one exception - its frames
      * are genuinely variable length.
      */
-    if (e->settings.current_protocol != ELM327_PROTO_CAN_SAE_J1939) {
+    if (!e->settings.var_dlc) {
         tx_frame.dlc = sizeof(tx_frame.data);
     }
 
@@ -1950,6 +1956,7 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
             isotp_config_t config = isotp_config_default(
                 elm327_can_flow_control_id(e, rx.id), rx.id);
             config.rx_mask = address_mask;
+            config.pad = !e->settings.var_dlc;
             isotp_rx_init(stream, &config, NULL, ISOTP_MAX_PAYLOAD);
         }
         isotp_segment_t segment;
@@ -2955,6 +2962,20 @@ done:
      * nothing. */
     e->settings.auto_search = true;
     return ret;
+}
+
+static bool elm327_at_extra_command(elm327_ctx_t *e, const char *cmd) {
+    elm327_settings_t *s = &e->settings;
+    const char *reply = "OK\r";
+    if (strcmp(cmd, "V0") == 0 || strcmp(cmd, "V1") == 0) {
+        s->var_dlc = cmd[1] == '1';
+    } else {
+        return false;
+    }
+
+    if (reply)
+        elm327_send_string(e, reply);
+    return true;
 }
 
 static void elm327_parse_command(elm327_ctx_t *e, const char *cmd) {

@@ -1177,3 +1177,15 @@ TEST(failed_flow_control_keeps_can_open_for_the_next_request) {
     TEST_ASSERT_EQUAL_INT(teardowns, fake_can_teardown_count());
     TEST_ASSERT_EQUAL_HEX32(CAN_EFF_FLAG | 0x0CDA10F1, fake_can_sent(1)->id);
 }
+
+TEST(v1_sends_the_real_length) {
+    on_can_11bit();
+    elm_ok("ATV1\r");
+    fake_can_stage_response(0x7E8, 8, supported_pids, 1);
+    elm_ask("0100\r");
+    TEST_ASSERT_EQUAL_INT(3, fake_can_sent(0)->dlc);
+    elm_ok("ATV0\r");
+    fake_can_stage_response(0x7E8, 8, supported_pids, 1);
+    elm_ask("0100\r");
+    TEST_ASSERT_EQUAL_INT(8, fake_can_sent(1)->dlc);
+}
