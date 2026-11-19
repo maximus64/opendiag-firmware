@@ -14,8 +14,8 @@ Bluetooth.
 | CMD | Description | Supported |
 | :--- | :--- | :--- |
 | `<CR>` | repeat the last command | ✅ |
-| `BRD hh` | try Baud Rate Divisor hh | N/A |
-| `BRT hh` | set Baud Rate Timeout | N/A |
+| `BRD hh` | try Baud Rate Divisor hh | ✅ handshake only, see below |
+| `BRT hh` | set Baud Rate Timeout | ✅ accepted, no effect |
 | `D` | set all to Defaults | ✅ |
 | `E0, E1` | Echo off, or on | ✅ |
 | `FE` | Forget Events | |
@@ -173,3 +173,8 @@ Bluetooth.
 | `PROGV p vvvvvvvv` | drive an OBD-II pin `p`, or release it |
 | `VIF PASSTHRU` | Select the J2534 binary frontend on the current data connection. |
 | `VIF SLCAN` | Select the SLCAN frontend on the current data connection. |
+
+
+### Additional implemented commands
+
+`AT BRD hh` performs the ELM baud negotiation handshake (OK, identification string, then a bare CR from the client). USB/BLE do not change physical baud rate; `BRT` is accepted.

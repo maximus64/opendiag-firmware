@@ -1177,3 +1177,11 @@ TEST(failed_flow_control_keeps_can_open_for_the_next_request) {
     TEST_ASSERT_EQUAL_INT(teardowns, fake_can_teardown_count());
     TEST_ASSERT_EQUAL_HEX32(CAN_EFF_FLAG | 0x0CDA10F1, fake_can_sent(1)->id);
 }
+
+TEST(brd_handshake_completes_on_a_bare_cr) {
+    elm_echo_off();
+    TEST_ASSERT_EQUAL_STRING("OK\r" ELM_ID "\r", elm_ask("ATBRD23\r"));
+    TEST_ASSERT_EQUAL_STRING("OK\r" ELM_PROMPT, elm_ask("\r"));
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATBRD00\r"));
+    elm_ok("ATBRT19\r");
+}
