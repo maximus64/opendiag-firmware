@@ -594,3 +594,5 @@ for any damage arising from its use, including a bricked module, an immobilised 
 costs. You are responsible for everything you send to a vehicle. See the repository
 [README](https://github.com/maximus64/opendiag-firmware/blob/main/README.md) and
 [LICENSE](https://github.com/maximus64/opendiag-firmware/blob/main/LICENSE) for the full terms.
+
+See [Diagnostic services](diagnostics.md) for interface capabilities, sessions and checks before changing a module.
