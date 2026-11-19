@@ -190,6 +190,9 @@ typedef struct {
     /** AT WM. Empty means the default for whichever protocol was negotiated. */
     uint8_t wakeup_msg[BUS_PERIODIC_MAX];
     uint8_t wakeup_len;
+    bool can_filter;
+    uint32_t cf_id;
+    uint32_t cf_mask;
 } elm327_settings_t;
 
 /* Timing evidence belongs to one exchange until the next command. */
@@ -329,6 +332,8 @@ static int elm327_kline_init(elm327_ctx_t *e, kline_init_mode_t mode);
 static void elm327_kline_reconcile(elm327_ctx_t *e);
 static void elm327_kline_apply_wakeup(elm327_ctx_t *e);
 
+static bool elm327_at_extra_command(elm327_ctx_t *e, const char *cmd);
+
 static size_t elm327_uart_read_bytes(elm327_ctx_t *e, uint8_t *buffer,
                                      size_t len, TickType_t ticks_to_wait) {
     return vif_link_read(buffer, len, ticks_to_wait);
@@ -451,6 +456,7 @@ static void elm327_load_defaults(elm327_ctx_t *e) {
     /* AT SW defaults to $92, "a nominal delay of 3 seconds". */
     e->settings.wakeup_ms = 0x92u * 20u;
     e->settings.wakeup_len = 0;
+    e->settings.can_filter = false;
 }
 
 /**
@@ -1410,6 +1416,8 @@ static void elm327_at_command_handler(elm327_ctx_t *e, const char *cmd) {
          * so there is nothing to switch; accepted so a client that asks is
          * not turned away. */
         elm327_send_string(e, "OK\r");
+    } else if (elm327_at_extra_command(e, cmd)) {
+        /* Answered by the extended command handler. */
     } else {
         elm327_send_string(e, "?\r");
     }
@@ -1774,11 +1782,22 @@ static bool elm327_can_reply_id_ok(const elm327_ctx_t *e, uint32_t id) {
         return false;
     }
 
-    if (elm327_can_is_11bit(e)) {
-        return !extended && (id & 0x7F8u) == 0x7E8u;
+    if (extended == elm327_can_is_11bit(e)) {
+        return false;
     }
 
-    return extended && (id & CAN_EFF_MASK & 0x03FFFF00u) == 0x00DAF100u;
+    /* AT CRA / CF / CM: the client said which identifiers it wants, and that
+     * is the whole test - a cluster at 7C0 is nowhere near 7E8. */
+    if (e->settings.can_filter) {
+        uint32_t raw = id & (extended ? CAN_EFF_MASK : CAN_SFF_MASK);
+        return ((raw ^ e->settings.cf_id) & e->settings.cf_mask) == 0;
+    }
+
+    if (!extended) {
+        return (id & 0x7F8u) == 0x7E8u;
+    }
+
+    return (id & CAN_EFF_MASK & 0x03FFFF00u) == 0x00DAF100u;
 }
 
 /**
@@ -1801,6 +1820,14 @@ static uint32_t elm327_can_flow_control_id(const elm327_ctx_t *e,
     }
 
     return 0x18DA0000u | ((reply_id & 0xFFu) << 8) | 0xF1u | CAN_EFF_FLAG;
+}
+
+static uint32_t elm327_can_fc_tx_id(const elm327_ctx_t *e, uint32_t reply_id,
+                                    uint32_t request_id, bool multicast) {
+    if (e->settings.can_filter && !multicast) {
+        return request_id;
+    }
+    return elm327_can_flow_control_id(e, reply_id);
 }
 
 static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
@@ -1923,7 +1950,7 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
             continue;
         now = (uint32_t)Timer_elapsed_ms(&since_request) * 1000u;
 
-        if (!multicast &&
+        if (!multicast && !e->settings.can_filter &&
             ((elm327_can_flow_control_id(e, rx.id) ^ tx_frame.id) &
              address_mask))
             continue;
@@ -1948,7 +1975,7 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
                 goto fail;
             stream = free_stream;
             isotp_config_t config = isotp_config_default(
-                elm327_can_flow_control_id(e, rx.id), rx.id);
+                elm327_can_fc_tx_id(e, rx.id, tx_frame.id, multicast), rx.id);
             config.rx_mask = address_mask;
             isotp_rx_init(stream, &config, NULL, ISOTP_MAX_PAYLOAD);
         }
@@ -2167,6 +2194,7 @@ static elm327_reply_kind_t elm327_late_reply_kind(const elm327_ctx_t *e,
         return ELM327_REPLY_NONE;
 
     if (elm327_bus(e) == VIF_BUS_CAN) {
+        /* ponytail: no late-reply learning under AT CEA or a raw format. */
         if (!e->settings.can_auto_format || len > 8 ||
             !elm327_can_reply_id_ok(e, msg->id))
             return ELM327_REPLY_NONE;
@@ -2174,7 +2202,8 @@ static elm327_reply_kind_t elm327_late_reply_kind(const elm327_ctx_t *e,
                             ? CAN_SFF_MASK
                             : CAN_EFF_MASK & ~ELM327_CAN_PRIORITY_MASK;
         uint32_t functional = elm327_can_is_11bit(e) ? 0x7DF : 0x18DB33F1;
-        if (((e->settings.header_id ^ functional) & mask) &&
+        if (!e->settings.can_filter &&
+            ((e->settings.header_id ^ functional) & mask) &&
             ((elm327_can_flow_control_id(e, msg->id) ^ e->settings.header_id) &
              mask))
             return ELM327_REPLY_NONE;
@@ -2955,6 +2984,81 @@ done:
      * nothing. */
     e->settings.auto_search = true;
     return ret;
+}
+
+static int at_parse_can_id(const char *arg, bool wildcard, uint32_t *id,
+                           uint32_t *mask) {
+    size_t len = strlen(arg);
+    uint32_t v = 0, m = 0;
+
+    if (len != 3 && len != 8)
+        return -1;
+    for (size_t i = 0; i < len; i++) {
+        int8_t d = hex_char_to_int(arg[i]);
+        v <<= 4;
+        m <<= 4;
+        if (d >= 0) {
+            v |= (uint32_t)d;
+            m |= 0xFu;
+        } else if (!(wildcard && arg[i] == 'X')) {
+            return -1;
+        }
+    }
+    if (len == 3) {
+        if (v > CAN_SFF_MASK)
+            return -1;
+        m &= CAN_SFF_MASK;
+    } else {
+        v &= CAN_EFF_MASK;
+        m &= CAN_EFF_MASK;
+    }
+    *id = v;
+    if (mask)
+        *mask = m;
+    return 0;
+}
+
+static bool elm327_at_extra_command(elm327_ctx_t *e, const char *cmd) {
+    uint32_t id, mask;
+    elm327_settings_t *s = &e->settings;
+    const char *reply = "OK\r";
+    const char *bad = "?\r";
+    if (strcmp(cmd, "CRA") == 0) {
+        s->can_filter = false;
+    } else if (strncmp(cmd, "CRA", 3) == 0) {
+        if (at_parse_can_id(&cmd[3], true, &id, &mask)) {
+            reply = bad;
+        } else {
+            s->can_filter = true;
+            s->cf_id = id;
+            s->cf_mask = mask;
+        }
+    } else if (strncmp(cmd, "CF", 2) == 0) {
+        if (at_parse_can_id(&cmd[2], false, &id, NULL)) {
+            reply = bad;
+        } else {
+            /* A filter with no mask yet has to match exactly. */
+            if (!s->can_filter)
+                s->cf_mask = strlen(&cmd[2]) == 3 ? CAN_SFF_MASK : CAN_EFF_MASK;
+            s->can_filter = true;
+            s->cf_id = id;
+        }
+    } else if (strncmp(cmd, "CM", 2) == 0) {
+        if (at_parse_can_id(&cmd[2], false, &id, NULL)) {
+            reply = bad;
+        } else {
+            if (!s->can_filter)
+                s->cf_id = 0;
+            s->can_filter = true;
+            s->cf_mask = id;
+        }
+    } else {
+        return false;
+    }
+
+    if (reply)
+        elm327_send_string(e, reply);
+    return true;
 }
 
 static void elm327_parse_command(elm327_ctx_t *e, const char *cmd) {

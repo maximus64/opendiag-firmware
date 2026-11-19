@@ -1177,3 +1177,65 @@ TEST(failed_flow_control_keeps_can_open_for_the_next_request) {
     TEST_ASSERT_EQUAL_INT(teardowns, fake_can_teardown_count());
     TEST_ASSERT_EQUAL_HEX32(CAN_EFF_FLAG | 0x0CDA10F1, fake_can_sent(1)->id);
 }
+
+static const uint8_t body_reply[8] = {0x03, 0x61, 0x80, 0x01};
+
+TEST(cra_accepts_replies_outside_the_obd_range_until_reset) {
+    on_can_11bit();
+    elm_ok("ATSH7B0\r");
+    fake_can_stage_response(0x7C0, 8, body_reply, 5);
+    TEST_ASSERT_EQUAL_STRING("NO DATA\r" ELM_PROMPT, elm_ask("2180\r"));
+
+    elm_ok("ATCRA7C0\r");
+    fake_can_stage_response(0x7C0, 8, body_reply, 5);
+    TEST_ASSERT_EQUAL_STRING("7C0 03 61 80 01 00 00 00 00 \r" ELM_PROMPT,
+                             elm_ask("2180\r"));
+
+    elm_ok("ATCRA7CX\r");
+    fake_can_stage_response(0x7C5, 8, body_reply, 5);
+    TEST_ASSERT_EQUAL_STRING("7C5 03 61 80 01 00 00 00 00 \r" ELM_PROMPT,
+                             elm_ask("2180\r"));
+
+    elm_ok("ATCRA\r");
+    fake_can_stage_response(0x7C0, 8, body_reply, 5);
+    TEST_ASSERT_EQUAL_STRING("NO DATA\r" ELM_PROMPT, elm_ask("2180\r"));
+    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("ATCRA8C0\r"));
+}
+
+TEST(cf_and_cm_filter_by_id_and_mask) {
+    on_can_11bit();
+    elm_ok("ATSH7B0\r");
+    elm_ok("ATCF7C0\r");
+    fake_can_stage_response(0x7C5, 8, body_reply, 5);
+    TEST_ASSERT_EQUAL_STRING("NO DATA\r" ELM_PROMPT, elm_ask("2180\r"));
+    elm_ok("ATCM7F0\r");
+    fake_can_stage_response(0x7C5, 8, body_reply, 5);
+    TEST_ASSERT_EQUAL_STRING("7C5 03 61 80 01 00 00 00 00 \r" ELM_PROMPT,
+                             elm_ask("2180\r"));
+}
+
+TEST(a_filtered_physical_request_finishes_after_its_reply) {
+    on_can_11bit();
+    elm_ok("ATSH7B0\r");
+    elm_ok("ATCRA7C0\r");
+    elm_ok("ATAT0\r");
+    elm_ok("ATSTFF\r");
+    fake_can_stage_response(0x7C0, 8, body_reply, 5);
+    uint32_t before = fake_clock_ms();
+    elm_ask("2180\r");
+    TEST_ASSERT_TRUE(fake_clock_ms() - before < 100);
+}
+
+TEST(a_filtered_physical_reply_uses_the_request_id_for_flow_control) {
+    static const uint8_t first[8] = {0x10, 0x0A, 0x61, 0x80, 1, 2, 3, 4};
+    static const uint8_t next[8] = {0x21, 5, 6, 7, 8};
+    on_can_11bit();
+    elm_ok("ATSH7B0\r");
+    elm_ok("ATCRA7C0\r");
+    fake_can_stage_response(0x7C0, 8, first, 5);
+    fake_can_stage_response_at(0x7C0, 8, next, 1, 2);
+    elm_ask("2180\r");
+    TEST_ASSERT_EQUAL_INT(2, fake_can_sent_count());
+    TEST_ASSERT_EQUAL_HEX32(0x7B0, fake_can_sent(1)->id);
+    TEST_ASSERT_EQUAL_HEX32(0x30, fake_can_sent(1)->data[0]);
+}
