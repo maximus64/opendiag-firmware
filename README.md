@@ -152,3 +152,8 @@ Software Foundation. No later version applies. The full text is in
 The GPL is copyleft: anything you distribute that is derived from this code must
 be released under the same licence, with source. It carries no warranty — see
 sections 15 and 16 of the licence, and [Disclaimer](#disclaimer).
+
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and the [developer guide](docs/developers.md).
