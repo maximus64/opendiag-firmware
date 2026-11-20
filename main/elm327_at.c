@@ -190,6 +190,8 @@ typedef struct {
     /** AT WM. Empty means the default for whichever protocol was negotiated. */
     uint8_t wakeup_msg[BUS_PERIODIC_MAX];
     uint8_t wakeup_len;
+    uint8_t header_digits;
+    uint8_t can_priority;
 } elm327_settings_t;
 
 /* Timing evidence belongs to one exchange until the next command. */
@@ -329,6 +331,53 @@ static int elm327_kline_init(elm327_ctx_t *e, kline_init_mode_t mode);
 static void elm327_kline_reconcile(elm327_ctx_t *e);
 static void elm327_kline_apply_wakeup(elm327_ctx_t *e);
 
+/*
+ * What a request came to, beyond the reply lines already printed. The
+ * protocol xfer functions return these; elm327_parse_command() turns them into
+ * the ELM327's own words, which apps parse to decide whether to retry, reset
+ * or give up.
+ */
+enum {
+    ELM327_XFER_NO_DATA = -1,    /* "NO DATA" */
+    ELM327_XFER_BAD = -2,        /* "?": the request itself is wrong */
+    ELM327_XFER_REPORTED = -3,   /* already reported in full */
+    ELM327_XFER_CAN_ERROR = -4,  /* "CAN ERROR": could not open or send */
+    ELM327_XFER_BUS_ERROR = -5,  /* "BUS ERROR": the byte bus failed us */
+    ELM327_XFER_BUS_BUSY = -6,   /* "BUS BUSY": never went idle to send */
+    ELM327_XFER_DATA_ERROR = -7, /* "DATA ERROR": a reply, but corrupt */
+};
+
+static const char *elm327_xfer_error(int rc) {
+    switch (rc) {
+    case ELM327_XFER_NO_DATA:
+        return "NO DATA\r";
+    case ELM327_XFER_CAN_ERROR:
+        return "CAN ERROR\r";
+    case ELM327_XFER_BUS_ERROR:
+        return "BUS ERROR\r";
+    case ELM327_XFER_BUS_BUSY:
+        return "BUS BUSY\r";
+    case ELM327_XFER_DATA_ERROR:
+        return "DATA ERROR\r";
+    default:
+        return "?\r";
+    }
+}
+
+/** A byte bus send failure, in the ELM327's words. */
+static int elm327_bus_send_error(int ret) {
+    switch (ret) {
+    case BUS_ERR_TOO_LONG:
+    case BUS_ERR_BAD_ARG:
+        return ELM327_XFER_BAD;
+    case BUS_ERR_BUS_BUSY:
+        return ELM327_XFER_BUS_BUSY;
+    default:
+        return ELM327_XFER_BUS_ERROR;
+    }
+}
+static bool elm327_at_extra_command(elm327_ctx_t *e, const char *cmd);
+
 static size_t elm327_uart_read_bytes(elm327_ctx_t *e, uint8_t *buffer,
                                      size_t len, TickType_t ticks_to_wait) {
     return vif_link_read(buffer, len, ticks_to_wait);
@@ -451,6 +500,8 @@ static void elm327_load_defaults(elm327_ctx_t *e) {
     /* AT SW defaults to $92, "a nominal delay of 3 seconds". */
     e->settings.wakeup_ms = 0x92u * 20u;
     e->settings.wakeup_len = 0;
+    e->settings.header_digits = 8;
+    e->settings.can_priority = 0x18;
 }
 
 /**
@@ -554,6 +605,7 @@ static int at_set_header(elm327_ctx_t *e, const char *arg) {
     ESP_LOGI(TAG, "Set Header to 0x%08" PRIx32, id);
 
     e->settings.header_id = id;
+    e->settings.header_digits = (uint8_t)len;
 
     return 0;
 }
@@ -698,6 +750,29 @@ static vif_bus_t elm327_bus(const elm327_ctx_t *e) {
  * @return 0, or -1 when the bus could not be opened, which now includes
  *         another session already holding it.
  */
+static volatile bool can_guard = true;
+
+void elm327_can_guard_set(bool on) { can_guard = on; }
+bool elm327_can_guard_get(void) { return can_guard; }
+
+/**
+ * True when another owner (the shell) holds a bus. AT SP then has to say
+ * '?': the client cannot have CAN at all, which is not the same as a CAN
+ * that the listen-first guard keeps quiet for now.
+ */
+static bool elm327_bus_held_by_other(void) {
+    vif_bus_claim_t claims[VIF_BUS_GROUPS];
+
+    vif_bus_info(claims);
+    for (size_t i = 0; i < VIF_BUS_GROUPS; i++) {
+        if (claims[i].bus != VIF_BUS_NONE &&
+            claims[i].owner != VIF_OWNER_LINK) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static int elm327_set_protocol(elm327_ctx_t *e, int proto) {
     vif_bus_cfg_t cfg = {0};
     vif_bus_t bus = VIF_BUS_NONE;
@@ -758,6 +833,7 @@ static int elm327_set_protocol(elm327_ctx_t *e, int proto) {
      * two CAN protocols on the same wire can still want different bit rates. */
     if (bus != VIF_BUS_CAN && vif_bus_is_open(VIF_OWNER_LINK, bus)) {
         e->settings.header_id = header_id;
+        e->settings.header_digits = 8;
         e->settings.current_protocol = proto;
         return 0;
     }
@@ -767,9 +843,30 @@ static int elm327_set_protocol(elm327_ctx_t *e, int proto) {
     if (vif_bus_release_all(VIF_OWNER_LINK) != ESP_OK)
         return -1;
 
+    /* Leave alone a bus that runs at another bit rate: transmitting into it
+     * floods every node there with error frames (see bus_cfg_t). */
+    if (bus == VIF_BUS_CAN)
+        cfg.listen_first = can_guard;
+
     if (vif_bus_open(VIF_OWNER_LINK, bus, &cfg) != ESP_OK) {
         /* Startup failed; VIF may retain a claim until cleanup succeeds. */
         ESP_LOGE(TAG, "Protocol %d unavailable", proto);
+        if (bus == VIF_BUS_CAN && !elm327_bus_held_by_other()) {
+            /*
+             * Keep the protocol the client chose. Falling back to automatic
+             * here turned its next request into a search, and a search on a
+             * vehicle whose pins 6/14 run at another rate ends on the K-Line:
+             * a request meant for a CAN module - Multiecuscan's "10 03" for
+             * the ABS, or anything starting with 04 - reached the engine
+             * instead. A real ELM327 does not probe at AT SP; it answers
+             * CAN ERROR when the request is sent. elm327_can_ensure_open()
+             * tries again then, behind the same guard.
+             */
+            e->settings.header_id = header_id;
+            e->settings.header_digits = 8;
+            e->settings.current_protocol = proto;
+            return 1;
+        }
         e->settings.current_protocol = ELM327_PROTO_AUTO;
         return -1;
     }
@@ -781,6 +878,7 @@ static int elm327_set_protocol(elm327_ctx_t *e, int proto) {
     memset(&e->timing, 0, sizeof(e->timing));
 
     e->settings.header_id = header_id;
+    e->settings.header_digits = 8;
     e->settings.current_protocol = proto;
     return 0;
 }
@@ -967,9 +1065,15 @@ static void elm327_select_protocol_cmd(elm327_ctx_t *e, const char *arg) {
     ESP_LOGI(TAG, "Set protocol: %d%s", proto,
              fallback ? " (auto fallback)" : "");
 
-    if (elm327_set_protocol(e, proto) != 0) {
+    int rc = elm327_set_protocol(e, proto);
+    if (rc < 0) {
         elm327_send_string(e, "?\r");
         return;
+    }
+    if (rc > 0 && fallback) {
+        /* "A6": the client asked for a search if protocol 6 cannot be used. */
+        e->settings.current_protocol = ELM327_PROTO_AUTO;
+        fallback = false;
     }
 
     /* After elm327_set_protocol(), which clears it on the way out of
@@ -1410,6 +1514,8 @@ static void elm327_at_command_handler(elm327_ctx_t *e, const char *cmd) {
          * so there is nothing to switch; accepted so a client that asks is
          * not turned away. */
         elm327_send_string(e, "OK\r");
+    } else if (elm327_at_extra_command(e, cmd)) {
+        /* Answered by the extended command handler. */
     } else {
         elm327_send_string(e, "?\r");
     }
@@ -1803,28 +1909,41 @@ static uint32_t elm327_can_flow_control_id(const elm327_ctx_t *e,
     return 0x18DA0000u | ((reply_id & 0xFFu) << 8) | 0xF1u | CAN_EFF_FLAG;
 }
 
+static uint32_t elm327_can_request_id(const elm327_ctx_t *e) {
+    uint32_t id = e->settings.header_id;
+
+    if (elm327_can_is_11bit(e))
+        return id & CAN_SFF_MASK;
+    if (e->settings.header_digits == 6)
+        id = ((uint32_t)(e->settings.can_priority & 0x1F) << 24) |
+             (id & 0xFFFFFFu);
+    return (id & CAN_EFF_MASK) | CAN_EFF_FLAG;
+}
+
 static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
                                     size_t len, int num_frame) {
     int ret;
     struct can_frame tx_frame = {0};
+    int fail_rc = ELM327_XFER_BAD;
 
     if (!vif_bus_is_open(VIF_OWNER_LINK, VIF_BUS_CAN)) {
         vif_bus_cfg_t cfg = {0};
         elm327_bus_for_protocol(e->settings.current_protocol, &cfg, NULL);
+        cfg.listen_first = can_guard;
         if (vif_bus_open(VIF_OWNER_LINK, VIF_BUS_CAN, &cfg) != ESP_OK)
-            return -2;
+            return ELM327_XFER_CAN_ERROR;
         elm327_apply_bus_policy(e, VIF_BUS_CAN, e->settings.current_protocol);
     }
 
     /* UDS framing. Single frame */
-    tx_frame.id = e->settings.header_id;
+    tx_frame.id = elm327_can_request_id(e);
 
     /* Normal-fixed priority is not part of the transport address. */
     uint32_t address_mask =
         elm327_can_is_11bit(e) ? UINT32_MAX : ~ELM327_CAN_PRIORITY_MASK;
-    bool multicast = elm327_can_is_11bit(e)
-                         ? tx_frame.id == 0x7DF
-                         : (tx_frame.id & address_mask) == 0x00DB33F1;
+    bool multicast = elm327_can_is_11bit(e) ? tx_frame.id == 0x7DF
+                                            : (tx_frame.id & address_mask) ==
+                                                  (0x00DB33F1 | CAN_EFF_FLAG);
 
     // Set extended ID flag for 29 bit ID protocols
     if (e->settings.current_protocol == ELM327_PROTO_CAN_29BIT_250K ||
@@ -1872,6 +1991,7 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
     ret = can_frame_send(&tx_frame);
     if (ret != 0) {
         ESP_LOGE(TAG, "Fail to send CAN frame ret=%d\n", ret);
+        fail_rc = ELM327_XFER_CAN_ERROR;
         goto fail;
     }
 
@@ -1954,8 +2074,12 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
         }
         isotp_segment_t segment;
         ret = isotp_rx_feed(stream, &rx, now, &segment);
-        if (ret < 0)
+        if (ret < 0) {
+            /* Out of sequence or past its own length: a reply arrived, but
+             * not one that can be put back together. */
+            fail_rc = ELM327_XFER_DATA_ERROR;
             goto fail;
+        }
         if (ret == ISOTP_IGNORED)
             continue;
         if (segment.replaced)
@@ -1968,8 +2092,10 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
         if (fc_result == ISOTP_FRAME) {
             int sent = can_frame_send_confirmed(&fc);
             now = (uint32_t)Timer_elapsed_ms(&since_request) * 1000u;
-            if (isotp_rx_confirm(stream, sent == 0, now) < 0)
+            if (isotp_rx_confirm(stream, sent == 0, now) < 0) {
+                fail_rc = ELM327_XFER_CAN_ERROR;
                 goto fail;
+            }
         }
         uint8_t display_dlc = rx.dlc;
         if (e->settings.can_auto_format && !e->settings.show_header &&
@@ -1999,7 +2125,7 @@ static int elm327_can_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
     return frame_counter ? 0 : -1;
 
 fail:
-    return -2;
+    return fail_rc;
 }
 
 /**
@@ -2268,10 +2394,11 @@ static void elm327_observe_late_replies(elm327_ctx_t *e) {
 }
 
 static void elm327_print_j1850_kline_frame(elm327_ctx_t *e, const uint8_t *data,
-                                           size_t len) {
+                                           size_t len, uint16_t status) {
     /* Three characters per byte with spacing on, for a frame as long as
-     * KLINE_FRAME_CAP, plus the carriage return and the terminator. */
-    char outstr[KLINE_FRAME_CAP * 3 + 2] = {0};
+     * KLINE_FRAME_CAP, the error marker, the carriage return and the
+     * terminator. */
+    char outstr[KLINE_FRAME_CAP * 3 + sizeof("<DATA ERROR") + 2] = {0};
     char *p = &outstr[0];
     size_t hdr = elm327_header_len(e, data, len);
 
@@ -2292,9 +2419,15 @@ static void elm327_print_j1850_kline_frame(elm327_ctx_t *e, const uint8_t *data,
             p += 2;
         }
     }
+    /* The ELM327 marks a line whose checksum failed, rather than drop it:
+     * the data may still be what the client wanted. */
+    if (status & BUS_RX_BAD_CHECKSUM)
+        p += sprintf(p, "<DATA ERROR");
     *p++ = '\r';
     *p++ = '\0';
 
+    if (status & BUS_RX_BUFFER_OVERFLOW)
+        elm327_send_string(e, "BUFFER FULL\r");
     elm327_send_string(e, outstr);
 }
 
@@ -2680,7 +2813,7 @@ static int elm327_bus_xfer(elm327_ctx_t *e, const uint8_t *frame, size_t len,
     ret = vif_bus_send(VIF_OWNER_LINK, elm327_bus(e), &tx_msg, tx_flags);
     if (ret != 0) {
         ESP_LOGE(TAG, "Fail to send frame ret=%d", ret);
-        return -2;
+        return elm327_bus_send_error(ret);
     }
 
     elm327_timing_begin(e, frame, len, num_frame);
@@ -2729,7 +2862,7 @@ static int elm327_bus_xfer(elm327_ctx_t *e, const uint8_t *frame, size_t len,
             continue;
         }
 
-        elm327_print_j1850_kline_frame(e, rx_frame, ret);
+        elm327_print_j1850_kline_frame(e, rx_frame, ret, rx.status);
         frame_counter++;
         uint32_t latency_ms = (uint32_t)Timer_elapsed_ms(&since_request);
         elm327_timing_reply(e, latency_ms, false);
@@ -2945,7 +3078,7 @@ static int elm327_search_protocol_xfer(elm327_ctx_t *e, const uint8_t *frame,
 
     vif_bus_release_all(VIF_OWNER_LINK);
     e->settings.auto_search = false;
-    return ret;
+    return ret <= ELM327_XFER_CAN_ERROR ? ELM327_XFER_BAD : ret;
 
 done:
     e->in_search = false;
@@ -2955,6 +3088,25 @@ done:
      * nothing. */
     e->settings.auto_search = true;
     return ret;
+}
+
+static bool elm327_at_extra_command(elm327_ctx_t *e, const char *cmd) {
+    uint8_t b = 0;
+    elm327_settings_t *s = &e->settings;
+    const char *reply = "OK\r";
+    const char *bad = "?\r";
+    if (strncmp(cmd, "CP", 2) == 0) {
+        if (at_parse_byte(&cmd[2], &b))
+            reply = bad;
+        else
+            s->can_priority = b & 0x1F;
+    } else {
+        return false;
+    }
+
+    if (reply)
+        elm327_send_string(e, reply);
+    return true;
 }
 
 static void elm327_parse_command(elm327_ctx_t *e, const char *cmd) {
@@ -3049,13 +3201,11 @@ static void elm327_parse_command(elm327_ctx_t *e, const char *cmd) {
                 e->timing.watch.active = false;
             }
 
-            if (rc == -1) {
-                elm327_send_string(e, "NO DATA\r");
-            } else if (rc == -3) {
+            if (rc == ELM327_XFER_REPORTED) {
                 /* Already reported in full - a second line here would have
                  * the client seeing "BUS INIT: ...ERROR" followed by "?". */
             } else if (rc < 0) {
-                elm327_send_string(e, "?\r");
+                elm327_send_string(e, elm327_xfer_error(rc));
             }
         }
     }

@@ -153,6 +153,75 @@ TEST(a_search_falls_through_to_kline_when_can_is_silent) {
     TEST_ASSERT_EQUAL_INT(0, fake_bus_setup_count(FAKE_BUS_J1850_PWM));
 }
 
+TEST(a_search_does_not_transmit_into_a_bus_at_another_bit_rate) {
+    /* A van with a 50 kbit/s body bus on pins 6/14 and its engine on the
+     * K-Line: every CAN protocol is refused by the driver's listen-first
+     * check, nothing goes out on CAN, and the search still finds K-Line. */
+    elm_echo_off();
+    elm_ok("ATH1\r");
+    fake_can_set_foreign_rate(true);
+    fake_bus_stage_response(FAKE_BUS_KLINE, bus_reply, sizeof(bus_reply), 5);
+
+    TEST_ASSERT_EQUAL_STRING(SEARCHING
+                             "48 6B 10 41 00 BE 3F B8 13 C4 \r" ELM_PROMPT,
+                             elm_ask("0100\r"));
+
+    TEST_ASSERT_TRUE(fake_can_last_listen_first());
+    TEST_ASSERT_EQUAL_INT(0, fake_can_setup_count());
+    TEST_ASSERT_EQUAL_INT(0, fake_can_sent_count());
+    TEST_ASSERT_TRUE(fake_bus_is_up(FAKE_BUS_KLINE));
+}
+
+/*
+ * The same van, with a client that fixes a CAN protocol - Multiecuscan asks
+ * for protocol B at 500k/29 bit for the ABS and then sends "10 03". The guard
+ * refuses the bus, and the request must fail as CAN ERROR. It used to drop
+ * the protocol back to automatic, search, find the K-Line and deliver the
+ * request to the engine.
+ */
+TEST(a_fixed_can_protocol_the_guard_refuses_never_falls_back_to_a_search) {
+    elm_echo_off();
+    elm_ok("ATH1\r");
+    fake_can_set_foreign_rate(true);
+    fake_bus_stage_response(FAKE_BUS_KLINE, bus_reply, sizeof(bus_reply), 5);
+
+    elm_ok("ATSP6\r");
+    TEST_ASSERT_EQUAL_STRING("6\r" ELM_PROMPT, elm_ask("ATDPN\r"));
+
+    TEST_ASSERT_EQUAL_STRING("CAN ERROR\r" ELM_PROMPT, elm_ask("1003\r"));
+    TEST_ASSERT_EQUAL_STRING("CAN ERROR\r" ELM_PROMPT, elm_ask("04021081\r"));
+
+    TEST_ASSERT_EQUAL_INT(0, fake_can_sent_count());
+    TEST_ASSERT_FALSE(fake_bus_is_up(FAKE_BUS_KLINE));
+    TEST_ASSERT_EQUAL_STRING("6\r" ELM_PROMPT, elm_ask("ATDPN\r"));
+}
+
+/* "A6" asks for a search when protocol 6 cannot be used, and gets one. */
+TEST(a_fixed_can_protocol_with_auto_fallback_still_searches) {
+    elm_echo_off();
+    elm_ok("ATH1\r");
+    fake_can_set_foreign_rate(true);
+    fake_bus_stage_response(FAKE_BUS_KLINE, bus_reply, sizeof(bus_reply), 5);
+
+    elm_ok("ATSPA6\r");
+
+    TEST_ASSERT_EQUAL_STRING(SEARCHING
+                             "48 6B 10 41 00 BE 3F B8 13 C4 \r" ELM_PROMPT,
+                             elm_ask("0100\r"));
+    TEST_ASSERT_EQUAL_INT(0, fake_can_sent_count());
+}
+
+TEST(with_canguard_off_can_is_opened_without_listening_first) {
+    elm327_can_guard_set(false);
+    elm_echo_off();
+
+    elm_ask("0100\r");
+
+    TEST_ASSERT_FALSE(fake_can_last_listen_first());
+    TEST_ASSERT_EQUAL_INT(CAN_PROTOCOLS_IN_A_SEARCH, fake_can_setup_count());
+    elm327_can_guard_set(true);
+}
+
 TEST(a_search_falls_through_to_j1850_pwm) {
     elm_echo_off();
     elm_ok("ATH1\r");
@@ -586,4 +655,27 @@ TEST(selecting_same_protocol_after_failed_close_reopens_driver) {
     elm_ok("ATSP2\r");
     TEST_ASSERT_EQUAL_INT(2, fake_bus_setup_count(FAKE_BUS_J1850_VPW));
     TEST_ASSERT_EQUAL_STRING("Y\r" ELM_PROMPT, elm_ask("ATIA\r"));
+}
+
+TEST(reopening_can_after_a_release_keeps_the_listen_first_guard) {
+    elm_echo_off();
+    elm_ok("ATSP6\r");
+    TEST_ASSERT_EQUAL_INT(ESP_OK, vif_bus_close(VIF_OWNER_LINK, VIF_BUS_CAN));
+    fake_can_set_foreign_rate(true);
+    elm_ask("0100\r");
+    TEST_ASSERT_EQUAL_INT(0, fake_can_sent_count());
+    TEST_ASSERT_FALSE(fake_can_is_up());
+}
+
+TEST(a_deferred_can_selection_resets_a_previous_six_digit_header) {
+    elm_echo_off();
+    elm_ok("ATSP7\r");
+    elm_ok("ATCP0C\r");
+    elm_ok("ATSHDA10F1\r");
+    fake_can_set_foreign_rate(true);
+    elm_ok("ATSP9\r");
+    fake_can_set_foreign_rate(false);
+    elm_ask("0100\r");
+    TEST_ASSERT_EQUAL_INT(1, fake_can_sent_count());
+    TEST_ASSERT_EQUAL_HEX32(CAN_EFF_FLAG | 0x18DB33F1, fake_can_sent(0)->id);
 }

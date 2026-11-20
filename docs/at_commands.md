@@ -134,7 +134,7 @@ Bluetooth.
 | `CFC0, CFC1` | Flow Controls off, or on | |
 | `CM hhh` | set the ID Mask to hhh | |
 | `CM hhhhhhhh` | set the ID Mask to hhhhhhhh | |
-| `CP hh` | set CAN Priority to hh (29 bit) | |
+| `CP hh` | set CAN Priority to hh (29 bit) | ✅ |
 | `CRA` | reset the Receive Address filters | |
 | `CRA hhh` | set CAN Receive Address to hhh | |
 | `CRA hhhhhhhh` | set the Rx Address to hhhhhhhh | |
@@ -173,3 +173,30 @@ Bluetooth.
 | `PROGV p vvvvvvvv` | drive an OBD-II pin `p`, or release it |
 | `VIF PASSTHRU` | Select the J2534 binary frontend on the current data connection. |
 | `VIF SLCAN` | Select the SLCAN frontend on the current data connection. |
+
+
+### Error messages
+
+What a request can answer besides its data, as the ELM327 words it:
+
+| Message | When |
+| --- | --- |
+| `NO DATA` | Nothing answered within the timeout |
+| `?` | The request itself is wrong: not hex, or too long for one CAN frame |
+| `CAN ERROR` | The CAN bus could not be opened (for example, the listen-first check found another bit rate on it) or a frame or flow control could not be sent |
+| `BUS ERROR` | A K-Line or J1850 transmission failed: a collision, a broken echo, the driver refused it |
+| `BUS BUSY` | The K-Line or J1850 bus never went idle long enough to start |
+| `DATA ERROR` | A multi-frame CAN reply arrived broken: out of sequence or longer than it said |
+| `<DATA ERROR` | At the end of a K-Line or J1850 line: that message's checksum failed. The data is shown anyway |
+| `BUFFER FULL` | Before a line: replies were lost because they arrived faster than they were read |
+| `BUS INIT: ...ERROR` | The K-Line initialisation failed |
+
+A failed automatic search still answers `NO DATA` or `?` as before.
+
+
+### Fixed CAN protocols do not fall back to another bus
+
+`AT SP 6` (and other fixed CAN selections) keeps the selected protocol if opening fails. Each request then reports `CAN ERROR` instead of starting a K-Line/J1850 search. `AT SP A6` still requests automatic fallback. Pin voltage and bus ownership interlocks remain enforced.
+### Additional implemented commands
+
+`AT CP hh` supplies the priority byte for six-digit CAN headers on a 29-bit protocol.

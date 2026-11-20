@@ -37,6 +37,7 @@ typedef struct {
     int setup_count;
     int teardown_count;
     bool fail_next_send;
+    int fail_rc;
     uint32_t send_duration_ms;
     void (*lifecycle_hook)(void *);
     void *lifecycle_arg;
@@ -203,7 +204,12 @@ const uint8_t *fake_bus_kline_wakeup(size_t *out_len) {
 }
 
 void fake_bus_fail_next_send(fake_bus_id_t id) {
+    fake_bus_fail_next_send_rc(id, -1);
+}
+
+void fake_bus_fail_next_send_rc(fake_bus_id_t id, int rc) {
     bus_of(id)->fail_next_send = true;
+    bus_of(id)->fail_rc = rc;
 }
 
 const uint8_t *fake_bus_sent(fake_bus_id_t id, int idx, size_t *out_len) {
@@ -250,7 +256,7 @@ static int bus_send(fake_bus_id_t id, const uint8_t *data, uint8_t len,
 
     if (b->fail_next_send) {
         b->fail_next_send = false;
-        return -1;
+        return b->fail_rc;
     }
 
     if (b->sent_count < MAX_FRAMES) {
