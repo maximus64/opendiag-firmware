@@ -90,6 +90,7 @@ ports, and advertises over BLE as **OpenDIAG**.
 | USB CDC 1 | console and debug shell |
 | BLE UART characteristics | the data link — ELM327 by default, switchable to SLCAN |
 | BLE control characteristic | the same control commands, for a BLE client |
+| WiFi access point, TCP 35000 | the data link, once enabled with `wifi pass` and `wifi on` |
 
 Both data links start on **ELM327** and go back to it when their client disconnects, so any
 existing ELM327 app works without being told anything.
@@ -105,6 +106,8 @@ Implemented and working:
 - SLCAN (LAWICEL) on either link, for `slcand` and ECU reflashing
 - Switching a link between the two without dropping its bus or programming voltage
 - Board control: high-side/low-side drivers, boost converter, voltage sense, calibration
+- Deep sleep while the vehicle is parked and nobody uses the adapter
+- The data link over WiFi (own access point, TCP 35000), off by default
 
 Not yet implemented:
 
