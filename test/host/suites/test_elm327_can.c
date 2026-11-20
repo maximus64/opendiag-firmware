@@ -367,7 +367,7 @@ TEST(a_failed_transmit_is_reported) {
     on_can_11bit();
     fake_can_fail_next_send();
 
-    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("0100\r"));
+    TEST_ASSERT_EQUAL_STRING("CAN ERROR\r" ELM_PROMPT, elm_ask("0100\r"));
 }
 
 /* ------------------------------------------------------------------ *
@@ -741,8 +741,9 @@ TEST(a_gap_in_the_consecutive_frame_sequence_is_an_error) {
     fake_can_stage_response_at(0x7E8, 8, out_of_order, 5, 2);
 
     /* Index 2 where index 1 was due: a frame went missing. */
-    TEST_ASSERT_EQUAL_STRING("7E8 10 14 49 02 01 31 32 33 \r?\r" ELM_PROMPT,
-                             elm_ask("0902\r"));
+    TEST_ASSERT_EQUAL_STRING(
+        "7E8 10 14 49 02 01 31 32 33 \rDATA ERROR\r" ELM_PROMPT,
+        elm_ask("0902\r"));
 }
 
 TEST(a_new_first_frame_restarts_reception_and_reports_the_old_one_aborted) {
@@ -1103,7 +1104,7 @@ TEST(failed_flow_control_send_is_reported) {
     on_can_11bit();
     fake_can_fail_confirmed_send();
     stage_vin_reply();
-    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("0902\r"));
+    TEST_ASSERT_EQUAL_STRING("CAN ERROR\r" ELM_PROMPT, elm_ask("0902\r"));
     TEST_ASSERT_EQUAL_INT(1, fake_can_sent_count());
 }
 
@@ -1147,7 +1148,7 @@ TEST(
     elm_ok("ATSH0CDA10F1\r");
     fake_can_abort_confirmed_send();
     fake_can_stage_response(CAN_EFF_FLAG | 0x18DAF110, 8, vin_ff, 1);
-    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("0902\r"));
+    TEST_ASSERT_EQUAL_STRING("CAN ERROR\r" ELM_PROMPT, elm_ask("0902\r"));
     TEST_ASSERT_FALSE(vif_bus_is_open(VIF_OWNER_LINK, VIF_BUS_CAN));
     TEST_ASSERT_FALSE(fake_can_is_up());
     int setups = fake_can_setup_count();
@@ -1167,7 +1168,7 @@ TEST(failed_flow_control_keeps_can_open_for_the_next_request) {
     int teardowns = fake_can_teardown_count();
     fake_can_fail_confirmed_send();
     fake_can_stage_response(CAN_EFF_FLAG | 0x18DAF110, 8, vin_ff, 1);
-    TEST_ASSERT_EQUAL_STRING("?\r" ELM_PROMPT, elm_ask("0902\r"));
+    TEST_ASSERT_EQUAL_STRING("CAN ERROR\r" ELM_PROMPT, elm_ask("0902\r"));
     TEST_ASSERT_TRUE(vif_bus_is_open(VIF_OWNER_LINK, VIF_BUS_CAN));
     TEST_ASSERT_TRUE(fake_can_is_up());
     fake_can_stage_response(CAN_EFF_FLAG | 0x18DAF110, 8, supported_pids, 1);
