@@ -114,6 +114,29 @@ TEST(an_overflowing_receive_buffer_drops_and_counts_instead_of_blocking) {
                     "the buffered bytes were lost with the dropped chunk");
 }
 
+TEST(the_stream_positions_place_an_event_between_bytes) {
+    uint8_t big[FAKE_PORT_RX_BUF];
+    uint8_t buf[8];
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, comm_port_rx(P0, (const uint8_t *)"abc", 3));
+    uint32_t event_at = comm_port_rx_position(P0); /* after "abc" */
+    TEST_ASSERT_EQUAL_INT(ESP_OK, comm_port_rx(P0, (const uint8_t *)"de", 2));
+
+    TEST_ASSERT_EQUAL_INT(3, event_at);
+    TEST_ASSERT_EQUAL_INT(2, (int)comm_port_read(P0, buf, 2, 0));
+    TEST_ASSERT_EQUAL_INT(2, comm_port_read_position(P0));
+
+    /* A dropped chunk was never in the stream, so it moves nothing. */
+    memset(big, 'A', sizeof(big));
+    comm_port_rx(P0, big, sizeof(big));
+    TEST_ASSERT_EQUAL_INT(5, comm_port_rx_position(P0));
+
+    /* What a departing client left unread counts as consumed. */
+    comm_port_client_gone(P0);
+    TEST_ASSERT_EQUAL_INT(5, comm_port_read_position(P0));
+    TEST_ASSERT_EQUAL_INT(0, comm_port_read_position(P1));
+}
+
 /* ------------------------------------------------------------------ *
  * Writing
  * ------------------------------------------------------------------ */

@@ -128,6 +128,7 @@ set(SUITES
     test_j1850_pwm_codec
     test_j1850_vpw_codec
     test_kline_codec
+    test_kkl
     test_kline_codec_cov
     test_kline_init_cov
     test_kline_api_cov
@@ -187,6 +188,14 @@ set(test_slcan_FW
     ${FW_DIR}/kline_codec.c
     ${FW_DIR}/bus.c
     ${FW_DIR}/slcan.c
+    ${FW_DIR}/utility.c
+    ${FW_DIR}/vif.c
+)
+set(test_kkl_FW
+    ${FW_DIR}/comm_iface.c
+    ${FW_DIR}/kline_codec.c
+    ${FW_DIR}/bus.c
+    ${FW_DIR}/kkl.c
     ${FW_DIR}/utility.c
     ${FW_DIR}/vif.c
 )

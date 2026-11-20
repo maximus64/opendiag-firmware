@@ -186,6 +186,33 @@ bool kline_decode_keybytes(uint8_t b1, uint8_t b2, kline_keybytes_t *out);
 /** @brief Odd parity over all eight bits, as the key bytes are defined. */
 bool kline_odd_parity(uint8_t b);
 
+/* USB CDC line coding parity values. The first three equal BUS_PARITY_*;
+ * mark and space only reach the bit banged rates. */
+#define KLINE_PARITY_NONE 0
+#define KLINE_PARITY_ODD 1
+#define KLINE_PARITY_EVEN 2
+#define KLINE_PARITY_MARK 3
+#define KLINE_PARITY_SPACE 4
+
+/** @brief Start, eight data bits, parity and one stop bit: the most a
+ *         character produced by kline_char_levels() occupies. */
+#define KLINE_CHAR_LEVELS_MAX 11
+
+/**
+ * @brief The line levels of one asynchronous character, start bit first.
+ *
+ * Start bit low, @p data_bits data bits least significant first, the parity
+ * bit if any, one stop bit high. What a UART would put on the wire; used to
+ * bit bang rates the UART cannot reach, such as a host's 5 baud address word.
+ *
+ * @param data_bits 5 to 8.
+ * @param parity    One of KLINE_PARITY_*.
+ * @param levels    At least KLINE_CHAR_LEVELS_MAX entries.
+ * @return Number of levels written, or 0 for an argument out of range.
+ */
+size_t kline_char_levels(uint8_t byte, unsigned data_bits, unsigned parity,
+                         bool *levels);
+
 /* ------------------------------------------------------------------ *
  * Timing
  * ------------------------------------------------------------------ */

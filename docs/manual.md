@@ -594,3 +594,9 @@ for any damage arising from its use, including a bricked module, an immobilised 
 costs. You are responsible for everything you send to a vehicle. See the repository
 [README](https://github.com/maximus64/opendiag-firmware/blob/main/README.md) and
 [LICENSE](https://github.com/maximus64/opendiag-firmware/blob/main/LICENSE) for the full terms.
+
+### KKL cable mode
+
+`mode kkl` bridges USB serial settings, break and bytes to K-Line on OBD pin 7. The host implements KW1281/KWP2000 and timing; the adapter returns received bytes including echo. USB control changes are ordered against the stream so a five-baud address cannot be overtaken by a later baud setting. Rates below 40 baud use bit banging; 40 baud and above use the UART. The TJA1027 is electrically specified only up to 20 kBd.
+
+Use VCDS-Lite or another tool that accepts a generic CDC COM port. Full VCDS and FTDI-only applications are not supported. L-Line has no receive path. Closing the port returns to ELM327; select KKL again before the next session. The independent default-mode feature can optionally retain a mode between closes. Hardware timing and VCDS-Lite operation remain unverified.
