@@ -146,10 +146,9 @@ TEST(the_default_bit_rate_is_five_hundred_kilobit) {
     TEST_ASSERT_EQUAL_INT(500000, fake_can_last_baud());
 }
 
-TEST(a_bit_rate_the_driver_cannot_produce_is_refused) {
-    /* S7 is 800 kbit/s, which the TWAI timing tables here do not carry.
-     * Accepting it would run a vehicle bus at the wrong speed. */
-    TEST_ASSERT_EQUAL_STRING(SLCAN_NACK, slcan_ask("S7\r"));
+TEST(a_bit_rate_selector_outside_the_lawicel_table_is_refused) {
+    /* S0 through S8 are supported; S9 is outside the LAWICEL table. */
+    TEST_ASSERT_EQUAL_STRING(SLCAN_NACK, slcan_ask("S9\r"));
 
     slcan_open();
     TEST_ASSERT_EQUAL_INT(500000, fake_can_last_baud());

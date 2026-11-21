@@ -6,6 +6,7 @@
 #include "esp_app_desc.h"
 #include "esp_timer.h"
 #include "board.h"
+#include "can_frame.h"
 #include "isotp.h"
 #include "j2534.pb.h"
 #include "j2534_scheduler.h"
@@ -1008,8 +1009,7 @@ static uint32_t connect_channel(const opendiag_Connect *req) {
         pin1 = 6;
         pin2 = 14;
         allowed = J2534_29BIT | J2534_CAN_BOTH;
-        if (rate != 50000 && rate != 125000 && rate != 250000 &&
-            rate != 500000 && rate != 1000000)
+        if (can_bitrate_canonical(rate) == 0)
             return J2534_BAUD;
 
         break;
