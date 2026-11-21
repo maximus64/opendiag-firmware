@@ -65,7 +65,7 @@ static bool listen_only_active;
 /* The S3 has one TWAI controller; the GPIO matrix routes it to either
  * transceiver at open. ponytail: one bus at a time - two at once needs a
  * second controller (an external MCP2515 or a newer chip). */
-static bool aux_requested;
+static can_port_t port_requested = CAN_PORT_OBD;
 static gpio_num_t silent_pin = PIN_CAN0_SILENT; /* transceiver in use */
 static bool link_down_pending;
 static portMUX_TYPE task_notify_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -505,11 +505,12 @@ static esp_err_t can_setup(int baud_rate, bool manual, bool listen_only) {
      * with the engine and ABS on it): never drive it, whatever the client
      * asked for. */
 #if OPENDIAG_HAS_CAN1
-    if (aux_requested)
+    bool can1 = port_requested != CAN_PORT_OBD;
+    if (port_requested == CAN_PORT_AUX)
         listen_only = true;
-    silent_pin = aux_requested ? PIN_CAN1_SILENT : PIN_CAN0_SILENT;
+    silent_pin = can1 ? PIN_CAN1_SILENT : PIN_CAN0_SILENT;
 #else
-    silent_pin = PIN_CAN0_SILENT; /* no CAN1 on this board */
+    silent_pin = PIN_CAN0_SILENT;
 #endif
     manual_recovery = manual;
     listen_only_active = listen_only;
@@ -519,8 +520,8 @@ static esp_err_t can_setup(int baud_rate, bool manual, bool listen_only) {
         .io_cfg =
             {
 #if OPENDIAG_HAS_CAN1
-                .tx = aux_requested ? PIN_CAN1_TX : PIN_CAN0_TX,
-                .rx = aux_requested ? PIN_CAN1_RX : PIN_CAN0_RX,
+                .tx = can1 ? PIN_CAN1_TX : PIN_CAN0_TX,
+                .rx = can1 ? PIN_CAN1_RX : PIN_CAN0_RX,
 #else
                 .tx = PIN_CAN0_TX,
                 .rx = PIN_CAN0_RX,
@@ -663,25 +664,77 @@ esp_err_t can_bus_setup(int baud_rate) {
     return can_setup(baud_rate, false, false);
 }
 
-esp_err_t can_bus_use_aux(bool aux) {
+esp_err_t can_bus_set_port(can_port_t port) {
     /* The pins are taken at open; switching under an open bus would leave
      * the wrong transceiver un-silenced at close. */
     if (can_node)
         return ESP_ERR_INVALID_STATE;
 #if !OPENDIAG_HAS_CAN1
-    /* No AUX_CAN transceiver on this board: refuse before touching state. */
-    if (aux)
+    if (port != CAN_PORT_OBD)
         return ESP_ERR_NOT_SUPPORTED;
 #endif
-    aux_requested = aux;
+    if (port > CAN_PORT_MS)
+        return ESP_ERR_INVALID_ARG;
+    port_requested = port;
     return ESP_OK;
 }
 
-#if OPENDIAG_HAS_CAN1
-bool can_bus_aux(void) { return aux_requested; }
-#else
-bool can_bus_aux(void) { return false; }
-#endif
+can_port_t can_bus_port(void) { return port_requested; }
+
+const char *can_bus_port_name(can_port_t port) {
+    switch (port) {
+    case CAN_PORT_AUX:
+        return "aux (J3, listen-only)";
+    case CAN_PORT_MS:
+        return "ms (pins 3/11)";
+    default:
+        return "obd (pins 6/14)";
+    }
+}
+
+esp_err_t can_bus_use_aux(bool aux) {
+    return can_bus_set_port(aux ? CAN_PORT_AUX : CAN_PORT_OBD);
+}
+
+bool can_bus_aux(void) { return port_requested == CAN_PORT_AUX; }
+
+/* Dozens of frames on a running bus at either OBD bit rate. */
+#define CAN_LISTEN_FIRST_MS 150
+
+/**
+ * @brief Listen for a moment without driving the bus: is another bit rate
+ *        running here?
+ *
+ * At the wrong rate every frame on a running bus breaks a rule, so a
+ * listen-only node sees bus errors and never one valid frame. A silent bus
+ * shows neither and is not refused.
+ *
+ * @return ESP_OK to go ahead, ESP_ERR_INVALID_STATE for a bus at another
+ *         rate, or whatever kept the listen-only node from starting or
+ *         stopping.
+ */
+static esp_err_t can_listen_first(int baud_rate, bool manual) {
+    esp_err_t err = can_setup(baud_rate, manual, true);
+    if (err != ESP_OK)
+        return err;
+
+    vTaskDelay(pdMS_TO_TICKS(CAN_LISTEN_FIRST_MS));
+    /* Every valid frame takes a receive sequence number, queued or dropped. */
+    bool heard = bus_rx_sequence(&rx_epoch) != 0;
+    uint32_t errors = __atomic_load_n(&bus_errors, __ATOMIC_RELAXED);
+
+    err = can_bus_teardown();
+    if (err != ESP_OK)
+        return err;
+    if (!heard && errors) {
+        ESP_LOGW(TAG,
+                 "%d bit/s: %lu bus errors and no valid frame, another bit "
+                 "rate is running here - not transmitting",
+                 baud_rate, (unsigned long)errors);
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ESP_OK;
+}
 
 static esp_err_t can_ops_open(const bus_cfg_t *cfg) {
     /* The controller takes its rate at install time and cannot be retimed
@@ -689,6 +742,13 @@ static esp_err_t can_ops_open(const bus_cfg_t *cfg) {
     if (!cfg || cfg->bitrate == 0) {
         ESP_LOGE(TAG, "CAN needs a bit rate");
         return ESP_ERR_INVALID_ARG;
+    }
+
+    if (cfg->listen_first && !cfg->listen_only) {
+        esp_err_t err =
+            can_listen_first((int)cfg->bitrate, cfg->manual_recovery);
+        if (err != ESP_OK)
+            return err;
     }
 
     return can_setup((int)cfg->bitrate, cfg->manual_recovery,

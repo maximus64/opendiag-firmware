@@ -7,6 +7,7 @@
 #include "esp_err.h"
 #include "bus.h"
 #include "bus_tx.h"
+#include "can_bus.h"
 #include "comm_iface.h"
 
 /** Protocol grammars the firmware carries. Registered once, never removed. */
@@ -390,6 +391,14 @@ esp_err_t vif_pin_set(vif_owner_t owner, int obd_pin, vif_pin_mode_t m,
 
 /** @brief Release both pin claims held by @p owner. */
 esp_err_t vif_pin_release_all(vif_owner_t owner);
+
+/**
+ * @brief Pick the CAN port for the next open (can_bus_set_port()).
+ *
+ * Through vif because the MS port shares OBD pin 11 with a high side
+ * driver: refused while that pin is energised.
+ */
+esp_err_t vif_can_port_set(can_port_t port);
 
 /** @brief True while any connector pin is energised, whoever holds it. */
 bool vif_any_pin_active(void);
