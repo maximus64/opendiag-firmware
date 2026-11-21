@@ -143,6 +143,33 @@ TEST(mode_switches_the_link) {
     TEST_ASSERT_EQUAL_STRING("MODE slcan", ctrl("MODE"));
 }
 
+TEST(default_keeps_a_mode_after_its_client_leaves) {
+    TEST_ASSERT_TRUE(ctrl_ok("DEFAULT=slcan"));
+    TEST_ASSERT_EQUAL_STRING("DEFAULT slcan", g_out);
+    TEST_ASSERT_EQUAL_STRING("slcan", vif_link_frontend_name());
+
+    /* A KKL tool closes and reopens the port within one session. */
+    vif_link_down();
+    vif_link_service();
+    TEST_ASSERT_EQUAL_STRING("slcan", vif_link_frontend_name());
+
+    TEST_ASSERT_FALSE(ctrl_ok("DEFAULT=j1939"));
+    TEST_ASSERT_EQUAL_STRING("slcan", vif_link_default_frontend()->name);
+}
+
+static bool refuse(void) { return false; }
+
+TEST(a_default_that_refuses_to_start_is_not_kept) {
+    static const vif_frontend_t broken = {.name = "kkl", .start = refuse};
+
+    vif_frontend_register(&broken);
+    ctrl_ok("DEFAULT=kkl");
+
+    /* The link fell back to what was running, and so does the default. */
+    TEST_ASSERT_EQUAL_STRING("elm327", vif_link_frontend_name());
+    TEST_ASSERT_EQUAL_STRING("elm327", vif_link_default_frontend()->name);
+}
+
 TEST(a_command_is_case_insensitive) {
     /* A phone app writes what it likes, and the ELM327 grammar would have
      * upper-cased it anyway. */

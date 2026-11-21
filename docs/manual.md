@@ -594,3 +594,7 @@ for any damage arising from its use, including a bricked module, an immobilised 
 costs. You are responsible for everything you send to a vehicle. See the repository
 [README](https://github.com/maximus64/opendiag-firmware/blob/main/README.md) and
 [LICENSE](https://github.com/maximus64/opendiag-firmware/blob/main/LICENSE) for the full terms.
+
+### Choosing the default link mode
+
+`mode <name> default` in the shell or `DEFAULT=<name>` on the control channel selects a frontend and makes it the fallback after disconnect or RESET. It is retained only if the frontend starts successfully; it is not persisted across power cycles. The initial default remains ELM327.
