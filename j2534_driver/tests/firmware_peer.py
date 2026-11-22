@@ -18,6 +18,7 @@ class Firmware:
             "contract_reset": (c.c_int, []),
             "contract_stop": (c.c_int, []),
             "contract_inject": (c.c_int, [c.c_uint, c.c_void_p, c.c_size_t]),
+            "contract_stage_response": (c.c_int, [c.c_uint, c.c_void_p, c.c_size_t]),
             "contract_sent_count": (c.c_int, [c.c_uint]),
             "contract_sent": (c.c_int, [c.c_uint, c.c_uint, c.c_void_p, c.c_size_t]),
             "j2534_core_request": (c.c_size_t, [c.c_uint8, c.c_void_p, c.c_size_t, c.c_void_p]),
@@ -89,6 +90,13 @@ class Firmware:
             if self.core.contract_inject(protocol, data, len(data)):
                 raise ValueError("Invalid fake bus frame")
             self.core.j2534_core_poll()
+
+    def stage_response(self, data):
+        # CAN only. The frame is delivered after the firmware's next transmit, so
+        # a flow-control reply arrives after the first frame of a multi-frame send.
+        with self.lock:
+            if self.core.contract_stage_response(5, data, len(data)):
+                raise ValueError("Invalid fake CAN response")
 
     def sent(self, protocol=3):
         with self.lock:
