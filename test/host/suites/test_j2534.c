@@ -156,6 +156,26 @@ TEST(conflicting_open_does_not_reconfigure_existing_driver) {
     TEST_ASSERT_EQUAL_INT(500000, fake_can_last_baud());
     TEST_ASSERT_EQUAL_INT(J2534_EMPTY, read_message(ch));
 }
+TEST(connect_listen_only_vendor_bit_maps_to_bus_config) {
+    connect_can(0);
+    TEST_ASSERT_FALSE(fake_can_last_listen_only());
+    td_teardown();
+    td_setup();
+    connect_can(J2534_CONNECT_LISTEN_ONLY);
+    TEST_ASSERT_TRUE(fake_can_last_listen_only());
+    td_teardown();
+    td_setup();
+    /* The bit is CAN only: K-line still rejects it, as any unknown flag. */
+    command(opendiag_Request_connect_tag);
+    req.command.connect = (opendiag_Connect){.device = dev,
+                                             .protocol = J2534_ISO9141,
+                                             .flags = J2534_CONNECT_LISTEN_ONLY,
+                                             .baudrate = 10400,
+                                             .connector = 1,
+                                             .pins_count = 2,
+                                             .pins = {7, 15}};
+    TEST_ASSERT_EQUAL_INT(J2534_FLAGS, call());
+}
 TEST(shell_claim_is_respected) {
     vif_bus_cfg_t cfg = {.bitrate = 500000};
     TEST_ASSERT_EQUAL_INT(ESP_OK,
