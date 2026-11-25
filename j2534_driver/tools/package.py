@@ -40,7 +40,7 @@ def main():
     files["SHA256SUMS"] = sums.encode("ascii")
     epoch = max(315532800, int(os.environ.get("SOURCE_DATE_EPOCH", "315532800")))
     date = datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc).timetuple()[:6]
-    destination = directory / "opendiag-j2534-driver.zip"
+    destination = directory / "opendiag-j2534-driver-windows-x86.zip"
     with tempfile.NamedTemporaryFile(dir=directory, suffix=".zip", delete=False) as temporary:
         temporary_path = Path(temporary.name)
     try:
