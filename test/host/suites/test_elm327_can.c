@@ -1177,3 +1177,19 @@ TEST(failed_flow_control_keeps_can_open_for_the_next_request) {
     TEST_ASSERT_EQUAL_INT(teardowns, fake_can_teardown_count());
     TEST_ASSERT_EQUAL_HEX32(CAN_EFF_FLAG | 0x0CDA10F1, fake_can_sent(1)->id);
 }
+
+static const uint8_t body_ff[8] = {0x10, 0x0A, 0x61, 0x80, 1, 2, 3, 4};
+static const uint8_t body_cf0[8] = {0x20, 5, 6, 7, 8, 0, 0, 0};
+
+TEST(cra_flow_control_goes_to_the_request_id_and_sn0_is_accepted) {
+    on_can_11bit();
+    elm_ok("ATSH7E0\r");
+    fake_can_stage_response(0x7E8, 8, body_ff, 5);
+    fake_can_stage_response_at(0x7E8, 8, body_cf0, 1, 2);
+    TEST_ASSERT_EQUAL_STRING("7E8 10 0A 61 80 01 02 03 04 \r"
+                             "7E8 20 05 06 07 08 00 00 00 \r" ELM_PROMPT,
+                             elm_ask("2180\r"));
+    TEST_ASSERT_EQUAL_INT(2, fake_can_sent_count());
+    TEST_ASSERT_EQUAL_HEX32(0x7E0, fake_can_sent(1)->id);
+    TEST_ASSERT_EQUAL_HEX32(0x30, fake_can_sent(1)->data[0]);
+}
