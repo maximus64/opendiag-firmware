@@ -138,7 +138,7 @@ Bluetooth.
 | `CRA` | reset the Receive Address filters | |
 | `CRA hhh` | set CAN Receive Address to hhh | |
 | `CRA hhhhhhhh` | set the Rx Address to hhhhhhhh | |
-| `CS` | show CAN Status counts & freq | |
+| `CS` | show CAN Status counts & freq | ✅ error counts only |
 | `CSM0, CSM1` | Silent Monitoring off, or on | |
 | `CTM1` | set Timer Multiplier to 1 | |
 | `CTM5` | set Timer Multiplier to 5 | |
@@ -173,3 +173,8 @@ Bluetooth.
 | `PROGV p vvvvvvvv` | drive an OBD-II pin `p`, or release it |
 | `VIF PASSTHRU` | Select the J2534 binary frontend on the current data connection. |
 | `VIF SLCAN` | Select the SLCAN frontend on the current data connection. |
+
+
+### Additional implemented commands
+
+`AT CS` prints the open CAN controller transmit/receive error counters as `T:hh R:hh`.

@@ -11,6 +11,8 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "ble_uart.h"
+#include "board_features.h"
+#include "can_bus.h"
 #include "can_xfer.h"
 #include "common.h"
 #include "isotp.h"
@@ -20,7 +22,6 @@
 #include "sdkconfig.h"
 #include "timer.h"
 #include "utility.h"
-#include "board_features.h"
 #include "vif.h"
 
 /** Response bytes held between flushes. Sized for the longest single reply a
@@ -328,6 +329,8 @@ static bool elm327_kline_link(elm327_ctx_t *e, bus_link_t *out);
 static int elm327_kline_init(elm327_ctx_t *e, kline_init_mode_t mode);
 static void elm327_kline_reconcile(elm327_ctx_t *e);
 static void elm327_kline_apply_wakeup(elm327_ctx_t *e);
+
+static bool elm327_at_extra_command(elm327_ctx_t *e, const char *cmd);
 
 static size_t elm327_uart_read_bytes(elm327_ctx_t *e, uint8_t *buffer,
                                      size_t len, TickType_t ticks_to_wait) {
@@ -1410,6 +1413,8 @@ static void elm327_at_command_handler(elm327_ctx_t *e, const char *cmd) {
          * so there is nothing to switch; accepted so a client that asks is
          * not turned away. */
         elm327_send_string(e, "OK\r");
+    } else if (elm327_at_extra_command(e, cmd)) {
+        /* Answered by the extended command handler. */
     } else {
         elm327_send_string(e, "?\r");
     }
@@ -2955,6 +2960,26 @@ done:
      * nothing. */
     e->settings.auto_search = true;
     return ret;
+}
+
+static bool elm327_at_extra_command(elm327_ctx_t *e, const char *cmd) {
+    char out[24];
+    const char *reply = "OK\r";
+    if (strcmp(cmd, "CS") == 0) {
+        uint8_t tec = 0, rec = 0;
+        /* Read with the bus up: a closed controller has no counters, and the
+         * zeros it would report are not a measurement. */
+        if (elm327_bus(e) == VIF_BUS_CAN)
+            can_bus_error_counters(&tec, &rec);
+        snprintf(out, sizeof(out), "T:%02X R:%02X\r", tec, rec);
+        reply = out;
+    } else {
+        return false;
+    }
+
+    if (reply)
+        elm327_send_string(e, reply);
+    return true;
 }
 
 static void elm327_parse_command(elm327_ctx_t *e, const char *cmd) {

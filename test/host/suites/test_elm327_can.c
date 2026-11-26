@@ -1177,3 +1177,11 @@ TEST(failed_flow_control_keeps_can_open_for_the_next_request) {
     TEST_ASSERT_EQUAL_INT(teardowns, fake_can_teardown_count());
     TEST_ASSERT_EQUAL_HEX32(CAN_EFF_FLAG | 0x0CDA10F1, fake_can_sent(1)->id);
 }
+
+TEST(cs_reports_the_error_counters_of_the_open_bus) {
+    elm_echo_off();
+    TEST_ASSERT_EQUAL_STRING("T:00 R:00\r" ELM_PROMPT, elm_ask("ATCS\r"));
+    elm_ok(CAN_11BIT_500K);
+    fake_can_set_error_counters(5, 0x0A);
+    TEST_ASSERT_EQUAL_STRING("T:05 R:0A\r" ELM_PROMPT, elm_ask("ATCS\r"));
+}
