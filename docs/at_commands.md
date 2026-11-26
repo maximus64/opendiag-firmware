@@ -23,8 +23,8 @@ Bluetooth.
 | `L0, L1` | Linefeeds off, or on | ✅ |
 | `LP` | go to Low Power mode | |
 | `M0, M1` | Memory off, or on | ✅ |
-| `RD` | Read the stored Data byte | |
-| `SD hh` | Save Data byte hh | |
+| `RD` | Read the stored Data byte | ✅ |
+| `SD hh` | Save Data byte hh | ✅ RAM only |
 | `WS` | Warm Start (quick software reset) | ✅ |
 | `Z` | reset all | ✅ |
 | `@1` | display the device description | ✅ |
@@ -173,3 +173,8 @@ Bluetooth.
 | `PROGV p vvvvvvvv` | drive an OBD-II pin `p`, or release it |
 | `VIF PASSTHRU` | Select the J2534 binary frontend on the current data connection. |
 | `VIF SLCAN` | Select the SLCAN frontend on the current data connection. |
+
+
+### Additional implemented commands
+
+`AT SD hh` stores one byte and `AT RD` reads it. The value survives AT Z and reconnects in RAM; a power cycle restores FF.

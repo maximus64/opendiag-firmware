@@ -262,6 +262,9 @@ typedef struct {
 
 static elm327_ctx_t g_elm327;
 
+/* RAM survives AT Z and reconnects, not a power cycle. */
+static uint8_t elm327_saved_byte = 0xFF;
+
 enum elm327_protocol {
     ELM327_PROTO_AUTO = 0,      // Automatic
     ELM327_PROTO_J1850_PWM = 1, // SAE J1850 PWM (41.6 kbaud)
@@ -328,6 +331,8 @@ static bool elm327_kline_link(elm327_ctx_t *e, bus_link_t *out);
 static int elm327_kline_init(elm327_ctx_t *e, kline_init_mode_t mode);
 static void elm327_kline_reconcile(elm327_ctx_t *e);
 static void elm327_kline_apply_wakeup(elm327_ctx_t *e);
+
+static bool elm327_at_extra_command(elm327_ctx_t *e, const char *cmd);
 
 static size_t elm327_uart_read_bytes(elm327_ctx_t *e, uint8_t *buffer,
                                      size_t len, TickType_t ticks_to_wait) {
@@ -1410,6 +1415,8 @@ static void elm327_at_command_handler(elm327_ctx_t *e, const char *cmd) {
          * so there is nothing to switch; accepted so a client that asks is
          * not turned away. */
         elm327_send_string(e, "OK\r");
+    } else if (elm327_at_extra_command(e, cmd)) {
+        /* Answered by the extended command handler. */
     } else {
         elm327_send_string(e, "?\r");
     }
@@ -2955,6 +2962,28 @@ done:
      * nothing. */
     e->settings.auto_search = true;
     return ret;
+}
+
+static bool elm327_at_extra_command(elm327_ctx_t *e, const char *cmd) {
+    uint8_t b = 0;
+    char out[24];
+    const char *reply = "OK\r";
+    const char *bad = "?\r";
+    if (strncmp(cmd, "SD", 2) == 0) {
+        if (at_parse_byte(&cmd[2], &b))
+            reply = bad;
+        else
+            elm327_saved_byte = b;
+    } else if (strcmp(cmd, "RD") == 0) {
+        snprintf(out, sizeof(out), "%02X\r", elm327_saved_byte);
+        reply = out;
+    } else {
+        return false;
+    }
+
+    if (reply)
+        elm327_send_string(e, reply);
+    return true;
 }
 
 static void elm327_parse_command(elm327_ctx_t *e, const char *cmd) {
