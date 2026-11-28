@@ -2,8 +2,11 @@
 # x86_64 runs the host test suite; the cross targets are compile and link checks only, because
 # their binaries are not run on this build host.
 #
-# Build from the repository root and write the packages to build/j2534-dist/unix:
-#   docker build -f j2534_driver/Dockerfile.unix --target export --output type=local,dest=build/j2534-dist/unix .
+# Build from the repository root and write the packages to build/j2534-dist/unix. Pass the commit
+# time so ZIP entries carry it, as the Windows package does; without it they are dated 1980-01-01:
+#   docker build -f j2534_driver/Dockerfile.unix --target export \
+#     --build-arg SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) \
+#     --output type=local,dest=build/j2534-dist/unix .
 FROM debian:bookworm-slim@sha256:5ae3c39ebd15e229dcedd5cee596b2497182493d41ff162e824ba13fc1b2b867 AS base
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -24,14 +27,17 @@ WORKDIR /project
 COPY . .
 
 FROM base AS linux-x86_64
+ARG SOURCE_DATE_EPOCH
 RUN make -C j2534_driver -j2 BUILD_DIR=build/linux-x86_64/release test \
  && sh j2534_driver/tools/package_unix.sh j2534_driver/build/linux-x86_64/release /out opendiag-j2534-linux-x86_64
 
 FROM base AS linux-armhf
+ARG SOURCE_DATE_EPOCH
 RUN make -C j2534_driver -j2 CROSS_COMPILE=arm-linux-gnueabihf- BUILD_DIR=build/linux-armhf/release all \
  && sh j2534_driver/tools/package_unix.sh j2534_driver/build/linux-armhf/release /out opendiag-j2534-linux-armhf
 
 FROM base AS linux-arm64
+ARG SOURCE_DATE_EPOCH
 RUN make -C j2534_driver -j2 CROSS_COMPILE=aarch64-linux-gnu- BUILD_DIR=build/linux-arm64/release all \
  && sh j2534_driver/tools/package_unix.sh j2534_driver/build/linux-arm64/release /out opendiag-j2534-linux-arm64
 
