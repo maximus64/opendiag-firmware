@@ -208,12 +208,13 @@ jobs:
             --output type=local,dest=build/j2534-dist/unix .
 
       # The export directories are named by the Docker target (x86_64); the release names use x64.
-      - name: Zip each architecture
+      # Each package is already a ZIP from package_unix.sh, so it is only renamed into place.
+      - name: Collect each architecture's ZIP
         run: |
           for pair in x64:x86_64 armhf:armhf arm64:arm64; do
             name=${pair%%:*}
             arch=${pair##*:}
-            (cd "build/j2534-dist/unix/linux-$arch" && zip -q -j "../../opendiag-j2534-driver-linux-$name.zip" ./*)
+            cp "build/j2534-dist/unix/linux-$arch/opendiag-j2534-linux-$arch.zip" "build/j2534-dist/opendiag-j2534-driver-linux-$name.zip"
           done
 
       - name: Verify driver packages

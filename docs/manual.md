@@ -320,7 +320,7 @@ supported. This is a working subset of J2534, not a certified implementation. SC
 
 ### Installing
 
-1. Download `opendiag-j2534-driver.zip` from the
+1. Download `opendiag-j2534-driver-windows-x86.zip` from the
    [releases page](https://github.com/maximus64/opendiag-firmware/releases).
 2. Close any diagnostic applications.
 3. Extract the ZIP, keeping its files together.

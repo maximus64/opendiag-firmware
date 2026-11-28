@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     git \
     python3 \
+    zip \
     python3-protobuf \
     protobuf-compiler \
     gcc-arm-linux-gnueabihf \

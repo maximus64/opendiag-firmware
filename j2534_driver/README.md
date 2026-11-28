@@ -34,7 +34,7 @@ docker compose run --rm --build j2534-driver
 
 The container runs the host tests, then builds and checks the Windows package
 once using its i686 MSVCRT MinGW cross-compiler. The resulting archive is
-`build/docker/opendiag-j2534-driver.zip`.
+`build/docker/opendiag-j2534-driver-windows-x86.zip`.
 
 Install both DLLs from the same package; the 04.04 shim uses a private bridge in
 the native DLL to preserve its channel semantics.
@@ -53,9 +53,11 @@ the repository root in any shell:
 docker build -f j2534_driver/Dockerfile.unix --target export --output type=local,dest=build/j2534-dist/unix .
 ```
 
-Each architecture writes `opendiag-j2534-linux-<arch>.tar.gz` and a `SHA256SUMS` file to
-`build/j2534-dist/unix/linux-<arch>/`. The archive holds `libopendiag.so` (05.00 API),
-`libopendiag0404.so` (04.04 API) and `opendiag.ini`. Check it with `sha256sum --check SHA256SUMS`.
+Each architecture writes `opendiag-j2534-linux-<arch>.zip` and a `SHA256SUMS` file to
+`build/j2534-dist/unix/linux-<arch>/`. The ZIP holds `libopendiag.so` (05.00 API),
+`libopendiag0404.so` (04.04 API), `opendiag.ini` and a `SHA256SUMS` for those three files.
+Check the ZIP with `sha256sum --check SHA256SUMS` beside it, then check the extracted files with
+the `SHA256SUMS` inside the ZIP.
 
 The Linux `opendiag.ini` sets `COM=/dev/ttyACM0`, which is a placeholder. On Linux `COM` is a
 serial device path, not a Windows port name. Set it to the diagnostic data port (see the
