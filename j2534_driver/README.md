@@ -50,8 +50,12 @@ are cross-compiled and linked only, so test them on the target hardware. Run thi
 the repository root in any shell:
 
 ```sh
-docker build -f j2534_driver/Dockerfile.unix --target export --output type=local,dest=build/j2534-dist/unix .
+docker build -f j2534_driver/Dockerfile.unix --target export \
+  --build-arg SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) \
+  --output type=local,dest=build/j2534-dist/unix .
 ```
+
+`SOURCE_DATE_EPOCH` sets the timestamps on the files in each ZIP. Without it they are dated 1980-01-01.
 
 Each architecture writes `opendiag-j2534-linux-<arch>.zip` and a `SHA256SUMS` file to
 `build/j2534-dist/unix/linux-<arch>/`. The ZIP holds `libopendiag.so` (05.00 API),
