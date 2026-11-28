@@ -17,6 +17,7 @@
 #include "link.h"
 #include "nvs_flash.h"
 #include "pinout.h"
+#include "power.h"
 #include "sdkconfig.h"
 #include "shell.h"
 #include "slcan.h"
@@ -365,6 +366,12 @@ void app_main(void) {
         abort();
     }
 
+    /*
+     * Straight after the board is up: a timer wake-up with the engine still
+     * off goes back to sleep from here, before USB and BLE cost anything.
+     */
+    power_boot();
+
     /* Print chip information */
     esp_chip_info_t chip_info;
     uint32_t flash_size;
@@ -428,6 +435,9 @@ void app_main(void) {
 
     /* The data link, on whichever of USB CDC 0 and BLE has a client. */
     links_setup();
+
+    /* Sleep when the vehicle is parked and nobody is using the adapter. */
+    power_start();
 
     /* start shell */
     shell_loop();
