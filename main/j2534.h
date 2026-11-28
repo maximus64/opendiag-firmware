@@ -81,6 +81,13 @@ enum {
     J2534_K_ONLY = 4096,
 };
 
+/* OpenDIAG vendor bit in the PassThruConnect flags word (bit 30). It is not
+ * in J2534-1: the standard flags use bits 0-12, and bits 13-31 are reserved to
+ * SAE, so a conforming client never sets it. Off by default. CAN only; when
+ * set, the bus opens listen-only and the adapter never acknowledges frames or
+ * drives the bus. Transmits then fail, as on any listen-only node. */
+#define J2534_CONNECT_LISTEN_ONLY 0x40000000u
+
 #define J2534_REPEAT_MAX 10u
 
 typedef struct {

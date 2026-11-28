@@ -97,3 +97,19 @@ int contract_inject(unsigned protocol, const uint8_t *data, size_t len) {
     fake_bus_stage_stale(bus, data, len);
     return 0;
 }
+
+/*
+ * A CAN frame the bus delivers only after the firmware's next transmit, the
+ * way an ECU answers a request. A flow-control reply staged this way arrives
+ * after the first frame of a multi-frame send. Same encoding as
+ * contract_inject. CAN only.
+ */
+int contract_stage_response(unsigned protocol, const uint8_t *data, size_t len) {
+    if (protocol != J2534_CAN || len < 4 || len > 12)
+        return -1;
+    uint32_t id = 0;
+    for (unsigned i = 0; i < 4; i++)
+        id = id << 8 | data[i];
+    fake_can_stage_response(id, len - 4, data + 4, 0);
+    return 0;
+}

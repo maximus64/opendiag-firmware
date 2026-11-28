@@ -1007,7 +1007,7 @@ static uint32_t connect_channel(const opendiag_Connect *req) {
         bus = VIF_BUS_CAN;
         pin1 = 6;
         pin2 = 14;
-        allowed = J2534_29BIT | J2534_CAN_BOTH;
+        allowed = J2534_29BIT | J2534_CAN_BOTH | J2534_CONNECT_LISTEN_ONLY;
         if (rate != 50000 && rate != 125000 && rate != 250000 &&
             rate != 500000 && rate != 1000000)
             return J2534_BAUD;
@@ -1068,7 +1068,9 @@ static uint32_t connect_channel(const opendiag_Connect *req) {
     channel->rate = rate;
     /* Nothing received yet, so nothing left behind; what comes will wake. */
     channel->rx_drained = true;
-    vif_bus_cfg_t cfg = {.bitrate = rate, .manual_recovery = true};
+    vif_bus_cfg_t cfg = {.bitrate = rate,
+                         .manual_recovery = true,
+                         .listen_only = !!(flags & J2534_CONNECT_LISTEN_ONLY)};
 
     if (vif_bus_open(VIF_OWNER_LINK, bus, &cfg) != ESP_OK) {
         /* VIF retains failed claims for teardown; never forget those claims. */

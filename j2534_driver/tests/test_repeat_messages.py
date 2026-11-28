@@ -309,6 +309,19 @@ class HarnessTests(ContractTests):
                 session.write(data)
                 self.assertEqual(firmware.sent(protocol), [data])
 
+    def test_a_multi_frame_write_completes_with_the_staged_flow_control(self):
+        # The reply is staged before the write, so the fake bus delivers it only after the
+        # first frame. The write finishes only if the firmware sends the rest of the message.
+        payload = bytes(range(12))
+        with self.session(protocol=6) as (session, firmware):
+            session.flow_filter()
+            firmware.stage_response((0x7E8).to_bytes(4, "big") + bytes([0x30, 0x00, 0x00]))
+            session.write(b"\x00\x00\x07\xe0" + payload)
+            firmware.advance(100)
+            frames = firmware.sent(protocol=5)
+        self.assertEqual(frames, [b"\x00\x00\x07\xe0\x10\x0c" + payload[:6],
+                                  b"\x00\x00\x07\xe0\x21" + payload[6:]])
+
 
 class RepeatMessageTests(ContractTests):
     def test_null_required_arguments_are_rejected(self):
