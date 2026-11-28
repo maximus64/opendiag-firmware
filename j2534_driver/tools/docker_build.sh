@@ -29,12 +29,12 @@ SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
 
 make -C j2534_driver -j2 test
 make -C j2534_driver CROSS_COMPILE=i686-w64-mingw32- -j2 package
-archive=j2534_driver/build/win32/release/opendiag-j2534-driver.zip
+archive=j2534_driver/build/win32/release/opendiag-j2534-driver-windows-x86.zip
 
-staged_archive=$(mktemp "$output_dir/.opendiag-j2534-driver.XXXXXX")
+staged_archive=$(mktemp "$output_dir/.opendiag-j2534-driver-windows-x86.XXXXXX")
 trap 'rm -f -- "$staged_archive"' EXIT
 cp "$archive" "$staged_archive"
 chmod 644 "$staged_archive"
 chown --reference="$output_dir" "$staged_archive"
-mv -f -- "$staged_archive" "$output_dir/opendiag-j2534-driver.zip"
-echo "Driver package: build/docker/opendiag-j2534-driver.zip"
+mv -f -- "$staged_archive" "$output_dir/opendiag-j2534-driver-windows-x86.zip"
+echo "Driver package: build/docker/opendiag-j2534-driver-windows-x86.zip"

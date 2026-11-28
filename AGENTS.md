@@ -153,5 +153,6 @@ Layering, top to bottom (`app_main` in `main/main.c` wires it up):
   `test(j2534): …`.
 - Comments in this codebase explain *why* (invariants, ownership, threading); keep that style when
   touching neighbouring code.
-- CI (`.github/workflows/firmware.yml`) runs both Docker builds on PRs to `main`/`dev`; `v*.*.*`
-  tags publish a release, and the firmware `manifest.json` version must match the tag.
+- CI (`.github/workflows/firmware.yml`) runs the firmware and Windows J2534 Docker builds, and the
+  Linux J2534 driver build, on PRs to `main`/`dev`; `v*.*.*` tags publish a release, and the firmware
+  `manifest.json` version must match the tag.

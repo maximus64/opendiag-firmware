@@ -93,17 +93,20 @@ jobs:
                       f"but board.json maintainers give {sorted(expected)}"
                   )
 
-          matrix = json.dumps({"board": boards})
+          entries = [
+              {"board": board, "name": json.loads(Path("boards", board, "board.json").read_text())["name"]}
+              for board in boards
+          ]
+          matrix = json.dumps({"include": entries})
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
               output.write(f"matrix={matrix}\n")
           PY
 
   build:
-    name: Build ${{ matrix.board }}
+    name: Build ${{ matrix.name }} firmware
     needs: [boards]
     strategy:
-      matrix:
-        board: ${{ fromJSON(needs.boards.outputs.matrix).board }}
+      matrix: ${{ fromJSON(needs.boards.outputs.matrix) }}
       fail-fast: false
     runs-on: ubuntu-24.04
     # A board job builds twice under --verify, so it needs more time than the other jobs.
@@ -155,8 +158,8 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  j2534-driver:
-    name: Test and build Windows J2534 driver package
+  j2534-windows:
+    name: Test and build J2534 driver (Windows)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -175,13 +178,85 @@ jobs:
         run: |
           verification_dir=$(mktemp -d)
           trap 'rm -rf -- "$verification_dir"' EXIT
-          unzip build/docker/opendiag-j2534-driver.zip -d "$verification_dir"
+          unzip build/docker/opendiag-j2534-driver-windows-x86.zip -d "$verification_dir"
           (cd "$verification_dir" && sha256sum --check SHA256SUMS)
 
       - name: Upload driver package
         uses: actions/upload-artifact@v7
         with:
-          path: build/docker/opendiag-j2534-driver.zip
+          name: opendiag-j2534-driver-windows-x86.zip
+          path: build/docker/opendiag-j2534-driver-windows-x86.zip
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
+
+  # Linux driver libraries for x64, armhf and arm64, built in Docker. Each architecture is zipped
+  # separately, like the Windows package, so each one can be downloaded and released on its own.
+  j2534-linux:
+    name: Test and build J2534 driver (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Build and test in Docker
+        run: |
+          docker build -f j2534_driver/Dockerfile.unix --target export \
+            --build-arg SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" \
+            --output type=local,dest=build/j2534-dist/unix .
+
+      # The export directories are named by the Docker target (x86_64); the release names use x64.
+      # Each package is already a ZIP from package_unix.sh, so it is only renamed into place.
+      - name: Collect each architecture's ZIP
+        run: |
+          for pair in x64:x86_64 armhf:armhf arm64:arm64; do
+            name=${pair%%:*}
+            arch=${pair##*:}
+            cp "build/j2534-dist/unix/linux-$arch/opendiag-j2534-linux-$arch.zip" "build/j2534-dist/opendiag-j2534-driver-linux-$name.zip"
+          done
+
+      - name: Verify driver packages
+        run: |
+          shopt -s nullglob
+          verification_root=$(mktemp -d)
+          trap 'rm -rf -- "$verification_root"' EXIT
+          packages=(build/j2534-dist/opendiag-j2534-driver-linux-*.zip)
+          if (( ${#packages[@]} != 3 )); then
+            echo "Expected three Linux driver zips, found ${#packages[@]}" >&2
+            exit 1
+          fi
+          for package in "${packages[@]}"; do
+            verification_dir="$verification_root/$(basename "$package" .zip)"
+            unzip "$package" -d "$verification_dir"
+            (cd "$verification_dir" && sha256sum --check SHA256SUMS)
+          done
+
+      - name: Upload x64 driver package
+        uses: actions/upload-artifact@v7
+        with:
+          name: opendiag-j2534-driver-linux-x64.zip
+          path: build/j2534-dist/opendiag-j2534-driver-linux-x64.zip
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload armhf driver package
+        uses: actions/upload-artifact@v7
+        with:
+          name: opendiag-j2534-driver-linux-armhf.zip
+          path: build/j2534-dist/opendiag-j2534-driver-linux-armhf.zip
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload arm64 driver package
+        uses: actions/upload-artifact@v7
+        with:
+          name: opendiag-j2534-driver-linux-arm64.zip
+          path: build/j2534-dist/opendiag-j2534-driver-linux-arm64.zip
           archive: false
           if-no-files-found: error
           retention-days: 30
@@ -235,7 +310,7 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: [build, j2534-driver]
+    needs: [build, j2534-windows, j2534-linux]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -252,11 +327,12 @@ jobs:
           merge-multiple: true
           skip-decompress: true
 
-      - name: Download verified driver package
+      - name: Download verified driver packages
         uses: actions/download-artifact@v8
         with:
-          name: opendiag-j2534-driver.zip
+          pattern: opendiag-j2534-driver-*.zip
           path: dist
+          merge-multiple: true
           skip-decompress: true
 
       - name: Verify release packages
@@ -269,7 +345,12 @@ jobs:
           fi
           verification_root=$(mktemp -d)
           trap 'rm -rf -- "$verification_root"' EXIT
-          for package in "${firmware_packages[@]}" dist/opendiag-j2534-driver.zip; do
+          j2534_driver_packages=(dist/opendiag-j2534-driver-*.zip)
+          if (( ${#j2534_driver_packages[@]} == 0 )); then
+            echo "No opendiag-j2534-driver-<os>-<arch>.zip found in dist/" >&2
+            exit 1
+          fi
+          for package in "${firmware_packages[@]}" "${j2534_driver_packages[@]}"; do
             verification_dir="$verification_root/$(basename "$package" .zip)"
             unzip "$package" -d "$verification_dir"
             (cd "$verification_dir" && sha256sum --check SHA256SUMS)
@@ -287,13 +368,18 @@ jobs:
             echo "No opendiag-firmware-<board>.zip found in dist/" >&2
             exit 1
           fi
+          j2534_driver_packages=(dist/opendiag-j2534-driver-*.zip)
+          if (( ${#j2534_driver_packages[@]} == 0 )); then
+            echo "No opendiag-j2534-driver-<os>-<arch>.zip found in dist/" >&2
+            exit 1
+          fi
           release_flags=(--verify-tag --generate-notes --title "$RELEASE_TAG")
           if [[ "$RELEASE_TAG" == *-* ]]; then
             release_flags+=(--prerelease)
           fi
           gh release create "$RELEASE_TAG" \
             "${firmware_packages[@]}" \
-            dist/opendiag-j2534-driver.zip \
+            "${j2534_driver_packages[@]}" \
             "${release_flags[@]}"
 
       # A release made with GITHUB_TOKEN does not trigger other workflows, so ask for the docs
